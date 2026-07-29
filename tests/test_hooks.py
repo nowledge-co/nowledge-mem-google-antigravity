@@ -457,6 +457,24 @@ class TestManageSkills(unittest.TestCase):
         self.assertEqual(manage_skills.compute_trust_badge({"stage": "active"}), "Checked")
         self.assertEqual(manage_skills.compute_trust_badge({"stage": "candidate"}), "Draft")
 
+    @patch("manage_skills.make_request")
+    def test_restore_merge(self, mock_make_request):
+        mock_make_request.return_value = {"status": "success", "skill_id": "makefile-pattern"}
+        
+        import io
+        from contextlib import redirect_stdout
+        f = io.StringIO()
+        with redirect_stdout(f):
+            manage_skills.restore_merge_command({"apiUrl": "http://localhost", "apiKey": ""}, "makefile-pattern")
+        output = f.getvalue()
+        self.assertIn("Success: Merge undone", output)
+        mock_make_request.assert_called_once_with(
+            {"apiUrl": "http://localhost", "apiKey": ""},
+            "/skills/makefile-pattern/restore-merge",
+            method='POST'
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
+

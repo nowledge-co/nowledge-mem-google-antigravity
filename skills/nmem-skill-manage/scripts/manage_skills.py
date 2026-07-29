@@ -389,6 +389,18 @@ def install_command(config, skill_id, workspace_root, ignore_git):
         sys.exit(1)
 
 
+def restore_merge_command(config, skill_id):
+    try:
+        print(f"Undoing merge for skill '{skill_id}'...")
+        res = make_request(config, f"/skills/{skill_id}/restore-merge", method='POST')
+        print("Success: Merge undone.")
+        if res:
+            print(json.dumps(res, indent=2))
+    except Exception as e:
+        sys.stderr.write(f"Error restoring merged skill: {e}\n")
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Nowledge Mem Skill Manager for Google Antigravity")
     subparsers = parser.add_subparsers(dest='command', required=True)
@@ -406,6 +418,10 @@ def main():
     install_parser.add_argument('workspace_root', help="Path to workspace root directory")
     install_parser.add_argument('--ignore', action='store_true', help="Ignore the installed skill locally in Git (via .git/info/exclude)")
 
+    # Restore Merge
+    restore_parser = subparsers.add_parser('restore-merge', help="Undo a Skill merge and restore the absorbed skill")
+    restore_parser.add_argument('skill_id', help="ID of the archived skill to restore")
+
     args = parser.parse_args()
     config = load_config()
 
@@ -415,6 +431,9 @@ def main():
         suggest_command(config, args.workspace_root)
     elif args.command == 'install':
         install_command(config, args.skill_id, args.workspace_root, args.ignore)
+    elif args.command == 'restore-merge':
+        restore_merge_command(config, args.skill_id)
 
 if __name__ == '__main__':
     main()
+

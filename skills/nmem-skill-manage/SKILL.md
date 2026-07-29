@@ -55,3 +55,11 @@ python3 hooks/nmem_entrypoint.py skill-manage install <skill_id> <workspace-root
 
 ### Step 4: Verify
 Verify that the files have been written under `<workspace-root>/.agents/skills/` and notify the user.
+
+### Step 5: Undo a Skill merge
+If you need to revert a Skill merge (restore the absorbed Skill and remove the merge's pending evidence from the kept Skill), run:
+```bash
+python3 hooks/nmem_entrypoint.py skill-manage restore-merge <skill_id>
+```
+Note: This option is only available until that evidence is applied or changed.
+
