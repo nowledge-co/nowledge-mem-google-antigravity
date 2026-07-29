@@ -5,6 +5,16 @@ All notable changes to the Nowledge Mem Google Antigravity plugin will be docume
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-07-30
+
+### Added
+- Added `restore-merge` subcommand in the skill manager CLI (`manage_skills.py`) to reverse accidental skill merges.
+- Enforced proper gating classifications in `nmem-gate.py` to auto-allow read-only MCP queries and properly gate new mutations/destructive actions.
+
+### Fixed
+- Added Git worktree and submodule compatibility by resolving `.git` file pointers during skill installations.
+- Implemented robust token rotation auto-reload and retries on REST HTTP 401/403 errors.
+
 ## [0.1.2] - 2026-06-23
 
 ### Added

@@ -1,6 +1,6 @@
 {
   "name": "nowledge-mem-google-antigravity",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Google Antigravity plugin for Nowledge Mem with startup context, memory rules, and agent skills.",
   "author": {
     "name": "Nowledge Co",
