@@ -52,7 +52,12 @@ def main():
         "explore_graph", "query_sources", "query_library", "read_source_content", 
         "read_artifact_content", "search_source_chunks", "search_artifact_chunks", 
         "analyze_source_data", "analyze_artifact_data", "mem_fs",
-        "get_memory_by_id", "memory_neighbors", "report_skill_outcome"
+        "get_memory_by_id", "memory_neighbors", "report_skill_outcome",
+        "memory_evolves_chain", "memory_relation_suggest", "memory_relation_list",
+        "find_skills", "suggest_skill_check", "list_spaces", "get_space_profile",
+        "query_by_labels", "get_node_details", "find_entity_relations",
+        "compute_subgraph_pagerank", "find_bridge_nodes", "query_shortest_path",
+        "check_claims", "list_timeline_reviews"
     }
     if sub_tool in read_only:
         emit({
@@ -63,7 +68,7 @@ def main():
         return
 
     # 2. Destructive operations (hard confirmation)
-    if sub_tool in {"memory_delete", "thread_delete", "memory_relation_delete"}:
+    if sub_tool in {"memory_delete", "thread_delete", "memory_relation_delete", "entity_delete", "label_delete"}:
         emit({
             "decision": "force_ask",
             "reason": f"Confirmation required to delete knowledge graph data ({sub_tool})"
@@ -71,7 +76,12 @@ def main():
         return
 
     # 3. Writes/Mutations (intent-based)
-    if sub_tool in {"memory_add", "memory_update", "memory_relation_add", "memory_supersede"}:
+    if sub_tool in {
+        "memory_add", "memory_update", "memory_relation_add", "memory_supersede",
+        "memory_relation_update", "memory_evolves_revise", "create_artifact",
+        "create_skill", "propose_skill_improvement", "entity_merge", "label_merge",
+        "schedule_follow_up", "resolve_timeline_review"
+    }:
         transcript_path = data.get("transcriptPath")
         if transcript_path and os.path.exists(transcript_path):
             try:

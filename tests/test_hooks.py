@@ -295,6 +295,51 @@ class TestNmemGate(unittest.TestCase):
         # Should fall back to "allow" since it is not an nmem tool
         self.assertEqual(payload["decision"], "allow")
 
+    @patch("nmem_gate.read_hook_input")
+    @patch("sys.stdout.write")
+    @patch("sys.stdout.flush")
+    def test_nmem_gate_new_tools_classification(self, mock_flush, mock_write, mock_input):
+        # 1. New read-only tool
+        mock_input.return_value = {
+            "toolCall": {
+                "name": "call_mcp_tool",
+                "args": {
+                    "ServerName": "nowledge-mem",
+                    "ToolName": "list_timeline_reviews"
+                }
+            }
+        }
+        nmem_gate.main()
+        written = "".join(call.args[0] for call in mock_write.call_args_list)
+        payload = json.loads(written)
+        self.assertEqual(payload["decision"], "allow")
+        mock_write.reset_mock()
+
+        # 2. New destructive tool
+        mock_input.return_value = {
+            "toolCall": {
+                "name": "mcp_nowledge-mem_entity_delete",
+                "args": {"id": "ent-1"}
+            }
+        }
+        nmem_gate.main()
+        written = "".join(call.args[0] for call in mock_write.call_args_list)
+        payload = json.loads(written)
+        self.assertEqual(payload["decision"], "force_ask")
+        mock_write.reset_mock()
+
+        # 3. New write/mutation tool without intent
+        mock_input.return_value = {
+            "toolCall": {
+                "name": "mcp_nowledge-mem_resolve_timeline_review",
+                "args": {"event_id": "evt-1", "action": "dismiss"}
+            }
+        }
+        nmem_gate.main()
+        written = "".join(call.args[0] for call in mock_write.call_args_list)
+        payload = json.loads(written)
+        self.assertEqual(payload["decision"], "ask")
+
 
 class TestNmemStatus(unittest.TestCase):
     
