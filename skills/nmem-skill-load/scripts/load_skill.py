@@ -53,6 +53,25 @@ def make_request(config, path, method='GET', body=None):
             res_body = res.read().decode('utf-8')
             return json.loads(res_body) if res_body else {}
     except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            try:
+                new_config = load_config()
+                config.update(new_config)
+                url = f"{config['apiUrl']}{path}"
+                headers = {
+                    'Content-Type': 'application/json',
+                    'APP': 'Google Antigravity'
+                }
+                if config['apiKey']:
+                    headers['Authorization'] = f"Bearer {config['apiKey']}"
+                    headers['X-MEM-API-Key'] = config['apiKey']
+                req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method)
+                with urllib.request.urlopen(req, timeout=10) as res:
+                    res_body = res.read().decode('utf-8')
+                    return json.loads(res_body) if res_body else {}
+            except Exception:
+                pass
+
         err_msg = e.read().decode('utf-8')
         try:
             err_data = json.loads(err_msg)

@@ -277,6 +277,31 @@ def http_request(endpoint: str, method: str = "GET", payload: dict | None = None
             if resp.status in (200, 201):
                 body = resp.read().decode("utf-8")
                 return json.loads(body) if body else {}
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+                sys.stderr.write("Authorization failure (401/403). Retrying with reloaded config...\n")
+            api_url, api_key = get_effective_config()
+            url = f"{api_url}{endpoint}"
+            headers = {
+                "Content-Type": "application/json",
+                "APP": "Google Antigravity"
+            }
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+                headers["X-MEM-API-Key"] = api_key
+            req = urllib.request.Request(url, data=data, headers=headers, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    if resp.status in (200, 201):
+                        body = resp.read().decode("utf-8")
+                        return json.loads(body) if body else {}
+            except Exception as retry_err:
+                if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+                    sys.stderr.write(f"Retry HTTP request to {url} failed: {retry_err}\n")
+        else:
+            if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+                sys.stderr.write(f"HTTP request to {url} failed: {e}\n")
     except Exception as e:
         if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
             sys.stderr.write(f"HTTP request to {url} failed: {e}\n")

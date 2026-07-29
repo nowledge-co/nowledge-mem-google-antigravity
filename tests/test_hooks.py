@@ -104,13 +104,20 @@ class TestNmemShared(unittest.TestCase):
             if os.path.exists(tf_path):
                 os.unlink(tf_path)
 
+    @patch("threading.Thread")
     @patch("nmem_shared._nmem_command")
     @patch("nmem_shared.run_nmem_command")
-    def test_sync_host_skills_async(self, mock_run_cmd, mock_nmem_cmd):
+    def test_sync_host_skills_async(self, mock_run_cmd, mock_nmem_cmd, mock_thread):
         mock_nmem_cmd.return_value = "/usr/bin/nmem"
-        import time
+        
+        # Make the mocked Thread's start call target immediately
+        def mock_start():
+            target = mock_thread.call_args[1].get('target')
+            if target:
+                target()
+        mock_thread.return_value.start.side_effect = mock_start
+        
         nmem_shared.sync_host_skills_async()
-        time.sleep(0.1)
         self.assertTrue(mock_run_cmd.called)
         calls = [c[0][0] for c in mock_run_cmd.call_args_list]
         self.assertIn(["skills", "connect", "antigravity"], calls)
@@ -150,7 +157,8 @@ class TestSessionStart(unittest.TestCase):
     @patch("nmem_shared.emit")
     @patch("nmem_shared.run_nmem_command")
     @patch("subprocess.Popen")
-    def test_session_start_ephemeral_injection(self, mock_popen, mock_run, mock_emit, mock_input):
+    @patch("nmem_shared.sync_host_skills_async")
+    def test_session_start_ephemeral_injection(self, mock_sync, mock_popen, mock_run, mock_emit, mock_input):
         mock_input.return_value = {"invocationNum": 0}
         
         # Mock Context Bundle output
@@ -474,7 +482,33 @@ class TestManageSkills(unittest.TestCase):
             method='POST'
         )
 
+    @patch("urllib.request.urlopen")
+    @patch("manage_skills.load_config")
+    def test_make_request_token_rotation_retry(self, mock_load_config, mock_urlopen):
+        import urllib.error
+        import io
+        
+        # 1st call raises 401
+        err = urllib.error.HTTPError("http://localhost/skills", 401, "Unauthorized", {}, None)
+        err.fp = io.BytesIO(b'{"detail": "Token expired"}')
+        
+        # 2nd call returns success
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"status": "ok"}'
+        mock_resp.__enter__.return_value = mock_resp
+        
+        mock_urlopen.side_effect = [err, mock_resp]
+        mock_load_config.return_value = {"apiUrl": "http://localhost", "apiKey": "new_key"}
+        
+        config = {"apiUrl": "http://localhost", "apiKey": "old_key"}
+        res = manage_skills.make_request(config, "/skills")
+        
+        self.assertEqual(res, {"status": "ok"})
+        self.assertEqual(config["apiKey"], "new_key")
+        self.assertEqual(mock_urlopen.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
