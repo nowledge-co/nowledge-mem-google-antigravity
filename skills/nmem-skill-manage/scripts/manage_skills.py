@@ -242,6 +242,26 @@ def suggest_command(config, workspace_root):
         sys.stderr.write(f"Error suggesting skills: {e}\n")
         sys.exit(1)
 
+def get_git_dir(workspace_root):
+    from pathlib import Path
+    git_path = Path(workspace_root) / ".git"
+    if not git_path.exists():
+        return None
+    if git_path.is_dir():
+        return git_path
+    if git_path.is_file():
+        try:
+            content = git_path.read_text(encoding='utf-8').strip()
+            if content.startswith("gitdir:"):
+                gitdir_path = content.split("gitdir:", 1)[1].strip()
+                resolved_path = Path(gitdir_path)
+                if not resolved_path.is_absolute():
+                    resolved_path = (git_path.parent / resolved_path).resolve()
+                return resolved_path
+        except Exception:
+            pass
+    return None
+
 def install_command(config, skill_id, workspace_root, ignore_git):
     try:
         # 1. Fetch skill metadata to check stage
@@ -342,15 +362,15 @@ def install_command(config, skill_id, workspace_root, ignore_git):
 
         # 6. Git Exclude config
         if ignore_git:
-            git_dir = os.path.join(workspace_root, '.git')
-            if os.path.exists(git_dir):
-                exclude_path = os.path.join(git_dir, 'info', 'exclude')
-                os.makedirs(os.path.dirname(exclude_path), exist_ok=True)
+            git_dir = get_git_dir(workspace_root)
+            if git_dir and git_dir.exists():
+                exclude_path = git_dir / 'info' / 'exclude'
+                os.makedirs(exclude_path.parent, exist_ok=True)
                 
                 # Check if already excluded
                 already_excluded = False
                 exclude_line = f".agents/skills/{clean_name}/"
-                if os.path.exists(exclude_path):
+                if exclude_path.exists():
                     with open(exclude_path, 'r', encoding='utf-8') as ef:
                         lines = ef.read().splitlines()
                         if any(line.strip() == exclude_line for line in lines):
@@ -367,6 +387,7 @@ def install_command(config, skill_id, workspace_root, ignore_git):
     except Exception as e:
         sys.stderr.write(f"Error during installation: {e}\n")
         sys.exit(1)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Nowledge Mem Skill Manager for Google Antigravity")

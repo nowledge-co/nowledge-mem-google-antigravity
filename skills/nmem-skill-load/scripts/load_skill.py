@@ -154,6 +154,25 @@ def fetch_skill(skill_id):
             
     return {}
 
+def get_git_dir(workspace_root):
+    git_path = Path(workspace_root) / ".git"
+    if not git_path.exists():
+        return None
+    if git_path.is_dir():
+        return git_path
+    if git_path.is_file():
+        try:
+            content = git_path.read_text(encoding='utf-8').strip()
+            if content.startswith("gitdir:"):
+                gitdir_path = content.split("gitdir:", 1)[1].strip()
+                resolved_path = Path(gitdir_path)
+                if not resolved_path.is_absolute():
+                    resolved_path = (git_path.parent / resolved_path).resolve()
+                return resolved_path
+        except Exception:
+            pass
+    return None
+
 def install_skill(skill_id, workspace_root, ignore=False):
     data = fetch_skill(skill_id)
     body = data.get('body') or data.get('content') or data.get('markdown') or ""
@@ -171,8 +190,10 @@ def install_skill(skill_id, workspace_root, ignore=False):
     target_file.write_text(body, encoding='utf-8')
 
     if ignore:
-        exclude_file = Path(workspace_root) / ".git" / "info" / "exclude"
-        if exclude_file.parent.exists():
+        git_dir = get_git_dir(workspace_root)
+        if git_dir and git_dir.exists():
+            exclude_file = git_dir / "info" / "exclude"
+            exclude_file.parent.mkdir(parents=True, exist_ok=True)
             rel_entry = f".agents/skills/{skill_folder}/"
             current_exclude = ""
             if exclude_file.exists():
@@ -190,6 +211,7 @@ def install_skill(skill_id, workspace_root, ignore=False):
         'path': str(target_file),
         'ignored': ignore
     }
+
 
 def main():
     parser = argparse.ArgumentParser(description="Nowledge Mem On-Demand Skill Loader")
