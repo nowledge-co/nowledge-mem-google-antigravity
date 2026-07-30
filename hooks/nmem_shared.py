@@ -295,6 +295,7 @@ def http_request(endpoint: str, method: str = "GET", payload: dict | None = None
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     if resp.status in (200, 201):
                         body = resp.read().decode("utf-8")
+                        e.close()
                         return json.loads(body) if body else {}
             except Exception as retry_err:
                 if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
@@ -302,6 +303,7 @@ def http_request(endpoint: str, method: str = "GET", payload: dict | None = None
         else:
             if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                 sys.stderr.write(f"HTTP request to {url} failed: {e}\n")
+        e.close()
     except Exception as e:
         if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
             sys.stderr.write(f"HTTP request to {url} failed: {e}\n")

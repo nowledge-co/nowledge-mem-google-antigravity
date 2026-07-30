@@ -153,12 +153,13 @@ class TestNmemShared(unittest.TestCase):
 
 class TestSessionStart(unittest.TestCase):
     
+    @patch("nmem_shared.http_request")
     @patch("nmem_shared.read_hook_input")
     @patch("nmem_shared.emit")
     @patch("nmem_shared.run_nmem_command")
     @patch("subprocess.Popen")
     @patch("nmem_shared.sync_host_skills_async")
-    def test_session_start_ephemeral_injection(self, mock_sync, mock_popen, mock_run, mock_emit, mock_input):
+    def test_session_start_ephemeral_injection(self, mock_sync, mock_popen, mock_run, mock_emit, mock_input, mock_http):
         mock_input.return_value = {"invocationNum": 0}
         
         # Mock Context Bundle output

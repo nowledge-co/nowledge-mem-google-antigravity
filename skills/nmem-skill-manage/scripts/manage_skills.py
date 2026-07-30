@@ -71,11 +71,13 @@ def make_request(config, path, method='GET', body=None):
                 req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method)
                 with urllib.request.urlopen(req, timeout=15) as res:
                     res_body = res.read().decode('utf-8')
+                    e.close()
                     return json.loads(res_body) if res_body else {}
             except Exception:
                 pass
 
         err_msg = e.read().decode('utf-8')
+        e.close()
         try:
             err_data = json.loads(err_msg)
             message = err_data.get('detail', str(e))
