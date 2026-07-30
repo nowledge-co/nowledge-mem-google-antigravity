@@ -431,6 +431,33 @@ class TestNmemEntrypoint(unittest.TestCase):
             nmem_entrypoint.main()
             mock_status_main.assert_called_once()
 
+    @patch("importlib.import_module")
+    def test_subcommand_session_start(self, mock_import_module):
+        mock_module = MagicMock()
+        mock_import_module.return_value = mock_module
+        with patch.object(sys, "argv", ["nmem_entrypoint.py", "session-start"]):
+            nmem_entrypoint.main()
+            mock_import_module.assert_called_once_with("session-start")
+            mock_module.main.assert_called_once()
+
+    @patch("importlib.import_module")
+    def test_subcommand_session_end(self, mock_import_module):
+        mock_module = MagicMock()
+        mock_import_module.return_value = mock_module
+        with patch.object(sys, "argv", ["nmem_entrypoint.py", "session-end"]):
+            nmem_entrypoint.main()
+            mock_import_module.assert_called_once_with("session-end")
+            mock_module.main.assert_called_once()
+
+    @patch("importlib.import_module")
+    def test_subcommand_gate(self, mock_import_module):
+        mock_module = MagicMock()
+        mock_import_module.return_value = mock_module
+        with patch.object(sys, "argv", ["nmem_entrypoint.py", "gate"]):
+            nmem_entrypoint.main()
+            mock_import_module.assert_called_once_with("nmem-gate")
+            mock_module.main.assert_called_once()
+
 
 class TestLoadSkill(unittest.TestCase):
     

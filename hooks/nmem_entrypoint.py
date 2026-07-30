@@ -23,17 +23,20 @@ def main():
         nmem_status.main()
 
     elif cmd == "session-start":
-        import session_start
+        import importlib
+        session_start = importlib.import_module("session-start")
         sys.argv = [sys.argv[0]] + args
         session_start.main()
 
     elif cmd == "session-end":
-        import session_end
+        import importlib
+        session_end = importlib.import_module("session-end")
         sys.argv = [sys.argv[0]] + args
         session_end.main()
 
     elif cmd == "gate":
-        import nmem_gate
+        import importlib
+        nmem_gate = importlib.import_module("nmem-gate")
         sys.argv = [sys.argv[0]] + args
         nmem_gate.main()
 
