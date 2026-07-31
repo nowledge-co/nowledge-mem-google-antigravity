@@ -7,6 +7,13 @@
         "timeout": 10
       }
     ],
+    "PostInvocation": [
+      {
+        "type": "command",
+        "command": "python3 hooks/nmem_entrypoint.py post-invocation || python hooks/nmem_entrypoint.py post-invocation || echo {}",
+        "timeout": 10
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "call_mcp_tool|mcp_nowledge-mem_.*|run_command",
@@ -14,6 +21,18 @@
           {
             "type": "command",
             "command": "python3 hooks/nmem_entrypoint.py gate || python hooks/nmem_entrypoint.py gate || echo {\"decision\":\"ask\"}",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "call_mcp_tool|mcp_nowledge-mem_.*|write_to_file|replace_file_content|multi_replace_file_content",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 hooks/nmem_entrypoint.py post-tool-use || python hooks/nmem_entrypoint.py post-tool-use || echo {}",
             "timeout": 10
           }
         ]

@@ -1,0 +1,10 @@
+{
+  "display_name": "Nowledge Mem Background Sync",
+  "description": "Background sync daemon for retrying unsynced sessions and refreshing connected host skills.",
+  "command": "python3",
+  "args": [
+    "../../hooks/session-start.py",
+    "--retry-only"
+  ],
+  "restart_policy": "on-failure"
+}

@@ -204,6 +204,19 @@ class TestSessionEnd(unittest.TestCase):
         # Verify show and import commands were executed
         self.assertEqual(mock_run.call_count, 2)
 
+    @patch("nmem_shared.read_hook_input")
+    @patch("nmem_shared.emit")
+    @patch("nmem_shared.run_nmem_command")
+    def test_session_end_skips_when_not_fully_idle(self, mock_run, mock_emit, mock_input):
+        mock_input.return_value = {
+            "conversationId": "conv-12345",
+            "transcriptPath": "/fake/transcript.jsonl",
+            "fullyIdle": False
+        }
+        session_end.main()
+        mock_emit.assert_called_once_with({})
+        mock_run.assert_not_called()
+
 
 class TestNmemGate(unittest.TestCase):
     

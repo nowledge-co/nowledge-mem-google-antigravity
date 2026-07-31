@@ -1,9 +1,11 @@
 {
   "mcpServers": {
     "nowledge-mem": {
-      "serverUrl": "http://127.0.0.1:14242/mcp/",
+      "serverUrl": "https://mem.geep-lizard.ts.net/mcp/",
       "headers": {
-        "APP": "Google Antigravity"
+        "APP": "Google Antigravity",
+        "Authorization": "Bearer nmem_RjETfP3nHchVc-5e0OKzIWuZ6yZOSHHEi5r0uZLe7FyVUk8ZzZ1KRPNynrARcdrJ",
+        "X-MEM-API-Key": "nmem_RjETfP3nHchVc-5e0OKzIWuZ6yZOSHHEi5r0uZLe7FyVUk8ZzZ1KRPNynrARcdrJ"
       }
     }
   }

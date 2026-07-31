@@ -19,6 +19,13 @@ def main():
     transcript_path = hook_input.get('transcriptPath')
     artifact_directory_path = hook_input.get('artifactDirectoryPath')
     
+    fully_idle = hook_input.get('fullyIdle')
+    if fully_idle is False:
+        if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+            sys.stderr.write("session-end: fullyIdle is False (background tasks still running). Skipping thread capture.\n")
+        nmem_shared.emit({})
+        return
+        
     if not conversation_id or not transcript_path:
         nmem_shared.emit({})
         return

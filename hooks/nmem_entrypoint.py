@@ -40,6 +40,18 @@ def main():
         sys.argv = [sys.argv[0]] + args
         nmem_gate.main()
 
+    elif cmd in ("post-invocation", "post_invocation"):
+        import importlib
+        post_inv = importlib.import_module("post-invocation")
+        sys.argv = [sys.argv[0]] + args
+        post_inv.main()
+
+    elif cmd in ("post-tool-use", "post_tool_use"):
+        import importlib
+        post_tu = importlib.import_module("post-tool-use")
+        sys.argv = [sys.argv[0]] + args
+        post_tu.main()
+
     elif cmd in ("skill-load", "load-skill"):
         load_skill_script = HOOKS_DIR.parent / "skills" / "nmem-skill-load" / "scripts" / "load_skill.py"
         if load_skill_script.exists():
