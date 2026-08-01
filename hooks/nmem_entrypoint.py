@@ -91,9 +91,50 @@ def main():
             sys.stderr.write(f"Error: Could not find {propose_script}\n")
             sys.exit(1)
 
+    elif cmd in ("artifact-update", "update-artifact"):
+        artifact_script = HOOKS_DIR.parent / "scripts" / "update_artifact.py"
+        if artifact_script.exists():
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("update_artifact", str(artifact_script))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            sys.argv = [sys.argv[0]] + args
+            mod.main()
+        else:
+            sys.stderr.write(f"Error: Could not find {artifact_script}\n")
+            sys.exit(1)
+
+    elif cmd in ("wm-update", "update-working-memory", "working-memory-update"):
+        wm_script = HOOKS_DIR.parent / "scripts" / "update_working_memory.py"
+        if wm_script.exists():
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("update_working_memory", str(wm_script))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            sys.argv = [sys.argv[0]] + args
+            mod.main()
+        else:
+            sys.stderr.write(f"Error: Could not find {wm_script}\n")
+            sys.exit(1)
+
+    elif cmd in ("rule-manage", "manage-rules", "rule", "rules"):
+        rule_script = HOOKS_DIR.parent / "scripts" / "manage_rules.py"
+        if rule_script.exists():
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("manage_rules", str(rule_script))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            sys.argv = [sys.argv[0]] + args
+            mod.main()
+        else:
+            sys.stderr.write(f"Error: Could not find {rule_script}\n")
+            sys.exit(1)
+
     else:
         sys.stderr.write(f"Unknown subcommand: {cmd}\n")
+        sys.stderr.write("Available subcommands: status, session-start, session-end, gate, skill-load, skill-manage, skill-propose, artifact-update, wm-update, rule-manage\n")
         sys.exit(1)
 
 if __name__ == "__main__":
     main()
+

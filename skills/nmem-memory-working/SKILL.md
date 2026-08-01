@@ -29,10 +29,23 @@ If the runtime already knows the current project or agent lane, add `--space "<s
 - When resuming work after a break
 - When the user asks what they are focused on now
 - When the current task clearly depends on recent priorities or active initiatives
+- **When updating focus areas or briefings**: Use `wm-update` entrypoint script.
+
+## Updating Working Memory In-Place
+
+To update daily focus areas or briefing in Working Memory safely:
+```bash
+python3 hooks/nmem_entrypoint.py wm-update /path/to/updated_working_memory.md
+```
+Or supply raw string content:
+```bash
+python3 hooks/nmem_entrypoint.py wm-update --content "# Focus Areas\n- Priority 1..."
+```
 
 ## Usage Pattern
 
 - Read Context Bundle or Working Memory once near the start of a session.
 - If Context Bundle was already loaded and includes Working Memory, do not read Working Memory again.
 - Reuse that context mentally instead of re-reading on every turn.
-- Refresh only if the user asks, the session context changed materially, or a long-running session clearly needs it.
+- Refresh or update only if the user asks, active focus areas change, or a long-running session needs it.
+
