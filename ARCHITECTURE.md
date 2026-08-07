@@ -59,15 +59,22 @@ flowchart TD
   - **Force Confirm**: Destructive operations (`memory_delete`, `thread_delete`, `memory_relation_delete`) return `{"decision": "force_ask"}`.
   - **Intent-Based Write Allow**: Write tools (`memory_add`, `memory_update`, etc.) check recent conversation steps for intent keywords (`save`, `remember`, `store`, `nmem`, `distill`, `handoff`). If found, returns `{"decision": "allow"}`.
 
-### 3. Stop Hook (`hooks/session-end.py`)
+### 3. PostInvocation Hook (`hooks/post-invocation.py`)
+- **Trigger**: Runs after each model invocation completes.
+- **Execution Flow**:
+  1. Checks for pending unsynced offline sessions (`~/.nowledge-mem/antigravity_unsynced.json`) via `nmem_shared.get_unsynced_sessions()`.
+  2. If pending items exist, emits `injectSteps` with an `ephemeralMessage` warning informing the agent mid-session.
+
+### 4. Stop Hook (`hooks/session-end.py`)
 - **Trigger**: Runs when the Antigravity session terminates.
 - **Execution Flow**:
-  1. Reads `conversationId` and `transcriptPath` from stdin.
-  2. Extracts user prompts (`USER_EXPLICIT`) and model responses (`MODEL`).
-  3. Checks thread existence via `HTTP GET /threads/<id>` or `nmem t show <id>`.
-  4. Appends or imports the full transcript into Nowledge Mem under the conversation ID.
-  5. If backend calls fail, saves the session to `~/.nowledge-mem/antigravity_unsynced.json` via file-locked append for automatic background retry.
-  6. Scans for approved `learning_proposal.md` artifacts and syncs them to rules (`nmem rules upsert`), skills (`nmem skills enroll`), or memories (`nmem memories add`).
+  1. Reads `conversationId`, `transcriptPath`, and `fullyIdle` from stdin.
+  2. If `fullyIdle: false` (background tasks still running), skips thread capture and defers to the final idle stop.
+  3. Extracts user prompts (`USER_EXPLICIT`) and model responses (`MODEL`).
+  4. Checks thread existence via `HTTP GET /threads/<id>` or `nmem t show <id>`. If all transcript messages match server thread messages, returns success immediately.
+  5. If leading messages match, uses `POST /threads/<id>/reconcile-tail` to append only missing trailing messages incrementally.
+  6. If backend calls fail, saves the session to `~/.nowledge-mem/antigravity_unsynced.json` via file-locked append for automatic background retry.
+  7. Scans for approved `learning_proposal.md` artifacts and syncs them to rules (`nmem rules upsert`), skills (`nmem skills enroll`), or memories (`nmem memories add`).
 
 ---
 
