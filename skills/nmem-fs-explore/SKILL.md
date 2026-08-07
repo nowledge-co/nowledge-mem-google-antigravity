@@ -35,6 +35,9 @@ Nowledge FS projects data as a virtual file tree:
    - Use `find [PATH] --unit-type TYPE --label LABEL` to search by structure/metadata.
    - Use `grep QUERY [PATH]` for exact-string matching across memories, threads, and artifacts.
 5. **Write canonical files**: Write memories only to `/memories/by-id/<id>.memory.md` (or let the server assign one if writing a new memory). Use `memory_add` or standard CLI wrappers.
+6. **Knowledge & Wiki Export**:
+   - Inspect `/wiki/` entities, topics, and crystal pages to view compiled reference knowledge.
+   - Use Open Knowledge Format (OKF) or Wiki exports (`/api/library/okf-export` or `/api/library/wiki-export`) to bundle synthesized knowledge graphs into portable Markdown sets for the local workspace.
 
 ## Commands Reference
 
@@ -42,9 +45,11 @@ Run the MCP tool `mem_fs` with the `command` argument:
 
 - `capabilities` or `caps`: Discover capabilities.
 - `ls /memories/by-type/procedure`: List directory contents.
+- `ls /wiki/`: List compiled wiki entities, topics, and crystals.
 - `stat /threads/by-id/<thread-id>.thread.jsonl`: Check metadata/line count.
 - `cat /memories/by-id/<uuid>.memory.md`: Read file body and frontmatter.
 - `cat /threads/by-id/<thread-id>.thread.jsonl --line 50 --lines 20`: Read a window of a thread.
+- `cat /wiki/<entity-or-topic>.md`: Inspect synthesized wiki article.
 - `find /memories --unit-type decision --label project-x`: Find specific memories.
 - `grep "regex-query" /threads --regex`: Perform regex search.
 - `recall "session state strategy" --in /memories`: Find relevant memories semantically.
