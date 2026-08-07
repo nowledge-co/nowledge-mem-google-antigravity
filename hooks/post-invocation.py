@@ -8,9 +8,26 @@ import nmem_shared
 
 def main():
     try:
-        _hook_input = nmem_shared.read_hook_input()
+        hook_input = nmem_shared.read_hook_input()
         # PostInvocation handler can return injectSteps or terminationBehavior.
-        # Default empty response allows standard turn progression.
+        # Check if there are pending unsynced offline sessions or warning signals
+        # that should be injected mid-turn.
+        unsynced = nmem_shared.get_unsynced_sessions()
+        if isinstance(unsynced, dict) and len(unsynced) > 0:
+            count = len(unsynced)
+            msg = (
+                f"[Nowledge Mem Warning] There are {count} pending offline session(s) "
+                "queued in ~/.nowledge-mem/antigravity_unsynced.json waiting to be synchronized."
+            )
+            nmem_shared.emit({
+                "injectSteps": [
+                    {
+                        "ephemeralMessage": msg
+                    }
+                ]
+            })
+            return
+
         nmem_shared.emit({})
     except Exception:
         nmem_shared.emit({})
