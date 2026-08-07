@@ -22,6 +22,7 @@ def import_module_from_path(name, path):
 
 session_start = import_module_from_path("session_start", str(HOOKS_DIR / "session-start.py"))
 session_end = import_module_from_path("session_end", str(HOOKS_DIR / "session-end.py"))
+post_invocation = import_module_from_path("post_invocation", str(HOOKS_DIR / "post-invocation.py"))
 nmem_gate = import_module_from_path("nmem_gate", str(HOOKS_DIR / "nmem-gate.py"))
 nmem_status = import_module_from_path("nmem_status", str(HOOKS_DIR / "nmem_status.py"))
 
@@ -175,6 +176,35 @@ class TestSessionStart(unittest.TestCase):
         payload = args[0]
         self.assertIn("injectSteps", payload)
         self.assertIn("nowledge_context_bundle", payload["injectSteps"][0]["ephemeralMessage"])
+
+
+class TestPostInvocation(unittest.TestCase):
+    
+    @patch("nmem_shared.get_unsynced_sessions")
+    @patch("nmem_shared.read_hook_input")
+    @patch("nmem_shared.emit")
+    def test_post_invocation_injects_warning_when_unsynced_exists(self, mock_emit, mock_input, mock_unsynced):
+        mock_input.return_value = {"invocationNum": 1}
+        mock_unsynced.return_value = {"conv-1": {"title": "Test"}}
+        
+        post_invocation.main()
+        
+        mock_emit.assert_called_once()
+        args, _ = mock_emit.call_args
+        payload = args[0]
+        self.assertIn("injectSteps", payload)
+        self.assertIn("pending offline session(s)", payload["injectSteps"][0]["ephemeralMessage"])
+
+    @patch("nmem_shared.get_unsynced_sessions")
+    @patch("nmem_shared.read_hook_input")
+    @patch("nmem_shared.emit")
+    def test_post_invocation_emits_empty_when_no_unsynced(self, mock_emit, mock_input, mock_unsynced):
+        mock_input.return_value = {"invocationNum": 1}
+        mock_unsynced.return_value = {}
+        
+        post_invocation.main()
+        
+        mock_emit.assert_called_once_with({})
 
 
 class TestSessionEnd(unittest.TestCase):
