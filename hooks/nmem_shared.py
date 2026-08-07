@@ -476,6 +476,18 @@ def save_unsynced_session(conv_id: str, messages: list, title: str, space: str |
         if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
             sys.stderr.write(f"Warning: Failed to write to unsynced sessions file: {e}\n")
 
+def get_unsynced_sessions() -> dict:
+    """Return dict of pending unsynced sessions from the queue file."""
+    config_dir = Path("~/.nowledge-mem").expanduser()
+    queue_path = config_dir / "antigravity_unsynced.json"
+    if not queue_path.exists():
+        return {}
+    try:
+        data = json.loads(queue_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
 def retry_unsynced_sessions() -> None:
     """Attempt to sync any unsynced sessions in the queue."""
     config_dir = Path("~/.nowledge-mem").expanduser()
