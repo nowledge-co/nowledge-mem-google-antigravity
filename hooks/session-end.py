@@ -92,13 +92,13 @@ def main():
                 elif len(clean_text) > 0:
                     title = clean_text
                     
+            matched_count = 0
             # Try HTTP transport first
             try:
                 space_param = f"?space={space}" if space else ""
                 check_res = nmem_shared.http_request(f"/threads/{conversation_id}{space_param}", method="GET", timeout=3.0)
                 if isinstance(check_res, dict) and (check_res.get("id") or check_res.get("thread_id") or "messages" in check_res):
                     existing_msgs = check_res.get("messages") or []
-                    matched_count = 0
                     if isinstance(existing_msgs, list):
                         for old_m, new_m in zip(existing_msgs, messages):
                             old_role = old_m.get("role") or old_m.get("sender")
@@ -135,7 +135,8 @@ def main():
                     if isinstance(app_res, dict) and not app_res.get("error"):
                         success = True
                         break
-                elif isinstance(check_res, dict):
+                elif isinstance(check_res, dict) and (check_res.get("error") in ("not_found", "thread_not_found") or check_res.get("status") == 404 or not check_res):
+                    # Explicit 404 / thread not found -> import new thread
                     import_payload = {
                         "id": conversation_id,
                         "title": title,
@@ -166,26 +167,28 @@ def main():
                     sys.stderr.write(f"nmem t show execution failed: {e}\n")
                     
             if thread_exists:
-                # Append messages to existing thread
-                append_args = ['t']
-                if space:
-                    append_args.extend(['--space', space])
-                append_args.extend([
-                    'append',
-                    conversation_id,
-                    '-m', json.dumps(messages)
-                ])
-                try:
-                    result = nmem_shared.run_nmem_command(append_args, timeout=5)
-                    if result.returncode == 0:
-                        success = True
-                        break
-                    else:
+                # Append trailing unmatched messages to existing thread
+                cli_append_msgs = messages[matched_count:] if matched_count > 0 else messages
+                if cli_append_msgs:
+                    append_args = ['t']
+                    if space:
+                        append_args.extend(['--space', space])
+                    append_args.extend([
+                        'append',
+                        conversation_id,
+                        '-m', json.dumps(cli_append_msgs)
+                    ])
+                    try:
+                        result = nmem_shared.run_nmem_command(append_args, timeout=5)
+                        if result.returncode == 0:
+                            success = True
+                            break
+                    except Exception as e:
                         if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
-                            sys.stderr.write(f"nmem t append failed: {result.stderr}\n")
-                except Exception as e:
-                    if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
-                        sys.stderr.write(f"nmem t append execution failed: {e}\n")
+                            sys.stderr.write(f"nmem t append execution failed: {e}\n")
+                else:
+                    success = True
+                    break
             else:
                 # Import new thread
                 import_args = [

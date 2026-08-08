@@ -514,6 +514,7 @@ def retry_unsynced_sessions() -> None:
                 space = data.get("space")
                 host_agent_id = data.get("host_agent_id")
 
+                matched_count = 0
                 success = False
                 # Try HTTP transport first
                 try:
@@ -521,7 +522,6 @@ def retry_unsynced_sessions() -> None:
                     check_res = http_request(f"/threads/{conv_id}{space_param}", method="GET", timeout=3.0)
                     if isinstance(check_res, dict) and (check_res.get("id") or check_res.get("thread_id") or "messages" in check_res):
                         existing_msgs = check_res.get("messages") or []
-                        matched_count = 0
                         if isinstance(existing_msgs, list):
                             for old_m, new_m in zip(existing_msgs, messages):
                                 old_role = old_m.get("role") or old_m.get("sender")
@@ -548,7 +548,8 @@ def retry_unsynced_sessions() -> None:
                             app_res = http_request(f"/threads/{conv_id}/append", method="POST", payload=app_payload, timeout=5.0)
                             if isinstance(app_res, dict) and not app_res.get("error"):
                                 success = True
-                    elif isinstance(check_res, dict):
+                    elif isinstance(check_res, dict) and (check_res.get("error") in ("not_found", "thread_not_found") or check_res.get("status") == 404 or not check_res):
+                        # Explicit 404 / thread not found -> import new thread
                         import_payload = {
                             "id": conv_id,
                             "title": title,
@@ -578,21 +579,25 @@ def retry_unsynced_sessions() -> None:
                         pass
 
                     if thread_exists:
-                        # Append messages
-                        append_args = ['t']
-                        if space:
-                            append_args.extend(['--space', space])
-                        append_args.extend([
-                            'append',
-                            conv_id,
-                            '-m', json.dumps(messages)
-                        ])
-                        try:
-                            result = run_nmem_command(append_args, timeout=5)
-                            if result.returncode == 0:
-                                success = True
-                        except Exception:
-                            pass
+                        # Append trailing unmatched messages to existing thread
+                        cli_append_msgs = messages[matched_count:] if matched_count > 0 else messages
+                        if cli_append_msgs:
+                            append_args = ['t']
+                            if space:
+                                append_args.extend(['--space', space])
+                            append_args.extend([
+                                'append',
+                                conv_id,
+                                '-m', json.dumps(cli_append_msgs)
+                            ])
+                            try:
+                                result = run_nmem_command(append_args, timeout=5)
+                                if result.returncode == 0:
+                                    success = True
+                            except Exception:
+                                pass
+                        else:
+                            success = True
                     else:
                         # Import new thread
                         import_args = [
