@@ -293,6 +293,25 @@ class TestNmemGate(unittest.TestCase):
     @patch("nmem_gate.read_hook_input")
     @patch("sys.stdout.write")
     @patch("sys.stdout.flush")
+    def test_nmem_gate_trigger_memory_catchup(self, mock_flush, mock_write, mock_input):
+        mock_input.return_value = {
+            "toolCall": {
+                "name": "call_mcp_tool",
+                "args": {
+                    "ServerName": "nowledge-mem",
+                    "ToolName": "trigger_memory_catchup"
+                }
+            }
+        }
+        nmem_gate.main()
+        written = "".join(call.args[0] for call in mock_write.call_args_list)
+        payload = json.loads(written)
+        self.assertEqual(payload["decision"], "allow")
+        self.assertIn("Auto-allowing read-only tool trigger_memory_catchup", payload["reason"])
+
+    @patch("nmem_gate.read_hook_input")
+    @patch("sys.stdout.write")
+    @patch("sys.stdout.flush")
     @patch("os.path.exists")
     @patch("builtins.open", new_callable=mock_open, read_data='{"source":"USER_EXPLICIT","content":"Please save the session"}\n')
     def test_nmem_gate_write_intent(self, mock_file, mock_exists, mock_flush, mock_write, mock_input):
