@@ -43,7 +43,11 @@ Example structure of the printed rich status output:
 ### Conversation Sync Status
 
 - **Synced Thread**: Yes (Thread contains 12 messages)
-- **Local Unsynced Queue**: Empty (All sessions synced successfully)
+### Memory Health & Maintenance
+
+If the user requests memory maintenance or if diagnostic checks reveal stale/contradictory context, trigger a memory health catchup pass using the MCP `trigger_memory_catchup` tool:
+- `trigger_memory_catchup(horizon="today")` for recent 24-hour maintenance.
+- `trigger_memory_catchup(horizon="3")` or `horizon="7"` when resuming after offline gaps or performing deep audits.
 
 ---
 
