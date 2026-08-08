@@ -235,6 +235,31 @@ To minimize user interruption (via terminal permission popups), optimize latency
 4. **Diagnostics & Troubleshooting (Prefer CLI)**:
    - **Rule**: Use the `nmem` CLI for human workflows, debugging, and initial setup diagnostics (e.g. `nmem status` or `nmem config client set`).
 
+## Memory Health & Catchup (`trigger_memory_catchup`)
+
+Use `trigger_memory_catchup` strictly for memory health maintenance, decay re-scoring, and index compaction. Do **not** use it as a generic background-task runner or standard search replacement.
+
+### 1. WHEN to Trigger
+- **User Request**: When the user explicitly asks to run memory maintenance, check memory health, refresh memory decay, or process review backlogs.
+- **Offline Resumption**: When starting a session after a multi-day offline break (3+ days) or after flushing offline session buffers.
+- **Contradictory Context**: When in-session retrieval finds contradictory facts or outdated decisions needing decay re-scoring.
+- **Milestone Synthesis**: Prior to generating major milestone crystals, handoffs, or wiki articles.
+
+### 2. WHY to Trigger
+- **Decay Re-scoring**: Forces server-side decay re-evaluations (`POST /agent/trigger/decay-refresh`), boosting recent facts and deprecating obsolete context.
+- **Review Inbox Generation**: Projects actionable review cards onto the Timeline Review Inbox (`GET /agent/feed/events?review_only=true`).
+- **Index Compaction**: Compacts LanceDB vector indexes and updates KuzuDB graph importance weights.
+
+### 3. WHEN NOT to Trigger
+- Do **NOT** trigger on routine conversation turns or standard tool calls.
+- Do **NOT** use for standard fact/thread retrieval (use `memory_search` or `mem_fs recall` instead).
+
+### 4. Horizon Parameter Selection
+- `horizon: "today"` (last 24 hours) - default for daily re-syncs.
+- `horizon: "3"` (last 3 days) - for resuming after a weekend or multi-day gap.
+- `horizon: "7"` (last 7 days) - for weekly maintenance or deep health audits.
+- `horizon: "off"` - to cancel or disable active catch-up passes.
+
 ## Status & Diagnostics
 
 ## Dynamic Skill Discovery & On-Demand Loading (`/nmem-skill-load`)
