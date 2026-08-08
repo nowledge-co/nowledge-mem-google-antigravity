@@ -15,8 +15,8 @@ def main():
     args = parser.parse_args()
     conv_id = args.conv_id or os.environ.get("NMEM_CONVERSATION_ID") or os.environ.get("CONVERSATION_ID") or "active-session"
 
-    # 1. Read environment variables
-    space = os.environ.get("NMEM_SPACE") or os.environ.get("NMEM_SPACE_ID") or "default"
+    # 1. Read environment variables / resolve active space
+    space = nmem_shared.resolve_space()
     host_agent_id = os.environ.get("NMEM_HOST_AGENT_ID")
     if not host_agent_id:
         try:

@@ -185,6 +185,118 @@ def get_effective_config() -> tuple[str, str | None]:
 
     return api_url.rstrip("/"), api_key
 
+_SPACES_CACHE = {"timestamp": 0.0, "spaces": None}
+
+def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
+    """Fetch known spaces from the Nowledge Mem backend with in-memory & file caching."""
+    global _SPACES_CACHE
+    now = time.time()
+    if _SPACES_CACHE["spaces"] is not None and (now - _SPACES_CACHE["timestamp"]) < ttl:
+        return _SPACES_CACHE["spaces"]
+
+    # 1. Try file cache first (~/.nowledge-mem/spaces_cache.json) if valid
+    cache_file = Path("~/.nowledge-mem/spaces_cache.json").expanduser()
+    if cache_file.is_file():
+        try:
+            mtime = cache_file.stat().st_mtime
+            if (now - mtime) < ttl:
+                data = json.loads(cache_file.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    _SPACES_CACHE["spaces"] = data
+                    _SPACES_CACHE["timestamp"] = now
+                    return data
+        except Exception:
+            pass
+
+    spaces_data = None
+
+    # 2. Try HTTP GET /spaces
+    res = http_request("/spaces", method="GET", timeout=3.0)
+    if isinstance(res, dict):
+        if "spaces" in res and isinstance(res["spaces"], list):
+            spaces_data = res["spaces"]
+        elif "items" in res and isinstance(res["items"], list):
+            spaces_data = res["items"]
+    elif isinstance(res, list):
+        spaces_data = res
+
+    # 3. Fallback to CLI nmem --json spaces list
+    if spaces_data is None:
+        try:
+            cmd_res = run_nmem_command(["--json", "spaces", "list"], timeout=5)
+            if cmd_res.returncode == 0 and cmd_res.stdout:
+                parsed = json.loads(cmd_res.stdout)
+                if isinstance(parsed, dict) and "spaces" in parsed and isinstance(parsed["spaces"], list):
+                    spaces_data = parsed["spaces"]
+                elif isinstance(parsed, list):
+                    spaces_data = parsed
+        except Exception:
+            pass
+
+    if spaces_data is not None:
+        _SPACES_CACHE["spaces"] = spaces_data
+        _SPACES_CACHE["timestamp"] = now
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(json.dumps(spaces_data), encoding="utf-8")
+        except Exception:
+            pass
+        return spaces_data
+
+    return None
+
+def resolve_space(cwd: str | Path | None = None) -> str:
+    """Resolve active space following priority:
+    1. Explicit environment variables (NMEM_SPACE or NMEM_SPACE_ID)
+    2. Explicit workspace configuration (.nmemspace or .nowledge/config.json)
+    3. Dynamically detected space from workspace directory IF it exists on backend
+    4. Fallback to 'default' space
+    """
+    # 1. Check explicit environment override
+    env_space = os.environ.get("NMEM_SPACE", "").strip() or os.environ.get("NMEM_SPACE_ID", "").strip()
+    if env_space:
+        return env_space
+
+    # 2. Check explicit workspace config file
+    target_dir = Path(cwd).resolve() if cwd else Path.cwd().resolve()
+    for cfg_path in (target_dir / ".nmemspace", target_dir / ".nowledge" / "config.json"):
+        if cfg_path.is_file():
+            try:
+                if cfg_path.name == ".nmemspace":
+                    val = cfg_path.read_text(encoding="utf-8").strip()
+                    if val:
+                        return val
+                else:
+                    data = json.loads(cfg_path.read_text(encoding="utf-8"))
+                    val = data.get("space") or data.get("space_id")
+                    if isinstance(val, str) and val.strip():
+                        return val.strip()
+            except Exception:
+                pass
+
+    # 3. Dynamic space auto-detection from workspace directory
+    candidate = target_dir.name.strip()
+    if not candidate or candidate.lower() == "default":
+        return "default"
+
+    # Check if candidate space exists on backend
+    existing_spaces = get_existing_spaces()
+    if existing_spaces is not None:
+        cand_lower = candidate.lower()
+        for space_obj in existing_spaces:
+            if not isinstance(space_obj, dict):
+                continue
+            s_id = str(space_obj.get("id", "")).strip()
+            s_key = str(space_obj.get("key", "")).strip()
+            s_name = str(space_obj.get("name", "")).strip()
+            aliases = [str(a).strip().lower() for a in space_obj.get("aliases", []) if a]
+
+            if cand_lower in (s_id.lower(), s_key.lower(), s_name.lower()) or cand_lower in aliases:
+                return s_id or s_key or candidate
+
+    # Dynamically detected space does not exist on backend and user has not explicitly set project space -> fall back to default
+    return "default"
+
 def sync_mcp_config_file(mcp_config_path: str = None) -> bool:
     """Synchronize plugin mcp_config.json with effective client configuration
     (~/.nowledge-mem/config.json or NMEM_API_URL/NMEM_API_KEY env vars).
@@ -443,6 +555,8 @@ class FileLock:
 
 def save_unsynced_session(conv_id: str, messages: list, title: str, space: str | None, host_agent_id: str | None) -> None:
     """Save a failed session to the unsynced queue file."""
+    if not space:
+        space = resolve_space()
     config_dir = Path("~/.nowledge-mem").expanduser()
     config_dir.mkdir(parents=True, exist_ok=True)
     queue_path = config_dir / "antigravity_unsynced.json"
@@ -637,6 +751,8 @@ def retry_unsynced_sessions() -> None:
 
 def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_directory_path: str, space: str | None) -> None:
     """Scan for learning_proposal.md, verify approval in transcript, and sync to nmem (as rule, skill, or memory)."""
+    if not space:
+        space = resolve_space()
     if not artifact_directory_path or not os.path.exists(artifact_directory_path):
         return
         

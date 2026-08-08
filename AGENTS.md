@@ -28,8 +28,9 @@ When modifying or adding hook scripts under `hooks/` and configuring them in `ho
   - Safe memory writes with detected user intent should be auto-allowed (`"decision": "allow"`) to minimize user permission prompts, while destructive edits require a prompt (`"decision": "force_ask"`).
   - Under `PreToolUse` in `hooks.json`, the `run_command` tool is monitored. Auto-approve specific commands (such as the native status script `nmem_status.py`) to bypass command confirmation prompts and provide a premium, prompt-free UX.
 * **Space Auto-Detection Heuristics**: Automatically map workspace directories to Nowledge Mem spaces.
-  - Heuristics must fall back gracefully to the `default` space.
-  - Respect override environment variables (`NMEM_SPACE` or `NMEM_SPACE_ID`) if set.
+  - Respect explicit override environment variables (`NMEM_SPACE` or `NMEM_SPACE_ID`) or workspace config files (`.nmemspace` / `.nowledge/config.json`) if set by the user.
+  - Dynamically detected candidate spaces from workspace directory names must be verified against existing backend spaces (`get_existing_spaces()`).
+  - If a dynamically detected space does NOT exist on the backend and the user has not explicitly configured a project space, hooks must fall back gracefully to the `default` space.
 * **Host Agent ID Fingerprinting**: Use the shared hooks utility `hooks/nmem_shared.py` to resolve and propagate the host agent ID.
   - Fingerprinting must remain cross-platform and zero-dependency, supporting Windows, macOS, Linux, and container environments (overlay mounts).
   - Always export the resolved fingerprint to `os.environ['NMEM_HOST_AGENT_ID']` inside hooks so spawned CLI subprocesses inherit the environment context automatically.

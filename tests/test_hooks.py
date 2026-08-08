@@ -151,6 +151,41 @@ class TestNmemShared(unittest.TestCase):
         res = nmem_shared.http_request("/health")
         self.assertEqual(res, {"status": "ok"})
 
+    @patch.dict(os.environ, {"NMEM_SPACE": "custom-explicit-space"}, clear=False)
+    def test_resolve_space_explicit_env(self):
+        # Explicit env override returns explicitly requested space even if it doesn't exist on server
+        self.assertEqual(nmem_shared.resolve_space("/path/to/random"), "custom-explicit-space")
+
+    @patch("nmem_shared.get_existing_spaces")
+    def test_resolve_space_dynamic_existing(self, mock_get_spaces):
+        mock_get_spaces.return_value = [
+            {"id": "default", "key": "default", "name": "Default"},
+            {"id": "agync", "key": "agync", "name": "agync"}
+        ]
+        with patch.dict(os.environ, {}, clear=True):
+            # Dynamic space 'agync' exists on backend -> returns 'agync'
+            self.assertEqual(nmem_shared.resolve_space("/home/user/workspace/agync"), "agync")
+
+    @patch("nmem_shared.get_existing_spaces")
+    def test_resolve_space_dynamic_non_existing_falls_back_to_default(self, mock_get_spaces):
+        mock_get_spaces.return_value = [
+            {"id": "default", "key": "default", "name": "Default"},
+            {"id": "agync", "key": "agync", "name": "agync"}
+        ]
+        with patch.dict(os.environ, {}, clear=True):
+            # Dynamic space 'nowledge-mem-google-antigravity' does NOT exist on backend -> falls back to 'default'
+            self.assertEqual(
+                nmem_shared.resolve_space("/home/user/workspace/nowledge-co/nowledge-mem-google-antigravity"),
+                "default"
+            )
+
+    @patch("nmem_shared.get_existing_spaces")
+    def test_resolve_space_dynamic_unreachable_falls_back_to_default(self, mock_get_spaces):
+        mock_get_spaces.return_value = None
+        with patch.dict(os.environ, {}, clear=True):
+            # Backend unreachable/unverified -> falls back to 'default'
+            self.assertEqual(nmem_shared.resolve_space("/home/user/workspace/unknown-project"), "default")
+
 
 class TestSessionStart(unittest.TestCase):
     
@@ -209,12 +244,13 @@ class TestPostInvocation(unittest.TestCase):
 
 class TestSessionEnd(unittest.TestCase):
     
+    @patch("nmem_shared.get_existing_spaces", return_value=[{"id": "default"}])
     @patch("nmem_shared.read_hook_input")
     @patch("nmem_shared.emit")
     @patch("nmem_shared.run_nmem_command")
     @patch("os.path.exists")
     @patch("builtins.open", new_callable=mock_open, read_data='{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"<USER_REQUEST>Test request</USER_REQUEST>"}\n{"source":"MODEL","type":"PLANNER_RESPONSE","content":"Hello world!"}\n')
-    def test_session_end_captures_transcript(self, mock_file, mock_exists, mock_run, mock_emit, mock_input):
+    def test_session_end_captures_transcript(self, mock_file, mock_exists, mock_run, mock_emit, mock_input, mock_spaces):
         mock_input.return_value = {
             "conversationId": "conv-12345",
             "transcriptPath": "/fake/transcript.jsonl"
@@ -414,11 +450,12 @@ class TestNmemGate(unittest.TestCase):
 
 class TestNmemStatus(unittest.TestCase):
     
+    @patch("nmem_shared.get_existing_spaces", return_value=[{"id": "default"}])
     @patch("nmem_shared.run_nmem_command")
     @patch("nmem_shared.get_host_agent_fingerprint")
     @patch("pathlib.Path.exists")
     @patch("pathlib.Path.read_text")
-    def test_nmem_status_script(self, mock_read_text, mock_exists, mock_fingerprint, mock_run):
+    def test_nmem_status_script(self, mock_read_text, mock_exists, mock_fingerprint, mock_run, mock_spaces):
         mock_fingerprint.return_value = "antigravity-test"
         mock_exists.return_value = True
         mock_read_text.return_value = json.dumps({

@@ -14,7 +14,7 @@ def main():
         transcript_path = hook_input.get('transcriptPath')
         artifact_directory_path = hook_input.get('artifactDirectoryPath')
 
-        space = os.environ.get('NMEM_SPACE', '').strip() or os.environ.get('NMEM_SPACE_ID', '').strip()
+        space = nmem_shared.resolve_space()
 
         # Check for learning proposals after file modifications
         if conversation_id and transcript_path and artifact_directory_path:

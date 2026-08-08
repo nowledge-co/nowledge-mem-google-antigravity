@@ -27,7 +27,7 @@ def main():
         nmem_shared.emit({})
         return
         
-    space = os.environ.get('NMEM_SPACE', '').strip() or os.environ.get('NMEM_SPACE_ID', '').strip()
+    space = nmem_shared.resolve_space()
     host_agent_id = os.environ.get('NMEM_HOST_AGENT_ID', '').strip()
     if not host_agent_id:
         host_agent_id = nmem_shared.get_host_agent_fingerprint()

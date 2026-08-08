@@ -96,6 +96,17 @@ To ensure subshells running inside sandboxed tool environments (`BypassSandbox: 
    - `/usr/bin/nmem`
    - `~/.local/share/nowledge-mem/bin/nmem-wrapper`
 
+### Space Resolution & Verification Pipeline
+`hooks/nmem_shared.py` resolves the active space using `resolve_space(cwd=None)` following this pipeline:
+1. **Explicit Environment Variables**: Returns `NMEM_SPACE` or `NMEM_SPACE_ID` if explicitly set by user.
+2. **Explicit Workspace Configuration**: Returns explicit `space` defined in `.nmemspace` or `.nowledge/config.json` at the workspace root.
+3. **Dynamic Space Auto-Detection with Existence Verification**:
+   - Infer candidate space name from workspace directory basename (e.g. `Path(cwd).name`).
+   - Query existing backend spaces (`get_existing_spaces()`) via `/spaces` HTTP GET or `nmem --json spaces list`.
+   - Match candidate against `id`, `key`, `name`, or `aliases`.
+   - If candidate space exists, use it.
+4. **Fallback to Default Space**: If the dynamically detected space does NOT exist on the backend and the user has not explicitly configured a project space, fall back to `"default"`.
+
 ---
 
 ## 🚀 Interface Selection Guidelines for Agents & Developers
