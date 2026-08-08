@@ -514,57 +514,106 @@ def retry_unsynced_sessions() -> None:
                 space = data.get("space")
                 host_agent_id = data.get("host_agent_id")
 
-                # 1. Check if thread exists
-                check_args = ['t', 'show', conv_id]
-                if space:
-                    check_args.extend(['--space', space])
-
-                thread_exists = False
+                success = False
+                # Try HTTP transport first
                 try:
-                    result = run_nmem_command(check_args, timeout=5)
-                    if result.returncode == 0:
-                        thread_exists = True
+                    space_param = f"?space={space}" if space else ""
+                    check_res = http_request(f"/threads/{conv_id}{space_param}", method="GET", timeout=3.0)
+                    if isinstance(check_res, dict) and (check_res.get("id") or check_res.get("thread_id") or "messages" in check_res):
+                        existing_msgs = check_res.get("messages") or []
+                        matched_count = 0
+                        if isinstance(existing_msgs, list):
+                            for old_m, new_m in zip(existing_msgs, messages):
+                                old_role = old_m.get("role") or old_m.get("sender")
+                                new_role = new_m.get("role") or new_m.get("sender")
+                                old_text = old_m.get("content") or old_m.get("text")
+                                new_text = new_m.get("content") or new_m.get("text")
+                                if old_role == new_role and old_text == new_text:
+                                    matched_count += 1
+                                else:
+                                    break
+                        if matched_count == len(messages):
+                            success = True
+                        elif matched_count > 0:
+                            rec_payload = {"matched_count": matched_count, "messages": messages[matched_count:]}
+                            if space:
+                                rec_payload["space"] = space
+                            rec_res = http_request(f"/threads/{conv_id}/reconcile-tail", method="POST", payload=rec_payload, timeout=5.0)
+                            if isinstance(rec_res, dict) and not rec_res.get("error"):
+                                success = True
+                        else:
+                            app_payload = {"messages": messages}
+                            if space:
+                                app_payload["space"] = space
+                            app_res = http_request(f"/threads/{conv_id}/append", method="POST", payload=app_payload, timeout=5.0)
+                            if isinstance(app_res, dict) and not app_res.get("error"):
+                                success = True
+                    elif isinstance(check_res, dict):
+                        import_payload = {
+                            "id": conv_id,
+                            "title": title,
+                            "source": "google-antigravity",
+                            "messages": messages
+                        }
+                        if space:
+                            import_payload["space"] = space
+                        imp_res = http_request("/threads/import", method="POST", payload=import_payload, timeout=5.0)
+                        if isinstance(imp_res, dict) and not imp_res.get("error"):
+                            success = True
                 except Exception:
                     pass
 
-                success = False
-                if thread_exists:
-                    # Append messages
-                    append_args = ['t']
+                if not success:
+                    # CLI Fallback
+                    check_args = ['t', 'show', conv_id]
                     if space:
-                        append_args.extend(['--space', space])
-                    append_args.extend([
-                        'append',
-                        conv_id,
-                        '-m', json.dumps(messages)
-                    ])
-                    try:
-                        result = run_nmem_command(append_args, timeout=5)
-                        if result.returncode == 0:
-                            success = True
-                    except Exception:
-                        pass
-                else:
-                    # Import new thread
-                    import_args = [
-                        't', 'import',
-                        '-m', json.dumps(messages),
-                        '--id', conv_id,
-                        '-t', title,
-                        '-s', 'google-antigravity'
-                    ]
-                    if space:
-                        import_args.extend(['--space', space])
+                        check_args.extend(['--space', space])
 
-                    env = {}
-                    if host_agent_id:
-                        env['NMEM_HOST_AGENT_ID'] = host_agent_id
+                    thread_exists = False
                     try:
-                        result = run_nmem_command(import_args, env=env, timeout=5)
+                        result = run_nmem_command(check_args, timeout=5)
                         if result.returncode == 0:
-                            success = True
+                            thread_exists = True
                     except Exception:
                         pass
+
+                    if thread_exists:
+                        # Append messages
+                        append_args = ['t']
+                        if space:
+                            append_args.extend(['--space', space])
+                        append_args.extend([
+                            'append',
+                            conv_id,
+                            '-m', json.dumps(messages)
+                        ])
+                        try:
+                            result = run_nmem_command(append_args, timeout=5)
+                            if result.returncode == 0:
+                                success = True
+                        except Exception:
+                            pass
+                    else:
+                        # Import new thread
+                        import_args = [
+                            't', 'import',
+                            '-m', json.dumps(messages),
+                            '--id', conv_id,
+                            '-t', title,
+                            '-s', 'google-antigravity'
+                        ]
+                        if space:
+                            import_args.extend(['--space', space])
+
+                        env = {}
+                        if host_agent_id:
+                            env['NMEM_HOST_AGENT_ID'] = host_agent_id
+                        try:
+                            result = run_nmem_command(import_args, env=env, timeout=5)
+                            if result.returncode == 0:
+                                success = True
+                        except Exception:
+                            pass
 
                 if success:
                     del updated_queue[conv_id]
