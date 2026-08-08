@@ -57,7 +57,7 @@ def main():
         "find_skills", "suggest_skill_check", "list_spaces", "get_space_profile",
         "query_by_labels", "get_node_details", "find_entity_relations",
         "compute_subgraph_pagerank", "find_bridge_nodes", "query_shortest_path",
-        "check_claims", "list_timeline_reviews"
+        "check_claims", "list_timeline_reviews", "trigger_memory_catchup"
     }
     if sub_tool in read_only:
         emit({
