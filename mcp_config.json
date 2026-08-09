@@ -1,11 +1,11 @@
 {
   "mcpServers": {
     "nowledge-mem": {
-      "serverUrl": "https://mem.geep-lizard.ts.net/mcp/",
+      "serverUrl": "http://127.0.0.1:14242/mcp/",
       "headers": {
         "APP": "Google Antigravity",
-        "Authorization": "Bearer nmem_RjETfP3nHchVc-5e0OKzIWuZ6yZOSHHEi5r0uZLe7FyVUk8ZzZ1KRPNynrARcdrJ",
-        "X-MEM-API-Key": "nmem_RjETfP3nHchVc-5e0OKzIWuZ6yZOSHHEi5r0uZLe7FyVUk8ZzZ1KRPNynrARcdrJ"
+        "Authorization": "Bearer nmem_NVzyTrhHuIfRC-_REzXon6NQuyJ3dNbGluHbLiAcun7NfojRkgSWIPuW9YVf4iRk",
+        "X-NMEM-API-Key": "nmem_NVzyTrhHuIfRC-_REzXon6NQuyJ3dNbGluHbLiAcun7NfojRkgSWIPuW9YVf4iRk"
       }
     }
   }

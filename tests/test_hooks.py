@@ -96,7 +96,8 @@ class TestNmemShared(unittest.TestCase):
             data = json.loads(Path(tf_path).read_text(encoding="utf-8"))
             self.assertEqual(data["mcpServers"]["nowledge-mem"]["serverUrl"], "https://mem.example.com/mcp/")
             self.assertEqual(data["mcpServers"]["nowledge-mem"]["headers"]["Authorization"], "Bearer nmem_sec_123")
-            self.assertEqual(data["mcpServers"]["nowledge-mem"]["headers"]["X-MEM-API-Key"], "nmem_sec_123")
+            self.assertEqual(data["mcpServers"]["nowledge-mem"]["headers"]["X-NMEM-API-Key"], "nmem_sec_123")
+            self.assertNotIn("X-MEM-API-Key", data["mcpServers"]["nowledge-mem"]["headers"])
             
             # Second call should return False (already up to date)
             updated_again = nmem_shared.sync_mcp_config_file(tf_path)
@@ -637,5 +638,4 @@ class TestManageSkills(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
 

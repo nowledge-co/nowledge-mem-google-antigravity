@@ -312,7 +312,7 @@ def sync_mcp_config_file(mcp_config_path: str = None) -> bool:
     headers = {"APP": "Google Antigravity"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-        headers["X-MEM-API-Key"] = api_key
+        headers["X-NMEM-API-Key"] = api_key
 
     target_data = {
         "mcpServers": {
@@ -379,6 +379,7 @@ def http_request(endpoint: str, method: str = "GET", payload: dict | None = None
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+        headers["X-NMEM-API-Key"] = api_key
         headers["X-MEM-API-Key"] = api_key
 
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -401,6 +402,7 @@ def http_request(endpoint: str, method: str = "GET", payload: dict | None = None
             }
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
+                headers["X-NMEM-API-Key"] = api_key
                 headers["X-MEM-API-Key"] = api_key
             req = urllib.request.Request(url, data=data, headers=headers, method=method)
             try:

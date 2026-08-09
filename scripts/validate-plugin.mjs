@@ -53,6 +53,14 @@ async function main() {
   if (server.headers?.APP !== 'Google Antigravity') {
     fail('mcp_config.json nowledge-mem.headers.APP must be "Google Antigravity"');
   }
+  if ('X-MEM-API-Key' in (server.headers || {})) {
+    fail('mcp_config.json must use X-NMEM-API-Key, not the legacy X-MEM-API-Key header');
+  }
+  for (const value of Object.values(server.headers || {})) {
+    if (typeof value === 'string' && /nmem_(?!your_key\b)[A-Za-z0-9_-]+/.test(value)) {
+      fail('mcp_config.json must not contain a real nmem API key');
+    }
+  }
 
   const requiredPaths = [
     'plugin.json',
