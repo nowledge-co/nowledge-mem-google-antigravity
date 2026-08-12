@@ -42,7 +42,7 @@ def main():
         for delay in delays:
             if delay > 0:
                 time.sleep(delay)
-                
+
             if not os.path.exists(transcript_path):
                 continue
                 
@@ -91,12 +91,15 @@ def main():
                     title = clean_text[:60] + "..."
                 elif len(clean_text) > 0:
                     title = clean_text
-                    
+
+            if nmem_shared.is_backend_unreachable():
+                break
+
             matched_count = 0
             # Try HTTP transport first
             try:
                 space_param = f"?space={space}" if space else ""
-                check_res = nmem_shared.http_request(f"/threads/{conversation_id}{space_param}", method="GET", timeout=3.0)
+                check_res = nmem_shared.http_request(f"/threads/{conversation_id}{space_param}", method="GET", timeout=1.5)
                 if isinstance(check_res, dict) and (check_res.get("id") or check_res.get("thread_id") or "messages" in check_res):
                     existing_msgs = check_res.get("messages") or []
                     if isinstance(existing_msgs, list):
@@ -123,7 +126,7 @@ def main():
                         }
                         if space:
                             rec_payload["space"] = space
-                        rec_res = nmem_shared.http_request(f"/threads/{conversation_id}/reconcile-tail", method="POST", payload=rec_payload, timeout=5.0)
+                        rec_res = nmem_shared.http_request(f"/threads/{conversation_id}/reconcile-tail", method="POST", payload=rec_payload, timeout=2.5)
                         if isinstance(rec_res, dict) and not rec_res.get("error"):
                             success = True
                             break
@@ -131,11 +134,11 @@ def main():
                     append_payload = {"messages": messages[matched_count:] if matched_count > 0 else messages}
                     if space:
                         append_payload["space"] = space
-                    app_res = nmem_shared.http_request(f"/threads/{conversation_id}/append", method="POST", payload=append_payload, timeout=5.0)
+                    app_res = nmem_shared.http_request(f"/threads/{conversation_id}/append", method="POST", payload=append_payload, timeout=2.5)
                     if isinstance(app_res, dict) and not app_res.get("error"):
                         success = True
                         break
-                elif isinstance(check_res, dict) and (check_res.get("error") in ("not_found", "thread_not_found") or check_res.get("status") == 404 or not check_res):
+                elif isinstance(check_res, dict) and (check_res.get("error") in ("not_found", "thread_not_found") or check_res.get("status") == 404):
                     # Explicit 404 / thread not found -> import new thread
                     import_payload = {
                         "id": conversation_id,
@@ -145,12 +148,15 @@ def main():
                     }
                     if space:
                         import_payload["space"] = space
-                    imp_res = nmem_shared.http_request("/threads/import", method="POST", payload=import_payload, timeout=5.0)
+                    imp_res = nmem_shared.http_request("/threads/import", method="POST", payload=import_payload, timeout=2.5)
                     if isinstance(imp_res, dict) and not imp_res.get("error"):
                         success = True
                         break
             except Exception:
                 pass
+
+            if nmem_shared.is_backend_unreachable():
+                break
 
             # Check if the thread exists (CLI Fallback)
             check_args = ['t', 'show', conversation_id]
@@ -159,7 +165,7 @@ def main():
                 
             thread_exists = False
             try:
-                result = nmem_shared.run_nmem_command(check_args, timeout=3)
+                result = nmem_shared.run_nmem_command(check_args, timeout=2.0)
                 if result.returncode == 0:
                     thread_exists = True
             except Exception as e:
@@ -179,7 +185,7 @@ def main():
                         '-m', json.dumps(cli_append_msgs)
                     ])
                     try:
-                        result = nmem_shared.run_nmem_command(append_args, timeout=5)
+                        result = nmem_shared.run_nmem_command(append_args, timeout=3.0)
                         if result.returncode == 0:
                             success = True
                             break
@@ -202,7 +208,7 @@ def main():
                     import_args.extend(['--space', space])
                     
                 try:
-                    result = nmem_shared.run_nmem_command(import_args, timeout=5)
+                    result = nmem_shared.run_nmem_command(import_args, timeout=3.0)
                     if result.returncode == 0:
                         success = True
                         break

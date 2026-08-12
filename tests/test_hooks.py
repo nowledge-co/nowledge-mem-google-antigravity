@@ -149,6 +149,7 @@ class TestNmemShared(unittest.TestCase):
 
     @patch("urllib.request.urlopen")
     def test_http_request_success(self, mock_urlopen):
+        nmem_shared.reset_backend_unreachable()
         mock_resp = MagicMock()
         mock_resp.status = 200
         mock_resp.read.return_value = b'{"status": "ok"}'
@@ -156,6 +157,41 @@ class TestNmemShared(unittest.TestCase):
 
         res = nmem_shared.http_request("/health")
         self.assertEqual(res, {"status": "ok"})
+        self.assertFalse(nmem_shared.is_backend_unreachable())
+
+    @patch("urllib.request.urlopen")
+    def test_circuit_breaker_unreachable_fast_fail(self, mock_urlopen):
+        nmem_shared.reset_backend_unreachable()
+        mock_urlopen.side_effect = TimeoutError("Connection timed out")
+
+        # 1st call fails and marks backend unreachable
+        res1 = nmem_shared.http_request("/health")
+        self.assertIsNone(res1)
+        self.assertTrue(nmem_shared.is_backend_unreachable())
+
+        # 2nd call fails fast without invoking urlopen again
+        mock_urlopen.reset_mock()
+        res2 = nmem_shared.http_request("/health")
+        self.assertIsNone(res2)
+        mock_urlopen.assert_not_called()
+
+        # Clean up
+        nmem_shared.reset_backend_unreachable()
+
+    @patch("nmem_shared._is_pid_alive", return_value=False)
+    def test_file_lock_stale_pid_recovery(self, mock_pid_alive):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / "test.lock"
+            # Write a fake dead PID (999999) to lock file
+            lock_path.write_text("999999", encoding="utf-8")
+
+            # Acquiring FileLock should detect dead PID owner, unlink stale lock, and acquire cleanly
+            with nmem_shared.FileLock(lock_path) as lock:
+                self.assertTrue(lock.acquired)
+                self.assertTrue(lock_path.exists())
+                pid_in_file = lock_path.read_text(encoding="utf-8").strip()
+                self.assertEqual(pid_in_file, str(os.getpid()))
 
     @patch.dict(os.environ, {"NMEM_SPACE": "custom-explicit-space"}, clear=False)
     def test_resolve_space_explicit_env(self):
@@ -195,6 +231,9 @@ class TestNmemShared(unittest.TestCase):
 
 class TestSessionStart(unittest.TestCase):
     
+    def setUp(self):
+        nmem_shared.reset_backend_unreachable()
+
     @patch("nmem_shared.read_hook_input")
     @patch("nmem_shared.http_request")
     @patch("nmem_shared.emit")
@@ -203,6 +242,7 @@ class TestSessionStart(unittest.TestCase):
     @patch("nmem_shared.sync_host_skills_async")
     @patch("nmem_shared.sync_mcp_config_file")
     def test_session_start_ephemeral_injection(self, mock_sync_mcp, mock_sync, mock_popen, mock_run, mock_emit, mock_http, mock_input):
+        nmem_shared.reset_backend_unreachable()
         mock_input.return_value = {"invocationNum": 0}
         
         # Mock Context Bundle output
@@ -251,6 +291,9 @@ class TestPostInvocation(unittest.TestCase):
 
 class TestSessionEnd(unittest.TestCase):
     
+    def setUp(self):
+        nmem_shared.reset_backend_unreachable()
+
     @patch("nmem_shared.get_existing_spaces", return_value=[{"id": "default"}])
     @patch("nmem_shared.read_hook_input")
     @patch("nmem_shared.emit")
@@ -276,6 +319,32 @@ class TestSessionEnd(unittest.TestCase):
         mock_emit.assert_called_once_with({})
         # Verify show and import commands were executed
         self.assertEqual(mock_run.call_count, 2)
+
+    @patch("nmem_shared.save_unsynced_session")
+    @patch("nmem_shared.get_existing_spaces", return_value=[{"id": "default"}])
+    @patch("nmem_shared.read_hook_input")
+    @patch("nmem_shared.emit")
+    @patch("os.path.exists", return_value=True)
+    @patch("builtins.open", new_callable=mock_open, read_data='{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"<USER_REQUEST>Test request</USER_REQUEST>"}\n{"source":"MODEL","type":"PLANNER_RESPONSE","content":"Hello world!"}\n')
+    def test_session_end_unreachable_preserves_transcript(self, mock_file, mock_exists, mock_emit, mock_input, mock_spaces, mock_save):
+        mock_input.return_value = {
+            "conversationId": "conv-12345",
+            "transcriptPath": "/fake/transcript.jsonl"
+        }
+        # Mark backend unreachable prior to session-end
+        nmem_shared.mark_backend_unreachable()
+        
+        session_end.main()
+        
+        # Verify save_unsynced_session was called with non-empty populated messages & clean title
+        mock_save.assert_called_once()
+        call_args = mock_save.call_args[0]
+        conv_id, msgs, title, space, host_agent_id = call_args
+        self.assertEqual(conv_id, "conv-12345")
+        self.assertEqual(len(msgs), 2)
+        self.assertEqual(msgs[0]["content"], "<USER_REQUEST>Test request</USER_REQUEST>")
+        self.assertEqual(msgs[1]["content"], "Hello world!")
+        self.assertEqual(title, "Test request")
 
     @patch("nmem_shared.read_hook_input")
     @patch("nmem_shared.emit")

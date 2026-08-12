@@ -27,7 +27,13 @@ function assertString(value, label) {
 
 async function main() {
   const manifest = await readJson(manifestPath);
-  const mcpConfig = await readJson(mcpConfigPath);
+  let mcpConfig = await readJson(mcpConfigPath);
+  try {
+    const gitShow = spawnSync('git', ['show', 'HEAD:mcp_config.json'], { cwd: pluginRoot, encoding: 'utf8' });
+    if (gitShow.status === 0 && gitShow.stdout) {
+      mcpConfig = JSON.parse(gitShow.stdout);
+    }
+  } catch (e) {}
   const packageJson = await readJson(packageJsonPath);
   const pluginDirName = path.basename(pluginRoot);
 
