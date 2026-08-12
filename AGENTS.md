@@ -51,7 +51,7 @@ Maintain a clean, linear repository history by following these commit guidelines
 
 ---
 
-## 4. CI/CD & Validation
+## 4. CI/CD, Validation & Integration Testing
 
 * Before staging or proposing any changes, always run the validation suite:
   ```bash
@@ -61,11 +61,22 @@ Maintain a clean, linear repository history by following these commit guidelines
   ```bash
   make validate
   ```
+* **Pytest & HTTPX Standards**:
+  - All unit and integration tests under `tests/` MUST use function-style `pytest` test cases (`def test_*()`).
+  - All HTTP interactions in tests must use `httpx` (or `httpx.Client`).
+* **Container Integration Test Suite (`tests/integration/`)**:
+  - Tests spin up `docker.io/nowledgelabs/mem:latest` on dynamic random host ports (`-p 14242`) using `podman` or `docker`.
+  - Run integration tests via `make test-integration` (`uv run pytest -v tests/integration/`).
+  - **Host Config Isolation**: Tests MUST set `NMEM_IGNORE_HOST_CONFIG=1` so container integration runs never parse or leak host `~/.nowledge-mem/config.json` credentials.
+* **Linting & Code Quality**:
+  - Run `make lint` (`uv run ruff check` + `uv run ty check`).
+  - Run `uv run pre-commit run --all-files` to ensure zero pre-commit regressions.
 * The validation flow (`scripts/validate-plugin.mjs`) checks:
-  - That all required files (rules, skills, hooks, and release notes) are present, including `tests/test_hooks.py` and `hooks/nmem_status.py`.
+  - That all required files (rules, skills, hooks, tests, and release notes) are present, including `tests/test_hooks.py`, `tests/integration/conftest.py`, `tests/integration/test_mem_container.py`, and `hooks/nmem_status.py`.
   - That the version declared in `plugin.json` matches the version in `package.json` exactly.
   - That configuration files like `mcp_config.json` and `hooks.json` contain valid JSON structure.
-  - Runs the Python unit test suite (`tests/test_hooks.py`) using `python3 -m unittest` or `python -m unittest`, failing validation if any test fails.
+  - Runs unit and integration test suites using `pytest`.
+
 
 ---
 
