@@ -34,6 +34,9 @@ When modifying or adding hook scripts under `hooks/` and configuring them in `ho
 * **Host Agent ID Fingerprinting**: Use the shared hooks utility `hooks/nmem_shared.py` to resolve and propagate the host agent ID.
   - Fingerprinting must remain cross-platform and zero-dependency, supporting Windows, macOS, Linux, and container environments (overlay mounts).
   - Always export the resolved fingerprint to `os.environ['NMEM_HOST_AGENT_ID']` inside hooks so spawned CLI subprocesses inherit the environment context automatically.
+* **MCP Config Git Index Ignored**: `mcp_config.json` is a tracked template file.
+  - Runtime hooks dynamically synchronize `mcp_config.json` on disk with effective client credentials.
+  - To prevent local key modifications from appearing in `git status` / `git diff`, developers and agents should run `git update-index --skip-worktree mcp_config.json` (or `make setup`).
 
 ---
 
