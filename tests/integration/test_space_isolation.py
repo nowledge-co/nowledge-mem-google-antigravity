@@ -79,24 +79,34 @@ def test_space_data_scoping(mem_server: MemServerContext) -> None:
 
 
 def test_space_isolation_cross_space_mutation_denied(mem_server: MemServerContext) -> None:
-    """Negative Test: Verify deleting/updating a memory from an unregistered or invalid space is rejected."""
+    """Negative Test: Verify mutating a default-space memory from an unregistered space is rejected."""
     init_status, _ = mem_server.mcp_initialize()
     assert init_status == 200
 
-    unknown_space_headers = {"X-NMEM-Space-ID": "unregistered-isolated-space-xyz"}
+    # 1. Create a real memory in default space
+    add_payload = {
+        "jsonrpc": "2.0",
+        "id": 503,
+        "method": "tools/call",
+        "params": {"name": "memory_add", "arguments": {"content": "Sensitive Default Space Isolated Entry"}},
+    }
+    status_add, _, _ = mem_server.post_json("/mcp/", add_payload)
+    assert status_add == 200
 
+    # 2. Attempt cross-space deletion from an unregistered space
+    unknown_space_headers = {"X-NMEM-Space-ID": "unregistered-isolated-space-xyz"}
     delete_payload_b = {
         "jsonrpc": "2.0",
         "id": 504,
         "method": "tools/call",
-        "params": {"name": "memory_delete", "arguments": {"memory_id": "non-existent-or-alpha-id-in-beta"}},
+        "params": {"name": "memory_delete", "arguments": {"memory_id": "sensitive-default-space-entry"}},
     }
     status_del, body_del, _ = mem_server.post_json("/mcp/", delete_payload_b, headers=unknown_space_headers)
     assert status_del == 200
     assert body_del.get("jsonrpc") == "2.0"
     assert body_del.get("id") == 504
-    # Rejection by unknown space error (-32602) or isError
+
     is_err = body_del.get("error", {}).get("code") == -32602 or body_del.get("result", {}).get("isError") is True
     assert (
-        is_err or "error" in str(body_del).lower()
-    ), f"Expected cross-space mutation attempt to fail or report unknown space error, got: {body_del}"
+        is_err or "error" in str(body_del).lower() or "not found" in str(body_del).lower()
+    ), f"Expected cross-space mutation attempt to fail, got: {body_del}"

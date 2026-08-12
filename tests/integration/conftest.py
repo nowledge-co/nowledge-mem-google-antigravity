@@ -194,11 +194,11 @@ def container_engine() -> str:
 
 
 @pytest.fixture(scope="function")
-def mem_server(container_engine: str) -> Generator[MemServerContext, None, None]:
+def mem_server(container_engine: str, monkeypatch: pytest.MonkeyPatch) -> Generator[MemServerContext, None, None]:
     """Launch mem container on a dynamic random host port and clean up after test."""
     DEFAULT_MEM_IMAGE = "docker.io/nowledgelabs/mem:latest"
     image_name = os.environ.get("NMEM_TEST_IMAGE", DEFAULT_MEM_IMAGE)
-    os.environ["NMEM_IGNORE_HOST_CONFIG"] = "1"
+    monkeypatch.setenv("NMEM_IGNORE_HOST_CONFIG", "1")
 
     # Run container with dynamic host port (-p 14242 publishes port 14242 to an unused random host port)
     run_cmd = [container_engine, "run", "-d", "-p", "14242", image_name]
