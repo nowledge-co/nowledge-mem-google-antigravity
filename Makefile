@@ -4,8 +4,9 @@
 
 ##@ Bootstrap
 
-setup: ## Install project dependencies
+setup: ## Install project dependencies and configure local git index
 	npm install
+	git update-index --skip-worktree mcp_config.json || true
 
 ##@ Quality & Verification
 
