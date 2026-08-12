@@ -288,6 +288,37 @@ def test_session_start_hook(mock_write, mock_space, mock_read, mock_config, mock
 
 
 @patch("nmem_shared.http_request")
+@patch("nmem_shared.sync_mcp_config_file")
+@patch("nmem_shared.get_effective_config")
+@patch("nmem_shared.read_hook_input")
+@patch("nmem_shared.resolve_space", return_value="default")
+@patch("sys.stdout.write")
+def test_session_start_hook_working_memory_fallback(
+    mock_write, mock_space, mock_read, mock_config, mock_sync, mock_http
+):
+    mock_config.return_value = ("http://127.0.0.1:14242", "key123")
+    mock_read.return_value = {"conversationId": "conv-123"}
+    mock_http.side_effect = [
+        {},  # Context bundle returns empty -> falls back to working memory
+        {"content": "Daily Working Memory Briefing"},
+    ]
+
+    with (
+        patch("nmem_shared.sync_host_skills_async") as mock_skills_sync,
+        patch.object(sys, "argv", ["session-start.py"]),
+    ):
+        session_start.main()
+        mock_skills_sync.assert_called_once()
+        assert mock_http.call_count == 2
+        mock_write.assert_called_once()
+        payload = json.loads(mock_write.call_args[0][0])
+        assert "injectSteps" in payload
+        assert len(payload["injectSteps"]) > 0
+        emitted_text = payload["injectSteps"][0]["ephemeralMessage"]
+        assert "Daily Working Memory Briefing" in emitted_text
+
+
+@patch("nmem_shared.http_request")
 @patch("nmem_shared.read_hook_input")
 @patch("nmem_shared.save_unsynced_session")
 @patch("nmem_shared.resolve_space")
@@ -437,7 +468,7 @@ def test_nmem_status_connected(mock_write, mock_run_cmd):
         assert mock_write.call_count >= 1
         written = "".join([c[0][0] for c in mock_write.call_args_list])
         assert "🟢 Connected" in written
-        assert "Active Space (Workspace)" in written
+        assert "| **Active Space (Workspace)** | `default` |" in written
 
 
 def test_sync_learnings_rules():
