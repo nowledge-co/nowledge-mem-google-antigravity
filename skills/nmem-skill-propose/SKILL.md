@@ -51,20 +51,23 @@ Do not submit or create the skill silently. Write the proposed draft to a user-f
   - Use markdown Tables to show the fields (e.g. Name, ID, Purpose, Evidence).
   - Use Mermaid flowcharts (`mermaid` block) to visualize the skill's workflow/steps if appropriate.
 
-### Step 3: Await Confirmation and Dispatch
+### Step 4: Await Confirmation & Activation Preference
 1. Notify the user to review the drafted `skill_draft.md` artifact.
-2. Wait for the user to click the "Proceed" button or give explicit approval in the conversation.
-3. Once approved, dispatch the request.
+2. Ask the user (or recommend via `ask_question` / prompt options):
+   - **(Recommended) Activate immediately on Nowledge Mem**: Dispatches script with `--activate` flag to publish the skill directly to active status.
+   - **Keep as a proposal on Nowledge Mem**: Dispatches script with `--no-activate` flag to keep it in draft stage.
+3. Wait for the user to click "Proceed" or select an option, then dispatch the request.
 
 ## Preferred Execution Hierarchy
 
 1. **Direct REST API In-Place Router (Primary - Most Reliable)**:
    - Run the proposal python script to upload the fully drafted skill markdown directly to Nowledge Mem:
      ```bash
-     python3 hooks/nmem_entrypoint.py skill-propose <appDataDir>/brain/<conversation-id>/skill_draft.md
+     python3 hooks/nmem_entrypoint.py skill-propose <appDataDir>/brain/<conversation-id>/skill_draft.md [--activate | --no-activate]
      ```
      - **In-Place Update**: If `id: <skill_id>` is specified in the draft frontmatter (or `--skill-id <id>` flag is passed), the entrypoint automatically executes `POST /agent/skill-builder/edit-body` + `POST /skills/{id}/apply-version` to update the skill in-place without creating a duplicate.
-     - **New Skill Creation**: If no `id` is specified, it executes `POST /agent/skill-builder/import` to register a new skill draft.
+     - **New Skill Creation**: If no `id` is specified, it executes `POST /agent/skill-builder/import` to register a new skill draft (and auto-deduplicates if an identical active skill exists).
+     - **Activation**: If `--activate` is passed (default), it invokes `POST /skills/{id}/activate` so the skill immediately transitions from `proposal` to `active`.
 2. **MCP Tools (Fallback)**:
    - **For a new skill**: Call the `create_skill` tool with the drafted parameters (`name`, `purpose`, and optional `memory_ids`, `thread_ids`, `source_ids`).
    - **For a skill improvement**: Call the `propose_skill_improvement` tool with `skill_id` and the drafted `what` description.
