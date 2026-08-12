@@ -54,9 +54,9 @@ def test_space_data_scoping(mem_server: MemServerContext) -> None:
     status_a_search, body_a_search, _ = mem_server.post_json("/mcp/", search_payload_a, headers=default_space_headers)
     assert status_a_search == 200
     search_results_a = str(body_a_search.get("result", {}))
-    assert "Default Space Unique Secret Memory" in search_results_a, (
-        f"Memory should be visible in default space, got: {body_a_search}"
-    )
+    assert (
+        "Default Space Unique Secret Memory" in search_results_a
+    ), f"Memory should be visible in default space, got: {body_a_search}"
 
     # 3. Query with unknown space header -> Server must reject or isolate with unknown space error (code -32602)
     search_payload_b = {
@@ -73,9 +73,9 @@ def test_space_data_scoping(mem_server: MemServerContext) -> None:
     # Verify that searching in unregistered space either returns error (Unknown space) or empty results
     is_unknown_space_err = body_b.get("error", {}).get("code") == -32602 or "unknown space" in str(body_b).lower()
     not_in_results = "Default Space Unique Secret Memory" not in str(body_b.get("result", {}))
-    assert is_unknown_space_err or not_in_results, (
-        f"Multi-tenant isolation failed! Unregistered space did not isolate memory: {body_b}"
-    )
+    assert (
+        is_unknown_space_err or not_in_results
+    ), f"Multi-tenant isolation failed! Unregistered space did not isolate memory: {body_b}"
 
 
 def test_space_isolation_cross_space_mutation_denied(mem_server: MemServerContext) -> None:
@@ -97,6 +97,6 @@ def test_space_isolation_cross_space_mutation_denied(mem_server: MemServerContex
     assert body_del.get("id") == 504
     # Rejection by unknown space error (-32602) or isError
     is_err = body_del.get("error", {}).get("code") == -32602 or body_del.get("result", {}).get("isError") is True
-    assert is_err or "error" in str(body_del).lower(), (
-        f"Expected cross-space mutation attempt to fail or report unknown space error, got: {body_del}"
-    )
+    assert (
+        is_err or "error" in str(body_del).lower()
+    ), f"Expected cross-space mutation attempt to fail or report unknown space error, got: {body_del}"

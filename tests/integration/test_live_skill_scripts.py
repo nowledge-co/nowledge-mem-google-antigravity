@@ -51,9 +51,9 @@ def test_script_manage_skills_live(mem_server: MemServerContext) -> None:
     proc = subprocess.run(
         [sys.executable, str(MANAGE_SKILLS_SCRIPT), "list"], capture_output=True, text=True, env=env, timeout=10
     )
-    assert proc.returncode == 0, (
-        f"Expected exit code 0 from manage_skills.py list, got {proc.returncode}: {proc.stderr}"
-    )
+    assert (
+        proc.returncode == 0
+    ), f"Expected exit code 0 from manage_skills.py list, got {proc.returncode}: {proc.stderr}"
 
 
 def test_script_propose_skill_live(mem_server: MemServerContext, tmp_path: Path) -> None:

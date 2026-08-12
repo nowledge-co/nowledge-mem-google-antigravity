@@ -14,7 +14,9 @@ def main():
     parser = argparse.ArgumentParser(description="Nowledge Mem Status Plugin")
     parser.add_argument("--conv-id", required=False, default=None, help="Conversation ID to check status for")
     args = parser.parse_args()
-    conv_id = args.conv_id or os.environ.get("NMEM_CONVERSATION_ID") or os.environ.get("CONVERSATION_ID") or "active-session"
+    conv_id = (
+        args.conv_id or os.environ.get("NMEM_CONVERSATION_ID") or os.environ.get("CONVERSATION_ID") or "active-session"
+    )
 
     # 1. Read environment variables / resolve active space
     space = nmem_shared.resolve_space()
@@ -91,7 +93,9 @@ def main():
     elif is_current_pending:
         thread_info_block = "> [!IMPORTANT]\n> This conversation has not been pushed to the remote Nowledge Mem server yet. It is queued locally in the unsynced buffer."
     else:
-        thread_info_block = "> [!WARNING]\n> No record of this conversation found in the remote server or the local offline queue."
+        thread_info_block = (
+            "> [!WARNING]\n> No record of this conversation found in the remote server or the local offline queue."
+        )
 
     # Format the queue list block
     if unsynced_count > 0:
@@ -129,6 +133,7 @@ def main():
 ```
 """
     print(report)
+
 
 if __name__ == "__main__":
     main()

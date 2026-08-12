@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """PostToolUse hook handler for Nowledge Mem Google Antigravity plugin."""
+
 import sys
 from pathlib import Path
 
@@ -10,9 +11,9 @@ import nmem_shared
 def main():
     try:
         hook_input = nmem_shared.read_hook_input()
-        conversation_id = hook_input.get('conversationId')
-        transcript_path = hook_input.get('transcriptPath')
-        artifact_directory_path = hook_input.get('artifactDirectoryPath')
+        conversation_id = hook_input.get("conversationId")
+        transcript_path = hook_input.get("transcriptPath")
+        artifact_directory_path = hook_input.get("artifactDirectoryPath")
 
         space = nmem_shared.resolve_space()
 
@@ -26,6 +27,7 @@ def main():
         nmem_shared.emit({})
     except Exception:
         nmem_shared.emit({})
+
 
 if __name__ == "__main__":
     main()

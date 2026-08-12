@@ -41,3 +41,12 @@ select = [
     "UP",  # pyupgrade
     "SIM", # flake8-simplify
 ]
+ignore = [
+    "E501",   # Line too long
+    "SIM105", # try-except-pass
+    "B904",   # raise ... from err
+    "SIM102", # nested if
+    "SIM108", # ternary operator
+    "UP022",  # capture_output
+    "F841",   # unused variable
+]

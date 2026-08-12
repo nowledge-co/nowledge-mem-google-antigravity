@@ -29,12 +29,12 @@ def test_server_liveness(mem_server: MemServerContext) -> None:
 def test_random_port_isolation(mem_server: MemServerContext) -> None:
     """Verify test server runs on a dynamic host port and does NOT conflict with default port 14242."""
     assert isinstance(mem_server.host_port, int)
-    assert mem_server.host_port > 1024, (
-        f"Host port should be an unprivileged dynamic port (>1024), got {mem_server.host_port}"
-    )
-    assert mem_server.host_port != 14242, (
-        f"Test container host port must not collide with production port 14242! Got: {mem_server.host_port}"
-    )
+    assert (
+        mem_server.host_port > 1024
+    ), f"Host port should be an unprivileged dynamic port (>1024), got {mem_server.host_port}"
+    assert (
+        mem_server.host_port != 14242
+    ), f"Test container host port must not collide with production port 14242! Got: {mem_server.host_port}"
     assert mem_server.base_url == f"http://127.0.0.1:{mem_server.host_port}"
 
 
@@ -88,9 +88,9 @@ def test_mcp_tools_list(mem_server: MemServerContext) -> None:
     tool_names = {t.get("name") for t in tools if isinstance(t, dict)}
     expected_core_tools = {"memory_search", "memory_add", "mem_fs", "read_working_memory"}
     found_core_tools = expected_core_tools.intersection(tool_names)
-    assert len(found_core_tools) > 0, (
-        f"Expected at least one core tool in {expected_core_tools}, found tools: {tool_names}"
-    )
+    assert (
+        len(found_core_tools) > 0
+    ), f"Expected at least one core tool in {expected_core_tools}, found tools: {tool_names}"
 
 
 def test_mcp_invalid_method(mem_server: MemServerContext) -> None:
@@ -132,9 +132,9 @@ def test_malformed_json_body(mem_server: MemServerContext) -> None:
         headers["Authorization"] = f"Bearer {mem_server.api_key}"
 
     res = httpx.post(url, content=b"INVALID_NON_JSON{{{", headers=headers, timeout=5.0)
-    assert res.status_code in (400, 406, 422, 500) or "error" in res.text.lower() or "fail" in res.text.lower(), (
-        f"Expected client error status or error text for malformed JSON, got status {res.status_code}: {res.text}"
-    )
+    assert (
+        res.status_code in (400, 406, 422, 500) or "error" in res.text.lower() or "fail" in res.text.lower()
+    ), f"Expected client error status or error text for malformed JSON, got status {res.status_code}: {res.text}"
 
 
 def test_invalid_space_header_format(mem_server: MemServerContext) -> None:
