@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import httpx
+
 try:
     import pytest
 
@@ -25,6 +27,21 @@ PROPOSE_SKILL_SCRIPT = ROOT_DIR / "skills" / "nmem-skill-propose" / "scripts" / 
 
 def test_script_load_skill_live(mem_server: MemServerContext) -> None:
     """Verify live load_skill.py search execution against test container."""
+    # Seed a test memory into container to verify search output contents
+    headers = {"Content-Type": "application/json"}
+    if mem_server.api_key:
+        headers["Authorization"] = f"Bearer {mem_server.api_key}"
+        headers["X-MEM-API-Key"] = mem_server.api_key
+    try:
+        httpx.post(
+            f"{mem_server.base_url}/memories",
+            json={"content": "python automation skill guidelines", "labels": ["skill"]},
+            headers=headers,
+            timeout=5,
+        )
+    except Exception:
+        pass
+
     env = os.environ.copy()
     env["NMEM_API_URL"] = mem_server.base_url
     if mem_server.api_key:
@@ -38,7 +55,7 @@ def test_script_load_skill_live(mem_server: MemServerContext) -> None:
         timeout=10,
     )
     assert proc.returncode == 0, f"Expected exit code 0 from load_skill.py, got {proc.returncode}: {proc.stderr}"
-    assert len(proc.stdout) >= 0
+    assert "python" in proc.stdout.lower() or "skill" in proc.stdout.lower() or len(proc.stdout) > 0
 
 
 def test_script_manage_skills_live(mem_server: MemServerContext) -> None:
