@@ -31,9 +31,9 @@ def test_hook_nmem_status_live(mem_server: MemServerContext) -> None:
     status_script = HOOKS_DIR / "nmem_status.py"
     proc = subprocess.run([sys.executable, str(status_script)], capture_output=True, text=True, env=env, timeout=10)
     assert proc.returncode == 0, f"Expected 0 exit code from nmem_status.py, got {proc.returncode}: {proc.stderr}"
-    assert "Nowledge Mem Status" in proc.stdout or "🟢" in proc.stdout, (
-        f"Unexpected status script output: {proc.stdout}"
-    )
+    assert (
+        "Nowledge Mem Status" in proc.stdout or "🟢" in proc.stdout
+    ), f"Unexpected status script output: {proc.stdout}"
 
 
 def test_hook_session_start_live(mem_server: MemServerContext) -> None:
@@ -104,9 +104,9 @@ def test_hook_session_end_missing_transcript(mem_server: MemServerContext) -> No
         env=env,
         timeout=10,
     )
-    assert proc.returncode == 0, (
-        f"Expected exit code 0 on missing transcript file, got {proc.returncode}: {proc.stderr}"
-    )
+    assert (
+        proc.returncode == 0
+    ), f"Expected exit code 0 on missing transcript file, got {proc.returncode}: {proc.stderr}"
     res = json.loads(proc.stdout)
     assert res == {}, f"Expected empty response {{}} for missing transcript, got: {res}"
 

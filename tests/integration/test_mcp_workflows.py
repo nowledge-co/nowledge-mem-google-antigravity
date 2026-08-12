@@ -46,9 +46,9 @@ def test_mcp_memory_add_and_search(mem_server: MemServerContext) -> None:
     search_result = search_body["result"]
     assert "content" in search_result, f"Expected content in search result: {search_result}"
     search_text = str(search_result["content"])
-    assert "Pytest Integration Test Memory" in search_text, (
-        f"Memory search did not retrieve added memory payload in results: {search_text}"
-    )
+    assert (
+        "Pytest Integration Test Memory" in search_text
+    ), f"Memory search did not retrieve added memory payload in results: {search_text}"
 
 
 def test_mcp_mem_fs_ls_and_cat(mem_server: MemServerContext) -> None:
@@ -103,9 +103,9 @@ def test_mcp_unknown_tool_call(mem_server: MemServerContext) -> None:
     assert body.get("id") == 401
     has_error_dict = "error" in body
     is_error_result = body.get("result", {}).get("isError") is True
-    assert has_error_dict or is_error_result, (
-        f"Expected error payload or isError=True for unknown tool call, got: {body}"
-    )
+    assert (
+        has_error_dict or is_error_result
+    ), f"Expected error payload or isError=True for unknown tool call, got: {body}"
 
 
 def test_mcp_mem_fs_non_existent_path(mem_server: MemServerContext) -> None:

@@ -13,14 +13,16 @@ import nmem_shared
 
 def main():
     hook_input = nmem_shared.read_hook_input()
-    conversation_id = hook_input.get('conversationId')
-    transcript_path = hook_input.get('transcriptPath')
-    artifact_directory_path = hook_input.get('artifactDirectoryPath')
+    conversation_id = hook_input.get("conversationId")
+    transcript_path = hook_input.get("transcriptPath")
+    artifact_directory_path = hook_input.get("artifactDirectoryPath")
 
-    fully_idle = hook_input.get('fullyIdle')
+    fully_idle = hook_input.get("fullyIdle")
     if fully_idle is False:
-        if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
-            sys.stderr.write("session-end: fullyIdle is False (background tasks still running). Skipping thread capture.\n")
+        if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+            sys.stderr.write(
+                "session-end: fullyIdle is False (background tasks still running). Skipping thread capture.\n"
+            )
         nmem_shared.emit({})
         return
 
@@ -29,10 +31,10 @@ def main():
         return
 
     space = nmem_shared.resolve_space()
-    host_agent_id = os.environ.get('NMEM_HOST_AGENT_ID', '').strip()
+    host_agent_id = os.environ.get("NMEM_HOST_AGENT_ID", "").strip()
     if not host_agent_id:
         host_agent_id = nmem_shared.get_host_agent_fingerprint()
-    os.environ['NMEM_HOST_AGENT_ID'] = host_agent_id
+    os.environ["NMEM_HOST_AGENT_ID"] = host_agent_id
 
     try:
         delays = (0.0, 0.5, 1.0)
@@ -49,27 +51,21 @@ def main():
 
             try:
                 current_messages = []
-                with open(transcript_path, encoding='utf-8') as f:
+                with open(transcript_path, encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
                         if not line:
                             continue
                         try:
                             step = json.loads(line)
-                            source = step.get('source')
-                            content = step.get('content')
-                            step_type = step.get('type')
+                            source = step.get("source")
+                            content = step.get("content")
+                            step_type = step.get("type")
 
-                            if source == 'USER_EXPLICIT' and isinstance(content, str):
-                                current_messages.append({
-                                    'role': 'user',
-                                    'content': content
-                                })
-                            elif source == 'MODEL' and step_type == 'PLANNER_RESPONSE' and isinstance(content, str):
-                                current_messages.append({
-                                    'role': 'assistant',
-                                    'content': content
-                                })
+                            if source == "USER_EXPLICIT" and isinstance(content, str):
+                                current_messages.append({"role": "user", "content": content})
+                            elif source == "MODEL" and step_type == "PLANNER_RESPONSE" and isinstance(content, str):
+                                current_messages.append({"role": "assistant", "content": content})
                         except Exception:
                             pass
                 messages = current_messages
@@ -81,13 +77,13 @@ def main():
 
             # Generate clean title from first user request
             title = f"Antigravity Session {conversation_id[:8]}"
-            first_user_msg = next((m for m in messages if m['role'] == 'user'), None)
-            if first_user_msg and first_user_msg.get('content'):
-                clean_text = first_user_msg['content']
-                match = re.search(r'<USER_REQUEST>([\s\S]*?)</USER_REQUEST>', clean_text)
+            first_user_msg = next((m for m in messages if m["role"] == "user"), None)
+            if first_user_msg and first_user_msg.get("content"):
+                clean_text = first_user_msg["content"]
+                match = re.search(r"<USER_REQUEST>([\s\S]*?)</USER_REQUEST>", clean_text)
                 if match:
                     clean_text = match.group(1)
-                clean_text = ' '.join(clean_text.strip().split())
+                clean_text = " ".join(clean_text.strip().split())
                 if len(clean_text) > 60:
                     title = clean_text[:60] + "..."
                 elif len(clean_text) > 0:
@@ -100,11 +96,15 @@ def main():
             # Try HTTP transport first
             try:
                 space_param = f"?space={space}" if space else ""
-                check_res = nmem_shared.http_request(f"/threads/{conversation_id}{space_param}", method="GET", timeout=1.5)
-                if isinstance(check_res, dict) and (check_res.get("id") or check_res.get("thread_id") or "messages" in check_res):
+                check_res = nmem_shared.http_request(
+                    f"/threads/{conversation_id}{space_param}", method="GET", timeout=1.5
+                )
+                if isinstance(check_res, dict) and (
+                    check_res.get("id") or check_res.get("thread_id") or "messages" in check_res
+                ):
                     existing_msgs = check_res.get("messages") or []
                     if isinstance(existing_msgs, list):
-                        for old_m, new_m in zip(existing_msgs, messages):
+                        for old_m, new_m in zip(existing_msgs, messages, strict=False):
                             old_role = old_m.get("role") or old_m.get("sender")
                             new_role = new_m.get("role") or new_m.get("sender")
                             old_text = old_m.get("content") or old_m.get("text")
@@ -121,13 +121,15 @@ def main():
 
                     # Try reconcile-tail if there are matched leading messages
                     if matched_count > 0:
-                        rec_payload = {
-                            "matched_count": matched_count,
-                            "messages": messages[matched_count:]
-                        }
+                        rec_payload = {"matched_count": matched_count, "messages": messages[matched_count:]}
                         if space:
                             rec_payload["space"] = space
-                        rec_res = nmem_shared.http_request(f"/threads/{conversation_id}/reconcile-tail", method="POST", payload=rec_payload, timeout=2.5)
+                        rec_res = nmem_shared.http_request(
+                            f"/threads/{conversation_id}/reconcile-tail",
+                            method="POST",
+                            payload=rec_payload,
+                            timeout=2.5,
+                        )
                         if isinstance(rec_res, dict) and not rec_res.get("error"):
                             success = True
                             break
@@ -135,21 +137,27 @@ def main():
                     append_payload = {"messages": messages[matched_count:] if matched_count > 0 else messages}
                     if space:
                         append_payload["space"] = space
-                    app_res = nmem_shared.http_request(f"/threads/{conversation_id}/append", method="POST", payload=append_payload, timeout=2.5)
+                    app_res = nmem_shared.http_request(
+                        f"/threads/{conversation_id}/append", method="POST", payload=append_payload, timeout=2.5
+                    )
                     if isinstance(app_res, dict) and not app_res.get("error"):
                         success = True
                         break
-                elif isinstance(check_res, dict) and (check_res.get("error") in ("not_found", "thread_not_found") or check_res.get("status") == 404):
+                elif isinstance(check_res, dict) and (
+                    check_res.get("error") in ("not_found", "thread_not_found") or check_res.get("status") == 404
+                ):
                     # Explicit 404 / thread not found -> import new thread
                     import_payload = {
                         "id": conversation_id,
                         "title": title,
                         "source": "google-antigravity",
-                        "messages": messages
+                        "messages": messages,
                     }
                     if space:
                         import_payload["space"] = space
-                    imp_res = nmem_shared.http_request("/threads/import", method="POST", payload=import_payload, timeout=2.5)
+                    imp_res = nmem_shared.http_request(
+                        "/threads/import", method="POST", payload=import_payload, timeout=2.5
+                    )
                     if isinstance(imp_res, dict) and not imp_res.get("error"):
                         success = True
                         break
@@ -160,9 +168,9 @@ def main():
                 break
 
             # Check if the thread exists (CLI Fallback)
-            check_args = ['t', 'show', conversation_id]
+            check_args = ["t", "show", conversation_id]
             if space:
-                check_args.extend(['--space', space])
+                check_args.extend(["--space", space])
 
             thread_exists = False
             try:
@@ -170,28 +178,24 @@ def main():
                 if result.returncode == 0:
                     thread_exists = True
             except Exception as e:
-                if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+                if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                     sys.stderr.write(f"nmem t show execution failed: {e}\n")
 
             if thread_exists:
                 # Append trailing unmatched messages to existing thread
                 cli_append_msgs = messages[matched_count:] if matched_count > 0 else messages
                 if cli_append_msgs:
-                    append_args = ['t']
+                    append_args = ["t"]
                     if space:
-                        append_args.extend(['--space', space])
-                    append_args.extend([
-                        'append',
-                        conversation_id,
-                        '-m', json.dumps(cli_append_msgs)
-                    ])
+                        append_args.extend(["--space", space])
+                    append_args.extend(["append", conversation_id, "-m", json.dumps(cli_append_msgs)])
                     try:
                         result = nmem_shared.run_nmem_command(append_args, timeout=3.0)
                         if result.returncode == 0:
                             success = True
                             break
                     except Exception as e:
-                        if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+                        if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                             sys.stderr.write(f"nmem t append execution failed: {e}\n")
                 else:
                     success = True
@@ -199,14 +203,19 @@ def main():
             else:
                 # Import new thread
                 import_args = [
-                    't', 'import',
-                    '-m', json.dumps(messages),
-                    '--id', conversation_id,
-                    '-t', title,
-                    '-s', 'google-antigravity'
+                    "t",
+                    "import",
+                    "-m",
+                    json.dumps(messages),
+                    "--id",
+                    conversation_id,
+                    "-t",
+                    title,
+                    "-s",
+                    "google-antigravity",
                 ]
                 if space:
-                    import_args.extend(['--space', space])
+                    import_args.extend(["--space", space])
 
                 try:
                     result = nmem_shared.run_nmem_command(import_args, timeout=3.0)
@@ -214,10 +223,10 @@ def main():
                         success = True
                         break
                     else:
-                        if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+                        if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                             sys.stderr.write(f"nmem t import failed: {result.stderr}\n")
                 except Exception as e:
-                    if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+                    if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                         sys.stderr.write(f"nmem t import execution failed: {e}\n")
 
         if not success:
@@ -227,14 +236,15 @@ def main():
         try:
             nmem_shared.sync_learnings_if_any(conversation_id, transcript_path, artifact_directory_path, space)
         except Exception as e:
-            if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+            if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                 sys.stderr.write(f"Learning sync failed: {e}\n")
 
     except Exception as e:
-        if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+        if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
             sys.stderr.write(f"Hook execution failed: {e}\n")
 
     nmem_shared.emit({})
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

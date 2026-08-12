@@ -62,4 +62,3 @@ If you need to revert a Skill merge (restore the absorbed Skill and remove the m
 python3 hooks/nmem_entrypoint.py skill-manage restore-merge <skill_id>
 ```
 Note: This option is only available until that evidence is applied or changed.
-

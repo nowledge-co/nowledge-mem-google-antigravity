@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """PostInvocation hook handler for Nowledge Mem Google Antigravity plugin."""
+
 import sys
 from pathlib import Path
 
@@ -20,18 +21,13 @@ def main():
                 f"[Nowledge Mem Warning] There are {count} pending offline session(s) "
                 "queued in ~/.nowledge-mem/antigravity_unsynced.json waiting to be synchronized."
             )
-            nmem_shared.emit({
-                "injectSteps": [
-                    {
-                        "ephemeralMessage": msg
-                    }
-                ]
-            })
+            nmem_shared.emit({"injectSteps": [{"ephemeralMessage": msg}]})
             return
 
         nmem_shared.emit({})
     except Exception:
         nmem_shared.emit({})
+
 
 if __name__ == "__main__":
     main()

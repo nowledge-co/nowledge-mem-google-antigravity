@@ -48,4 +48,3 @@ python3 hooks/nmem_entrypoint.py wm-update --content "# Focus Areas\n- Priority 
 - If Context Bundle was already loaded and includes Working Memory, do not read Working Memory again.
 - Reuse that context mentally instead of re-reading on every turn.
 - Refresh or update only if the user asks, active focus areas change, or a long-running session needs it.
-

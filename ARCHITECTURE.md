@@ -21,9 +21,9 @@ flowchart TD
         B -->|Turn 1| E[session-start.py]
         C -->|Every Tool Call| F[nmem-gate.py]
         D -->|Session End| G[session-end.py]
-        
+
         E & F & G --> H[nmem_shared.py Transport & Config Layer]
-        
+
         I[rules/nowledge-mem.md] --> A
         J[skills/ Index] --> A
     end
@@ -157,4 +157,3 @@ python3 -m pytest -v tests/integration/
 # Validate manifest, configuration files, and release assets
 node scripts/validate-plugin.mjs
 ```
-
