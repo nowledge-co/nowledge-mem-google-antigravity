@@ -268,8 +268,8 @@ def test_session_start_hook(mock_write, mock_space, mock_read, mock_config, mock
     mock_config.return_value = ("http://127.0.0.1:14242", "key123")
     mock_read.return_value = {"conversationId": "conv-123"}
     mock_http.side_effect = [
-        {"context": "bundle"},
-        {"briefing": "working memory"},
+        {"rendered_markdown": "# Startup Context Bundle"},
+        {"content": "Daily Working Memory Briefing"},
     ]
 
     with (
@@ -278,8 +278,13 @@ def test_session_start_hook(mock_write, mock_space, mock_read, mock_config, mock
     ):
         session_start.main()
         mock_skills_sync.assert_called_once()
-        assert mock_http.call_count >= 2
+        assert mock_http.call_count >= 1
         mock_write.assert_called_once()
+        payload = json.loads(mock_write.call_args[0][0])
+        assert "injectSteps" in payload
+        assert len(payload["injectSteps"]) > 0
+        emitted_text = payload["injectSteps"][0]["ephemeralMessage"]
+        assert "Startup Context Bundle" in emitted_text
 
 
 @patch("nmem_shared.http_request")
@@ -422,23 +427,17 @@ def test_post_invocation_runs(mock_write, mock_input):
         mock_write.assert_called_once()
 
 
-@patch("nmem_shared.get_effective_config")
-@patch("nmem_shared.http_request")
+@patch("nmem_shared.run_nmem_command")
 @patch("sys.stdout.write")
-def test_nmem_status_connected(mock_write, mock_http, mock_config):
-    mock_config.return_value = ("http://127.0.0.1:14242", "key_123")
-    mock_http.side_effect = [
-        {"status": "ok"},
-        {"spaces": [{"id": "default"}]},
-        {"messages": []},
-    ]
+def test_nmem_status_connected(mock_write, mock_run_cmd):
+    mock_run_cmd.return_value = MagicMock(returncode=0, stdout="Connected to Nowledge Mem server", stderr="")
 
-    with patch("nmem_shared.resolve_space") as mock_space, patch.object(sys, "argv", ["nmem_status.py"]):
-        mock_space.return_value = "default"
+    with patch("nmem_shared.resolve_space", return_value="default"), patch.object(sys, "argv", ["nmem_status.py"]):
         nmem_status.main()
         assert mock_write.call_count >= 1
         written = "".join([c[0][0] for c in mock_write.call_args_list])
-        assert "Nowledge Mem" in written
+        assert "🟢 Connected" in written
+        assert "Active Space (Workspace)" in written
 
 
 def test_sync_learnings_rules():
