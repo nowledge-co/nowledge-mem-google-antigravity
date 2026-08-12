@@ -294,13 +294,14 @@ class TestSessionEnd(unittest.TestCase):
     def setUp(self):
         nmem_shared.reset_backend_unreachable()
 
+    @patch("nmem_shared.http_request", return_value=None)
     @patch("nmem_shared.get_existing_spaces", return_value=[{"id": "default"}])
     @patch("nmem_shared.read_hook_input")
     @patch("nmem_shared.emit")
     @patch("nmem_shared.run_nmem_command")
     @patch("os.path.exists")
     @patch("builtins.open", new_callable=mock_open, read_data='{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"<USER_REQUEST>Test request</USER_REQUEST>"}\n{"source":"MODEL","type":"PLANNER_RESPONSE","content":"Hello world!"}\n')
-    def test_session_end_captures_transcript(self, mock_file, mock_exists, mock_run, mock_emit, mock_input, mock_spaces):
+    def test_session_end_captures_transcript(self, mock_file, mock_exists, mock_run, mock_emit, mock_input, mock_spaces, mock_http):
         mock_input.return_value = {
             "conversationId": "conv-12345",
             "transcriptPath": "/fake/transcript.jsonl"
@@ -319,6 +320,33 @@ class TestSessionEnd(unittest.TestCase):
         mock_emit.assert_called_once_with({})
         # Verify show and import commands were executed
         self.assertEqual(mock_run.call_count, 2)
+
+    @patch("nmem_shared.http_request")
+    @patch("nmem_shared.get_existing_spaces", return_value=[{"id": "default"}])
+    @patch("nmem_shared.read_hook_input")
+    @patch("nmem_shared.emit")
+    @patch("nmem_shared.run_nmem_command")
+    @patch("os.path.exists")
+    @patch("builtins.open", new_callable=mock_open, read_data='{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"<USER_REQUEST>Test request</USER_REQUEST>"}\n{"source":"MODEL","type":"PLANNER_RESPONSE","content":"Hello world!"}\n')
+    def test_session_end_http_import_success(self, mock_file, mock_exists, mock_run, mock_emit, mock_input, mock_spaces, mock_http):
+        mock_input.return_value = {
+            "conversationId": "conv-12345",
+            "transcriptPath": "/fake/transcript.jsonl"
+        }
+        mock_exists.return_value = True
+        
+        # 1st HTTP request (GET /threads/conv-12345) returns 404 error dict
+        # 2nd HTTP request (POST /threads/import) returns success dict
+        mock_http.side_effect = [
+            {"error": "not_found", "status": 404},
+            {"id": "conv-12345", "status": "ok"}
+        ]
+        
+        session_end.main()
+        
+        mock_emit.assert_called_once_with({})
+        self.assertEqual(mock_http.call_count, 2)
+        mock_run.assert_not_called()
 
     @patch("nmem_shared.save_unsynced_session")
     @patch("nmem_shared.get_existing_spaces", return_value=[{"id": "default"}])
