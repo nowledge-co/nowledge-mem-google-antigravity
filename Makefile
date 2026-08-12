@@ -16,15 +16,17 @@ test: ## Run hooks unit tests
 test-integration: ## Run pytest container integration test suite
 	uv run pytest -v tests/integration/ || python3 -m pytest -v tests/integration/
 
-lint: ## Run ruff linter and ty type checks
+lint: ## Run ruff linter, ty type checks, and pre-commit
 	uv run ruff check tests/integration/
 	uv run ty check tests/integration/
+	uv run pre-commit run --all-files
 
 format: ## Run ruff code formatter
 	uv run ruff format tests/integration/
 
-validate: ## Validate manifest and run unit tests
+validate: ## Validate manifest, pre-commit, and run unit tests
 	npm run validate
+
 
 
 
