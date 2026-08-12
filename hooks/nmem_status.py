@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-import sys
-import os
 import argparse
 import json
+import os
+import sys
 from pathlib import Path
 
 # Add the hooks directory to sys.path to allow importing nmem_shared
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import nmem_shared
+
 
 def main():
     parser = argparse.ArgumentParser(description="Nowledge Mem Status Plugin")
@@ -62,7 +63,7 @@ def main():
     unsynced_count = 0
     is_current_pending = False
     unsynced_sessions = []
-    
+
     if unsynced_path.exists():
         try:
             unsynced_data = json.loads(unsynced_path.read_text(encoding="utf-8"))
@@ -76,7 +77,7 @@ def main():
 
     # 5. Format into beautiful Markdown
     conn_status = "🟢 Connected" if nmem_connected else "🔴 Disconnected"
-    
+
     if thread_synced:
         sync_status = "🟢 Synced"
     elif is_current_pending:

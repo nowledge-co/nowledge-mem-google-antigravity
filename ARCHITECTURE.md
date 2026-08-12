@@ -151,6 +151,10 @@ Run unit tests and plugin manifest verification:
 # Run hooks unit test suite
 python3 -m unittest discover -s tests -p "test_*.py"
 
+# Run container integration test suite against nowledgelabs/mem on a random host port
+python3 -m pytest -v tests/integration/
+
 # Validate manifest, configuration files, and release assets
 node scripts/validate-plugin.mjs
 ```
+

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-import sys
-import os
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 # Add the hooks directory to sys.path to allow importing nmem_shared
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import nmem_shared
+
 
 def read_nmem(args, keys):
     if nmem_shared.is_backend_unreachable():
@@ -78,7 +79,7 @@ def with_startup_args(args):
     if not host_agent_id:
         host_agent_id = nmem_shared.get_host_agent_fingerprint()
     space = nmem_shared.resolve_space()
-    
+
     if agent_id and '--agent-id' not in next_args:
         next_args.extend(['--agent-id', agent_id])
     if host_agent_id and '--host-agent-id' not in next_args:
@@ -105,7 +106,7 @@ def read_startup_context():
             'label': 'Context Bundle',
             'content': context_bundle
         }
-        
+
     working_memory = read_nmem(
         with_space_args(['wm', 'read']),
         ['content']
@@ -116,11 +117,11 @@ def read_startup_context():
             'label': 'Working Memory',
             'content': working_memory
         }
-        
+
     legacy_path = os.path.expanduser('~/ai-now/memory.md')
     if os.path.exists(legacy_path):
         try:
-            with open(legacy_path, 'r', encoding='utf-8') as f:
+            with open(legacy_path, encoding='utf-8') as f:
                 content = f.read().strip()
                 if content:
                     return {
@@ -130,7 +131,7 @@ def read_startup_context():
                     }
         except Exception:
             pass
-            
+
     return None
 
 def main():
@@ -157,13 +158,13 @@ def main():
         artifact_directory_path = hook_input.get('artifactDirectoryPath')
         invocation_num = hook_input.get('invocationNum')
         initial_num_steps = hook_input.get('initialNumSteps')
-        
+
         # Only run startup injection on the very first invocation.
         # Supports both 0-indexed and 1-indexed runtimes.
         is_first = (invocation_num == 0) or (
             invocation_num == 1 and (initial_num_steps is None or initial_num_steps <= 2)
         )
-        
+
         if is_first:
             try:
                 subprocess.Popen(
@@ -184,7 +185,7 @@ def main():
                     sys.stderr.write(f"Learning sync failed in start hook: {e}\n")
             nmem_shared.emit({})
             return
-            
+
         startup_context = read_startup_context()
         if not startup_context:
             nmem_shared.emit({})

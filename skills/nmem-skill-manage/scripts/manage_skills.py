@@ -1,41 +1,45 @@
 #!/usr/bin/env python3
-import sys
-import os
-import json
-import urllib.request
-import urllib.error
-import time
 import argparse
+import json
+import os
 import re
+import sys
+import time
+import urllib.error
+import urllib.request
+
 
 def load_config():
-    config_path = os.path.expanduser('~/.nowledge-mem/config.json')
-    config = {
-        'apiUrl': 'http://127.0.0.1:14242',
-        'apiKey': ''
-    }
-    
-    # 1. Config file
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if 'apiUrl' in data:
-                    config['apiUrl'] = data['apiUrl'].rstrip('/')
-                if 'apiKey' in data:
-                    config['apiKey'] = data['apiKey']
-        except Exception as e:
-            sys.stderr.write(f"Warning: Failed to load config from {config_path}: {e}\n")
+    env_url = os.environ.get('NMEM_API_URL', '').strip()
+    env_key = os.environ.get('NMEM_API_KEY', '').strip() or None
+    ignore_host = os.environ.get('NMEM_IGNORE_HOST_CONFIG', '').strip().lower() in ('1', 'true', 'yes')
 
-    # 2. Env vars override
-    env_url = os.environ.get('NMEM_API_URL')
-    if env_url:
-        config['apiUrl'] = env_url.rstrip('/')
-    env_key = os.environ.get('NMEM_API_KEY')
-    if env_key:
-        config['apiKey'] = env_key
+    config = {
+        'apiUrl': env_url.rstrip('/') if env_url else 'http://127.0.0.1:14242',
+        'apiKey': env_key or ''
+    }
+
+    if not ignore_host:
+        custom_cfg = os.environ.get('NMEM_CONFIG_PATH', '').strip()
+        config_file = Path(custom_cfg).expanduser() if custom_cfg else Path('~/.nowledge-mem/config.json').expanduser()
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, encoding='utf-8') as f:
+                    data = json.load(f)
+                    file_url = str(data.get('apiUrl', '')).strip().rstrip('/')
+                    file_key = str(data.get('apiKey', '')).strip() or ''
+
+                    if not env_url and file_url:
+                        config['apiUrl'] = file_url
+                    if not env_key and file_key:
+                        if not env_url or env_url.rstrip('/') == file_url:
+                            config['apiKey'] = file_key
+            except Exception as e:
+                if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+                    sys.stderr.write(f"Warning: Failed to load config from {config_file}: {e}\n")
 
     return config
+
 
 def make_request(config, path, method='GET', body=None):
     url = f"{config['apiUrl']}{path}"
@@ -51,7 +55,7 @@ def make_request(config, path, method='GET', body=None):
         data_bytes = json.dumps(body).encode('utf-8')
 
     req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method)
-    
+
     try:
         with urllib.request.urlopen(req, timeout=15) as res:
             res_body = res.read().decode('utf-8')
@@ -165,7 +169,7 @@ def list_command(config):
         if not skills:
             print("No skills available to install.")
             return
-        
+
         print(f"{'ID':<20} | {'STAGE':<10} | {'TRUST':<8} | {'TITLE'}")
         print("-" * 80)
         for s in skills:
@@ -184,7 +188,7 @@ def suggest_command(config, workspace_root):
     # Gather lowercase workspace terms from files, extensions, and directory names
     workspace_terms = set()
     ignored_dirs = {
-        'node_modules', 'venv', '.venv', '.gemini', 'build', 'dist', 
+        'node_modules', 'venv', '.venv', '.gemini', 'build', 'dist',
         '.idea', '.vscode', '__pycache__', '.git', 'out', 'target'
     }
     for root, dirs, files in os.walk(workspace_root):
@@ -218,13 +222,13 @@ def suggest_command(config, workspace_root):
             sid = s.get('id', '').lower()
             title = (s.get('title') or s.get('headline') or '').lower()
             desc = (s.get('description') or '').lower()
-            
+
             # Combine skill text to search against
             combined_text = f"{sid} {title} {desc}"
-            
+
             relevance = 0
             reasons = []
-            
+
             for term in workspace_terms:
                 if len(term) < 3:  # Skip trivial keywords to reduce noise
                     continue
@@ -299,7 +303,7 @@ def install_command(config, skill_id, workspace_root, ignore_git):
             except Exception as cli_err:
                 sys.stderr.write(f"Error: {cli_err}\n")
                 sys.exit(1)
-        
+
         if stage not in {'active', 'candidate', 'archived', 'draft'}:
             sys.stderr.write(f"Error: Skill '{skill_id}' is in stage '{stage}' which is not installable.\n")
             sys.exit(1)
@@ -314,7 +318,7 @@ def install_command(config, skill_id, workspace_root, ignore_git):
                 try:
                     compile_res = make_request(config, f"/agent/trigger/skill-compile?skill_id={skill_id}", method='POST')
                     print(f"Compilation queued: {compile_res}")
-                    
+
                     # Poll until compiled
                     max_attempts = 12
                     compiled = False
@@ -325,7 +329,7 @@ def install_command(config, skill_id, workspace_root, ignore_git):
                             compiled = True
                             break
                         print(f"Waiting for compilation (attempt {attempt+1}/{max_attempts})...")
-                    
+
                     if not compiled:
                         sys.stderr.write("Error: Skill compilation timed out.\n")
                         sys.exit(1)
@@ -374,7 +378,7 @@ def install_command(config, skill_id, workspace_root, ignore_git):
         target_dir = os.path.join(workspace_root, '.agents', 'skills', clean_name)
         os.makedirs(target_dir, exist_ok=True)
         target_file = os.path.join(target_dir, 'SKILL.md')
-        
+
         with open(target_file, 'w', encoding='utf-8') as f:
             f.write(body)
         print(f"Successfully installed/updated skill '{clean_name}' at:")
@@ -386,12 +390,12 @@ def install_command(config, skill_id, workspace_root, ignore_git):
             if git_dir and git_dir.exists():
                 exclude_path = git_dir / 'info' / 'exclude'
                 os.makedirs(exclude_path.parent, exist_ok=True)
-                
+
                 # Check if already excluded
                 already_excluded = False
                 exclude_line = f".agents/skills/{clean_name}/"
                 if exclude_path.exists():
-                    with open(exclude_path, 'r', encoding='utf-8') as ef:
+                    with open(exclude_path, encoding='utf-8') as ef:
                         lines = ef.read().splitlines()
                         if any(line.strip() == exclude_line for line in lines):
                             already_excluded = True

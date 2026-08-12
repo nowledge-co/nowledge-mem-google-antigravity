@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Manage Nowledge Mem Guidance Rules and Agent Settings in-place via REST API."""
-import sys
-import os
-import json
-import urllib.request
-import urllib.parse
-import urllib.error
 import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
 
 def load_config():
     config_path = os.path.expanduser('~/.nowledge-mem/config.json')
@@ -14,10 +15,10 @@ def load_config():
         'apiUrl': 'http://127.0.0.1:14242',
         'apiKey': ''
     }
-    
+
     if os.path.exists(config_path):
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
+            with open(config_path, encoding='utf-8') as f:
                 data = json.load(f)
                 if 'apiUrl' in data:
                     config['apiUrl'] = data['apiUrl'].rstrip('/')

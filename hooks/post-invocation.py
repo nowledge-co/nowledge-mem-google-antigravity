@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import nmem_shared
 
+
 def main():
     try:
         hook_input = nmem_shared.read_hook_input()

@@ -149,6 +149,30 @@ Use `nmem-memory-distill` for durable atomic knowledge, `nmem-thread-save` for t
 - **Install/Update Skill** (`nmem-skill-manage` skill / `/nmem-skill-manage`): Evaluates the project context, lists active/archived/candidate skills from Nowledge Mem, and helps recommend and install them into `<workspace-root>/.agents/skills/<skill-folder>/`. Users can choose to commit these skills to git or keep them local-only (via git-exclude).
 - **On-Demand Skill Loader** (`nmem-skill-load` skill / `/nmem-skill-load <query>`): Dynamically searches candidate/compiled skills on Nowledge Mem and loads them into the active turn (Ephemeral Mode) or installs them locally (Persistent Mode). Triggered explicitly via `/nmem-skill-load <query>` or automatically when Antigravity detects an unhandled domain task with an available skill definition.
 
+## Development & Testing
+
+Run unit tests for lifecycle hooks:
+
+```bash
+make test
+# or: npm run test
+```
+
+Run container integration test suite using `docker.io/nowledgelabs/mem:latest` published on a random host port:
+
+```bash
+make test-integration
+# or: python3 -m pytest -v tests/integration/
+```
+
+Run full plugin validation:
+
+```bash
+make validate
+# or: npm run validate
+```
+
+
 ## Links
 
 - [Architecture Deep Dive](./ARCHITECTURE.md)

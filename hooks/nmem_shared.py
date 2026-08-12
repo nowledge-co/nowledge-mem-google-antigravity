@@ -1,14 +1,15 @@
 # Shared Nowledge Mem plugin hook utilities
-import sys
-import os
-import json
 import hashlib
+import json
+import os
 import re
-import subprocess
-import uuid
 import shutil
+import subprocess
+import sys
 import time
+import uuid
 from pathlib import Path
+
 
 def read_hook_input() -> dict:
     """Read and parse JSON from stdin."""
@@ -166,20 +167,36 @@ def _windows_no_window_kwargs() -> dict[str, int]:
 def get_effective_config() -> tuple[str, str | None]:
     """Resolve effective API URL and API key following the hierarchy:
     1. NMEM_API_URL / NMEM_API_KEY environment variables
-    2. ~/.nowledge-mem/config.json
+    2. NMEM_CONFIG_PATH if set, or ~/.nowledge-mem/config.json (unless NMEM_IGNORE_HOST_CONFIG is set)
     3. Fallback default http://127.0.0.1:14242
-    """
-    api_url = os.environ.get("NMEM_API_URL", "").strip()
-    api_key = os.environ.get("NMEM_API_KEY", "").strip() or None
 
-    if not api_url:
-        config_file = Path("~/.nowledge-mem/config.json").expanduser()
+    Guards against inadvertently picking up host ~/.nowledge-mem/config.json credentials
+    when targeting custom server URLs or running isolated test environments.
+    """
+    env_url = os.environ.get("NMEM_API_URL", "").strip()
+    env_key = os.environ.get("NMEM_API_KEY", "").strip() or None
+    ignore_host = os.environ.get("NMEM_IGNORE_HOST_CONFIG", "").strip().lower() in ("1", "true", "yes")
+
+    api_url = env_url
+    api_key = env_key
+
+    if not ignore_host:
+        custom_cfg = os.environ.get("NMEM_CONFIG_PATH", "").strip()
+        config_file = Path(custom_cfg).expanduser() if custom_cfg else Path("~/.nowledge-mem/config.json").expanduser()
         if config_file.is_file():
             try:
                 data = json.loads(config_file.read_text(encoding="utf-8"))
-                api_url = data.get("apiUrl", "").strip()
-                if not api_key:
-                    api_key = data.get("apiKey", "").strip() or None
+                file_url = str(data.get("apiUrl", "")).strip().rstrip("/")
+                file_key = str(data.get("apiKey", "")).strip() or None
+
+                if not api_url and file_url:
+                    api_url = file_url
+
+                # Only reuse host API key if explicit NMEM_API_KEY was NOT set
+                # AND either NMEM_API_URL was not set or matches host file_url
+                if not api_key and file_key:
+                    if not env_url or env_url.rstrip("/") == file_url:
+                        api_key = file_key
             except Exception:
                 pass
 
@@ -187,6 +204,7 @@ def get_effective_config() -> tuple[str, str | None]:
         api_url = "http://127.0.0.1:14242"
 
     return api_url.rstrip("/"), api_key
+
 
 _BACKEND_UNREACHABLE_UNTIL = 0.0
 
@@ -387,8 +405,8 @@ def sync_host_skills_async() -> None:
 
 def http_request(endpoint: str, method: str = "GET", payload: dict | None = None, timeout: float = 1.5, skip_circuit_breaker: bool = False) -> dict | None:
     """Make a direct HTTP request to the Nowledge Mem backend prior to CLI fallback."""
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     if not skip_circuit_breaker and is_backend_unreachable():
         return None
@@ -530,22 +548,28 @@ def run_nmem_command(args: list[str], env: dict | None = None, cwd: str | None =
     nmem = _nmem_command()
     if not nmem:
         raise FileNotFoundError("nowledge-mem: nmem command not found in PATH")
-    
+
     is_cmd = nmem.lower().endswith(".cmd")
-    
+
     processed_args = []
     for arg in args:
         if is_cmd and isinstance(arg, str) and (arg.startswith("/") or arg.startswith("./") or arg.startswith("../")):
             processed_args.append(_cmd_exe_path(arg))
         else:
             processed_args.append(arg)
-            
+
     cmd = _build_nmem_command(nmem, *processed_args)
-    
+
     run_env = os.environ.copy()
     if env:
         run_env.update(env)
-        
+
+    # Safeguard spawned nmem CLI subprocess from accidentally picking up host ~/.nowledge-mem/config.json
+    if run_env.get("NMEM_IGNORE_HOST_CONFIG", "").strip().lower() in ("1", "true", "yes"):
+        if "NMEM_CONFIG_PATH" not in run_env:
+            run_env["NMEM_CONFIG_PATH"] = os.devnull
+
+
     return subprocess.run(
         cmd,
         input=input_str,
@@ -589,7 +613,7 @@ class FileLock:
     def __init__(self, lock_path: Path):
         self.lock_path = lock_path
         self.acquired = False
-        
+
     def __enter__(self):
         retries = 25
         while retries > 0:
@@ -619,7 +643,7 @@ class FileLock:
                 time.sleep(0.1)
                 retries -= 1
         raise TimeoutError(f"Could not acquire lock on {self.lock_path} within timeout.")
-        
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.acquired:
             try:
@@ -681,7 +705,7 @@ def retry_unsynced_sessions() -> None:
     config_dir = Path("~/.nowledge-mem").expanduser()
     queue_path = config_dir / "antigravity_unsynced.json"
     lock_path = queue_path.with_suffix(".lock")
-    
+
     if not queue_path.exists():
         return
 
@@ -835,18 +859,18 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
         space = resolve_space()
     if not artifact_directory_path or not os.path.exists(artifact_directory_path):
         return
-        
+
     proposal_path = Path(artifact_directory_path) / "learning_proposal.md"
     if not proposal_path.exists():
         return
-        
+
     # Check if the user approved the learning proposal in transcript
     if not transcript_path or not os.path.exists(transcript_path):
         return
-        
+
     approved = False
     try:
-        with open(transcript_path, 'r', encoding='utf-8') as f:
+        with open(transcript_path, encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -863,10 +887,10 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
     except Exception as e:
         if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
             sys.stderr.write(f"Error checking transcript for approval: {e}\n")
-            
+
     if not approved:
         return
-        
+
     # Parse learning_proposal.md
     try:
         content = proposal_path.read_text(encoding='utf-8')
@@ -874,15 +898,15 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
         if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
             sys.stderr.write(f"Error reading learning proposal: {e}\n")
         return
-        
+
     # Extract title
     title_match = re.search(r'^#\s*Learning\s+Proposal\s*-\s*(.*)$', content, re.IGNORECASE | re.MULTILINE)
     title = title_match.group(1).strip() if title_match else "Google Antigravity Learning"
-    
+
     # Generate deterministic UUID v5 from conversation_id and title
     mem_name = f"nowledge-mem.learning.{conversation_id}.{title}"
     memory_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, mem_name))
-    
+
     # Extract rule/markdown contents under "## Proposed Additions"
     proposed_additions_part = ""
     pos = content.lower().find("## proposed additions")
@@ -890,7 +914,7 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
         proposed_additions_part = content[pos:]
     else:
         proposed_additions_part = content
-        
+
     # Find first code block in that part
     code_block_match = re.search(r'```(?:markdown|properties|text|bash|sh|json|yaml|diff|python)?\s*\n([\s\S]*?)\n```', proposed_additions_part, re.IGNORECASE)
     if code_block_match:
@@ -910,7 +934,7 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
             synced_hashes = json.loads(synced_state_file.read_text(encoding='utf-8'))
         except Exception:
             pass
-            
+
     if proposal_hash in synced_hashes:
         if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
             sys.stderr.write(f"Learning proposal already synced (hash: {proposal_hash}). Skipping.\n")
@@ -919,7 +943,7 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
     # Detect skills and rules
     is_rule = False
     is_skill = False
-    
+
     # Check classification type
     type_match = re.search(r'-\s*\*\*Type\*\*\s*:\s*(.*)', content, re.IGNORECASE)
     if type_match:
@@ -949,7 +973,7 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
 
     # Execute appropriate sync command based on classification
     synced_any = False
-    
+
     # 1. Sync Skills
     if is_skill and skill_dirs:
         for s_dir in set(skill_dirs):
@@ -981,7 +1005,7 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
             ]
             if space:
                 upsert_args.extend(['--space', space])
-                
+
             result = run_nmem_command(upsert_args, timeout=15)
             if result.returncode == 0:
                 synced_any = True
@@ -1017,7 +1041,7 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
             labels.append("rule")
         if is_skill:
             labels.append("skill")
-            
+
         add_args = [
             'memories', 'add',
             '--id', memory_id,
@@ -1031,7 +1055,7 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
         for label in set(labels):
             add_args.extend(['--label', label])
         add_args.extend(['--title', title])
-        
+
         try:
             result = run_nmem_command(add_args, input_str=rule_content, timeout=15)
             if result.returncode == 0:

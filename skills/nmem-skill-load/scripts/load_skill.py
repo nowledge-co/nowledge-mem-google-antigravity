@@ -1,39 +1,45 @@
 #!/usr/bin/env python3
-import sys
-import os
-import json
-import urllib.request
-import urllib.parse
-import urllib.error
 import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
-def load_config():
-    config_path = os.path.expanduser('~/.nowledge-mem/config.json')
-    config = {
-        'apiUrl': 'http://127.0.0.1:14242',
-        'apiKey': ''
-    }
-    
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if 'apiUrl' in data:
-                    config['apiUrl'] = data['apiUrl'].rstrip('/')
-                if 'apiKey' in data:
-                    config['apiKey'] = data['apiKey']
-        except Exception as e:
-            sys.stderr.write(f"Warning: Failed to load config from {config_path}: {e}\n")
 
-    env_url = os.environ.get('NMEM_API_URL')
-    if env_url:
-        config['apiUrl'] = env_url.rstrip('/')
-    env_key = os.environ.get('NMEM_API_KEY')
-    if env_key:
-        config['apiKey'] = env_key
+def load_config():
+    env_url = os.environ.get('NMEM_API_URL', '').strip()
+    env_key = os.environ.get('NMEM_API_KEY', '').strip() or None
+    ignore_host = os.environ.get('NMEM_IGNORE_HOST_CONFIG', '').strip().lower() in ('1', 'true', 'yes')
+
+    config = {
+        'apiUrl': env_url.rstrip('/') if env_url else 'http://127.0.0.1:14242',
+        'apiKey': env_key or ''
+    }
+
+    if not ignore_host:
+        custom_cfg = os.environ.get('NMEM_CONFIG_PATH', '').strip()
+        config_file = Path(custom_cfg).expanduser() if custom_cfg else Path('~/.nowledge-mem/config.json').expanduser()
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, encoding='utf-8') as f:
+                    data = json.load(f)
+                    file_url = str(data.get('apiUrl', '')).strip().rstrip('/')
+                    file_key = str(data.get('apiKey', '')).strip() or ''
+
+                    if not env_url and file_url:
+                        config['apiUrl'] = file_url
+                    if not env_key and file_key:
+                        if not env_url or env_url.rstrip('/') == file_url:
+                            config['apiKey'] = file_key
+            except Exception as e:
+                if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+                    sys.stderr.write(f"Warning: Failed to load config from {config_file}: {e}\n")
 
     return config
+
 
 def make_request(config, path, method='GET', body=None):
     url = f"{config['apiUrl']}{path}"
@@ -47,7 +53,7 @@ def make_request(config, path, method='GET', body=None):
 
     data_bytes = json.dumps(body).encode('utf-8') if body is not None else None
     req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method)
-    
+
     try:
         with urllib.request.urlopen(req, timeout=10) as res:
             res_body = res.read().decode('utf-8')
@@ -121,7 +127,7 @@ def search_skills(query):
     config = load_config()
     encoded_q = urllib.parse.quote(query)
     skills = []
-    
+
     try:
         data = make_request(config, f"/skills?query={encoded_q}")
         if isinstance(data, dict):
@@ -151,7 +157,7 @@ def search_skills(query):
                 'description': s.get('description', ''),
                 'stage': s.get('stage', 'active')
             })
-            
+
     if not matches and skills:
         matches = [{'id': s.get('id'), 'name': s.get('name') or s.get('id'), 'description': s.get('description', ''), 'stage': s.get('stage', 'active')} for s in skills[:5]]
 
@@ -170,7 +176,7 @@ def fetch_skill(skill_id):
             return run_cli_show(skill_id)
         except Exception as cli_err:
             raise Exception(f"Fetch failed: {cli_err}")
-            
+
     return {}
 
 def get_git_dir(workspace_root):

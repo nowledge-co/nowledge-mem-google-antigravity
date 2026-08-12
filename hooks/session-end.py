@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-import sys
-import os
 import json
+import os
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -10,45 +10,46 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import nmem_shared
 
+
 def main():
     hook_input = nmem_shared.read_hook_input()
     conversation_id = hook_input.get('conversationId')
     transcript_path = hook_input.get('transcriptPath')
     artifact_directory_path = hook_input.get('artifactDirectoryPath')
-    
+
     fully_idle = hook_input.get('fullyIdle')
     if fully_idle is False:
         if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
             sys.stderr.write("session-end: fullyIdle is False (background tasks still running). Skipping thread capture.\n")
         nmem_shared.emit({})
         return
-        
+
     if not conversation_id or not transcript_path:
         nmem_shared.emit({})
         return
-        
+
     space = nmem_shared.resolve_space()
     host_agent_id = os.environ.get('NMEM_HOST_AGENT_ID', '').strip()
     if not host_agent_id:
         host_agent_id = nmem_shared.get_host_agent_fingerprint()
     os.environ['NMEM_HOST_AGENT_ID'] = host_agent_id
-    
+
     try:
         delays = (0.0, 0.5, 1.0)
         success = False
         messages = []
         title = f"Antigravity Session {conversation_id[:8]}"
-        
+
         for delay in delays:
             if delay > 0:
                 time.sleep(delay)
 
             if not os.path.exists(transcript_path):
                 continue
-                
+
             try:
                 current_messages = []
-                with open(transcript_path, 'r', encoding='utf-8') as f:
+                with open(transcript_path, encoding='utf-8') as f:
                     for line in f:
                         line = line.strip()
                         if not line:
@@ -58,7 +59,7 @@ def main():
                             source = step.get('source')
                             content = step.get('content')
                             step_type = step.get('type')
-                            
+
                             if source == 'USER_EXPLICIT' and isinstance(content, str):
                                 current_messages.append({
                                     'role': 'user',
@@ -74,10 +75,10 @@ def main():
                 messages = current_messages
             except Exception:
                 pass
-                
+
             if not messages:
                 continue
-                
+
             # Generate clean title from first user request
             title = f"Antigravity Session {conversation_id[:8]}"
             first_user_msg = next((m for m in messages if m['role'] == 'user'), None)
@@ -162,7 +163,7 @@ def main():
             check_args = ['t', 'show', conversation_id]
             if space:
                 check_args.extend(['--space', space])
-                
+
             thread_exists = False
             try:
                 result = nmem_shared.run_nmem_command(check_args, timeout=2.0)
@@ -171,7 +172,7 @@ def main():
             except Exception as e:
                 if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
                     sys.stderr.write(f"nmem t show execution failed: {e}\n")
-                    
+
             if thread_exists:
                 # Append trailing unmatched messages to existing thread
                 cli_append_msgs = messages[matched_count:] if matched_count > 0 else messages
@@ -206,7 +207,7 @@ def main():
                 ]
                 if space:
                     import_args.extend(['--space', space])
-                    
+
                 try:
                     result = nmem_shared.run_nmem_command(import_args, timeout=3.0)
                     if result.returncode == 0:
@@ -218,21 +219,21 @@ def main():
                 except Exception as e:
                     if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
                         sys.stderr.write(f"nmem t import execution failed: {e}\n")
-                        
+
         if not success:
             nmem_shared.save_unsynced_session(conversation_id, messages, title, space, host_agent_id)
-            
+
         # Seamlessly capture /learn learnings to nmem
         try:
             nmem_shared.sync_learnings_if_any(conversation_id, transcript_path, artifact_directory_path, space)
         except Exception as e:
             if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
                 sys.stderr.write(f"Learning sync failed: {e}\n")
-            
+
     except Exception as e:
         if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
             sys.stderr.write(f"Hook execution failed: {e}\n")
-            
+
     nmem_shared.emit({})
 
 if __name__ == '__main__':
