@@ -97,6 +97,7 @@ async function main() {
     'skills/nmem-skill-propose/SKILL.md',
     'skills/nmem-skill-load/SKILL.md',
     'skills/nmem-skill-load/scripts/load_skill.py',
+    '.github/workflows/ci.yml',
     'ARCHITECTURE.md',
     'scripts/validate-plugin.mjs',
     'scripts/package-plugin.mjs',
@@ -138,20 +139,27 @@ async function main() {
   console.log('Validated Google Antigravity plugin manifest, config files, and required release files.');
 
   console.log('Running hooks unit test suite...');
-  const testProc = spawnSync('python3', ['-m', 'unittest', 'discover', '-s', 'tests'], {
+  const testProc = spawnSync('uv', ['run', 'pytest', 'tests/test_hooks.py'], {
     cwd: pluginRoot,
     stdio: 'inherit'
   });
   if (testProc.status !== 0) {
-    const testProcFallback = spawnSync('python', ['-m', 'unittest', 'discover', '-s', 'tests'], {
+    const testProcFallback = spawnSync('python3', ['-m', 'pytest', 'tests/test_hooks.py'], {
       cwd: pluginRoot,
       stdio: 'inherit'
     });
     if (testProcFallback.status !== 0) {
-      fail('Hooks unit tests failed.');
+      const testProcUnittest = spawnSync('python3', ['-m', 'unittest', 'discover', '-s', 'tests'], {
+        cwd: pluginRoot,
+        stdio: 'inherit'
+      });
+      if (testProcUnittest.status !== 0) {
+        fail('Hooks unit tests failed.');
+      }
     }
   }
   console.log('All hooks unit tests passed.');
+
 }
 
 await main();

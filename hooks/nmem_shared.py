@@ -19,14 +19,16 @@ def read_hook_input() -> dict:
     except Exception:
         return {}
 
+
 def emit(payload: dict) -> None:
     """Write JSON to stdout and flush."""
     sys.stdout.write(json.dumps(payload))
     sys.stdout.flush()
 
+
 def get_host_agent_fingerprint(prefix: str = "antigravity") -> str:
     """Derive a stable agent-identity fingerprint from system sources.
-    
+
     Checks in order:
     1. /proc/1/mountinfo overlay ID (Linux containers / Docker / LazyCat)
     2. OS-specific machine identifier (machine-id, MachineGuid, IOPlatformUUID)
@@ -61,12 +63,14 @@ def get_host_agent_fingerprint(prefix: str = "antigravity") -> str:
     if not raw_id:
         try:
             import socket
+
             raw_id = socket.gethostname()
         except Exception:
             raw_id = "default-fallback"
 
     digest = hashlib.sha256(raw_id.encode("utf-8")).hexdigest()[:8]
     return f"{prefix}-{digest}"
+
 
 def _extract_overlay_id() -> str | None:
     """Pull the overlay upperdir layer hash from /proc/1/mountinfo."""
@@ -89,15 +93,14 @@ def _extract_overlay_id() -> str | None:
         pass
     return None
 
+
 def _get_windows_machine_guid() -> str:
     """Read Windows MachineGuid from Registry."""
     try:
         import winreg
+
         key = winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE,
-            r"SOFTWARE\Microsoft\Cryptography",
-            0,
-            winreg.KEY_READ | winreg.KEY_WOW64_64KEY
+            winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography", 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY
         )
         value, _ = winreg.QueryValueEx(key, "MachineGuid")
         winreg.CloseKey(key)
@@ -107,10 +110,14 @@ def _get_windows_machine_guid() -> str:
 
     try:
         out = subprocess.check_output(
-            ["powershell.exe", "-Command", "(Get-ItemProperty -Path 'Registry::HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography').MachineGuid"],
+            [
+                "powershell.exe",
+                "-Command",
+                "(Get-ItemProperty -Path 'Registry::HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography').MachineGuid",
+            ],
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=2.0
+            timeout=2.0,
         )
         if out.strip():
             return out.strip()
@@ -118,14 +125,12 @@ def _get_windows_machine_guid() -> str:
         pass
     return ""
 
+
 def _get_macos_hardware_uuid() -> str:
     """Retrieve macOS Hardware UUID."""
     try:
         out = subprocess.check_output(
-            ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=2.0
+            ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], stderr=subprocess.DEVNULL, text=True, timeout=2.0
         )
         m = re.search(r'"IOPlatformUUID" = "([^"]+)"', out)
         if m:
@@ -134,17 +139,13 @@ def _get_macos_hardware_uuid() -> str:
         pass
 
     try:
-        out = subprocess.check_output(
-            ["sysctl", "-n", "kern.uuid"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=2.0
-        )
+        out = subprocess.check_output(["sysctl", "-n", "kern.uuid"], stderr=subprocess.DEVNULL, text=True, timeout=2.0)
         if out.strip():
             return out.strip()
     except Exception:
         pass
     return ""
+
 
 def _get_linux_machine_id() -> str:
     """Read Linux machine-id."""
@@ -159,10 +160,12 @@ def _get_linux_machine_id() -> str:
                 pass
     return ""
 
+
 def _windows_no_window_kwargs() -> dict[str, int]:
     if sys.platform != "win32":
         return {}
     return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+
 
 def get_effective_config() -> tuple[str, str | None]:
     """Resolve effective API URL and API key following the hierarchy:
@@ -208,22 +211,27 @@ def get_effective_config() -> tuple[str, str | None]:
 
 _BACKEND_UNREACHABLE_UNTIL = 0.0
 
+
 def is_backend_unreachable() -> bool:
     """Check if recent connection failures indicate the backend is currently unreachable."""
     global _BACKEND_UNREACHABLE_UNTIL
     return time.time() < _BACKEND_UNREACHABLE_UNTIL
+
 
 def mark_backend_unreachable(cooldown: float = 30.0):
     """Mark backend as unreachable for a cooldown window to fail fast without repeated timeouts."""
     global _BACKEND_UNREACHABLE_UNTIL
     _BACKEND_UNREACHABLE_UNTIL = time.time() + cooldown
 
+
 def reset_backend_unreachable():
     """Reset backend unreachability state."""
     global _BACKEND_UNREACHABLE_UNTIL
     _BACKEND_UNREACHABLE_UNTIL = 0.0
 
+
 _SPACES_CACHE = {"timestamp": 0.0, "spaces": None}
+
 
 def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
     """Fetch known spaces from the Nowledge Mem backend with in-memory & file caching."""
@@ -283,6 +291,7 @@ def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
 
     return None
 
+
 def resolve_space(cwd: str | Path | None = None) -> str:
     """Resolve active space following priority:
     1. Explicit environment variables (NMEM_SPACE or NMEM_SPACE_ID)
@@ -335,6 +344,7 @@ def resolve_space(cwd: str | Path | None = None) -> str:
     # Dynamically detected space does not exist on backend and user has not explicitly set project space -> fall back to default
     return "default"
 
+
 def sync_mcp_config_file(mcp_config_path: str = None) -> bool:
     """Synchronize plugin mcp_config.json with effective client configuration
     (~/.nowledge-mem/config.json or NMEM_API_URL/NMEM_API_KEY env vars).
@@ -352,14 +362,7 @@ def sync_mcp_config_file(mcp_config_path: str = None) -> bool:
         headers["Authorization"] = f"Bearer {api_key}"
         headers["X-NMEM-API-Key"] = api_key
 
-    target_data = {
-        "mcpServers": {
-            "nowledge-mem": {
-                "serverUrl": server_url,
-                "headers": headers
-            }
-        }
-    }
+    target_data = {"mcpServers": {"nowledge-mem": {"serverUrl": server_url, "headers": headers}}}
 
     p = Path(mcp_config_path)
     current_data = None
@@ -403,10 +406,22 @@ def sync_host_skills_async() -> None:
     t = threading.Thread(target=_do_sync, daemon=True)
     t.start()
 
-def http_request(endpoint: str, method: str = "GET", payload: dict | None = None, timeout: float = 1.5, skip_circuit_breaker: bool = False) -> dict | None:
-    """Make a direct HTTP request to the Nowledge Mem backend prior to CLI fallback."""
+
+def http_request(
+    endpoint: str,
+    method: str = "GET",
+    payload: dict | None = None,
+    timeout: float = 1.5,
+    skip_circuit_breaker: bool = False,
+) -> dict | None:
+    """Make a direct HTTP request to the Nowledge Mem backend using httpx prior to CLI fallback."""
     import urllib.error
     import urllib.request
+
+    try:
+        import httpx
+    except ImportError:
+        httpx = None
 
     if not skip_circuit_breaker and is_backend_unreachable():
         return None
@@ -414,14 +429,31 @@ def http_request(endpoint: str, method: str = "GET", payload: dict | None = None
     api_url, api_key = get_effective_config()
     url = f"{api_url}{endpoint}"
 
-    headers = {
-        "Content-Type": "application/json",
-        "APP": "Google Antigravity"
-    }
+    headers = {"Content-Type": "application/json", "APP": "Google Antigravity"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
         headers["X-NMEM-API-Key"] = api_key
         headers["X-MEM-API-Key"] = api_key
+
+    if httpx is not None:
+        try:
+            resp = httpx.request(method, url, json=payload, headers=headers, timeout=timeout)
+            if resp.status_code in (200, 201):
+                reset_backend_unreachable()
+                return resp.json() if resp.text else {}
+            elif resp.status_code in (401, 403):
+                api_url, api_key = get_effective_config()
+                url = f"{api_url}{endpoint}"
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                    headers["X-NMEM-API-Key"] = api_key
+                    headers["X-MEM-API-Key"] = api_key
+                resp_retry = httpx.request(method, url, json=payload, headers=headers, timeout=timeout)
+                if resp_retry.status_code in (200, 201):
+                    reset_backend_unreachable()
+                    return resp_retry.json() if resp_retry.text else {}
+        except Exception:
+            pass
 
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -438,10 +470,7 @@ def http_request(endpoint: str, method: str = "GET", payload: dict | None = None
                 sys.stderr.write("Authorization failure (401/403). Retrying with reloaded config...\n")
             api_url, api_key = get_effective_config()
             url = f"{api_url}{endpoint}"
-            headers = {
-                "Content-Type": "application/json",
-                "APP": "Google Antigravity"
-            }
+            headers = {"Content-Type": "application/json", "APP": "Google Antigravity"}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
                 headers["X-NMEM-API-Key"] = api_key
@@ -471,6 +500,7 @@ def http_request(endpoint: str, method: str = "GET", payload: dict | None = None
 
     return None
 
+
 def _nmem_command() -> str | None:
     candidate = shutil.which("nmem") or shutil.which("nmem.cmd")
     if candidate:
@@ -499,15 +529,11 @@ def _nmem_command() -> str | None:
 
     return None
 
+
 def _cmd_exe_path(path: str) -> str:
     normalized = path.replace("\\", "/")
     parts = normalized.split("/")
-    if (
-        len(parts) > 3
-        and parts[0] == ""
-        and parts[1] == "mnt"
-        and len(parts[2]) == 1
-    ):
+    if len(parts) > 3 and parts[0] == "" and parts[1] == "mnt" and len(parts[2]) == 1:
         return f"{parts[2].upper()}:\\" + "\\".join(parts[3:])
     if len(path) >= 3 and path[1] == ":" and path[2] in ("\\", "/"):
         return path.replace("/", "\\")
@@ -533,6 +559,7 @@ def _cmd_exe_path(path: str) -> str:
             return "\\\\wsl.localhost\\" + distro + normalized.replace("/", "\\")
     return "nmem.cmd" if Path(path).name.lower() == "nmem.cmd" else path
 
+
 def _build_nmem_command(nmem: str, *args: str) -> list[str]:
     if nmem.lower().endswith(".cmd"):
         return [
@@ -543,7 +570,14 @@ def _build_nmem_command(nmem: str, *args: str) -> list[str]:
         ]
     return [nmem, *args]
 
-def run_nmem_command(args: list[str], env: dict | None = None, cwd: str | None = None, timeout: float | None = 5.0, input_str: str | None = None) -> subprocess.CompletedProcess:
+
+def run_nmem_command(
+    args: list[str],
+    env: dict | None = None,
+    cwd: str | None = None,
+    timeout: float | None = 5.0,
+    input_str: str | None = None,
+) -> subprocess.CompletedProcess:
     """Run an nmem command, finding the binary, translating path arguments if needed, and executing safely."""
     nmem = _nmem_command()
     if not nmem:
@@ -569,7 +603,6 @@ def run_nmem_command(args: list[str], env: dict | None = None, cwd: str | None =
         if "NMEM_CONFIG_PATH" not in run_env:
             run_env["NMEM_CONFIG_PATH"] = os.devnull
 
-
     return subprocess.run(
         cmd,
         input=input_str,
@@ -579,8 +612,9 @@ def run_nmem_command(args: list[str], env: dict | None = None, cwd: str | None =
         env=run_env,
         cwd=cwd,
         timeout=timeout,
-        **_windows_no_window_kwargs()
+        **_windows_no_window_kwargs(),
     )
+
 
 def _is_pid_alive(pid: int) -> bool:
     """Check whether a given PID is currently active on the host system."""
@@ -589,6 +623,7 @@ def _is_pid_alive(pid: int) -> bool:
     try:
         if sys.platform == "win32":
             import ctypes
+
             kernel32 = ctypes.windll.kernel32
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
             h_process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
@@ -604,12 +639,15 @@ def _is_pid_alive(pid: int) -> bool:
             return True
     except OSError as e:
         import errno
+
         return e.errno == errno.EPERM
     except Exception:
         return False
 
+
 class FileLock:
     """A simple platform-independent directory/file locking mechanism using exclusive creation and PID ownership checking."""
+
     def __init__(self, lock_path: Path):
         self.lock_path = lock_path
         self.acquired = False
@@ -651,7 +689,10 @@ class FileLock:
             except Exception:
                 pass
 
-def save_unsynced_session(conv_id: str, messages: list, title: str, space: str | None, host_agent_id: str | None) -> None:
+
+def save_unsynced_session(
+    conv_id: str, messages: list, title: str, space: str | None, host_agent_id: str | None
+) -> None:
     """Save a failed session to the unsynced queue file."""
     if not space:
         space = resolve_space()
@@ -676,7 +717,7 @@ def save_unsynced_session(conv_id: str, messages: list, title: str, space: str |
                 "messages": messages,
                 "title": title,
                 "space": space,
-                "host_agent_id": host_agent_id
+                "host_agent_id": host_agent_id,
             }
 
             # Save back
@@ -685,8 +726,9 @@ def save_unsynced_session(conv_id: str, messages: list, title: str, space: str |
             except Exception:
                 pass
     except Exception as e:
-        if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+        if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
             sys.stderr.write(f"Warning: Failed to write to unsynced sessions file: {e}\n")
+
 
 def get_unsynced_sessions() -> dict:
     """Return dict of pending unsynced sessions from the queue file."""
@@ -699,6 +741,7 @@ def get_unsynced_sessions() -> dict:
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
 
 def retry_unsynced_sessions() -> None:
     """Attempt to sync any unsynced sessions in the queue."""
@@ -735,10 +778,12 @@ def retry_unsynced_sessions() -> None:
                 try:
                     space_param = f"?space={space}" if space else ""
                     check_res = http_request(f"/threads/{conv_id}{space_param}", method="GET", timeout=1.5)
-                    if isinstance(check_res, dict) and (check_res.get("id") or check_res.get("thread_id") or "messages" in check_res):
+                    if isinstance(check_res, dict) and (
+                        check_res.get("id") or check_res.get("thread_id") or "messages" in check_res
+                    ):
                         existing_msgs = check_res.get("messages") or []
                         if isinstance(existing_msgs, list):
-                            for old_m, new_m in zip(existing_msgs, messages):
+                            for old_m, new_m in zip(existing_msgs, messages, strict=False):
                                 old_role = old_m.get("role") or old_m.get("sender")
                                 new_role = new_m.get("role") or new_m.get("sender")
                                 old_text = old_m.get("content") or old_m.get("text")
@@ -753,23 +798,29 @@ def retry_unsynced_sessions() -> None:
                             rec_payload = {"matched_count": matched_count, "messages": messages[matched_count:]}
                             if space:
                                 rec_payload["space"] = space
-                            rec_res = http_request(f"/threads/{conv_id}/reconcile-tail", method="POST", payload=rec_payload, timeout=2.5)
+                            rec_res = http_request(
+                                f"/threads/{conv_id}/reconcile-tail", method="POST", payload=rec_payload, timeout=2.5
+                            )
                             if isinstance(rec_res, dict) and not rec_res.get("error"):
                                 success = True
                         else:
                             app_payload = {"messages": messages}
                             if space:
                                 app_payload["space"] = space
-                            app_res = http_request(f"/threads/{conv_id}/append", method="POST", payload=app_payload, timeout=2.5)
+                            app_res = http_request(
+                                f"/threads/{conv_id}/append", method="POST", payload=app_payload, timeout=2.5
+                            )
                             if isinstance(app_res, dict) and not app_res.get("error"):
                                 success = True
-                    elif isinstance(check_res, dict) and (check_res.get("error") in ("not_found", "thread_not_found") or check_res.get("status") == 404):
+                    elif isinstance(check_res, dict) and (
+                        check_res.get("error") in ("not_found", "thread_not_found") or check_res.get("status") == 404
+                    ):
                         # Explicit 404 / thread not found -> import new thread
                         import_payload = {
                             "id": conv_id,
                             "title": title,
                             "source": "google-antigravity",
-                            "messages": messages
+                            "messages": messages,
                         }
                         if space:
                             import_payload["space"] = space
@@ -784,9 +835,9 @@ def retry_unsynced_sessions() -> None:
 
                 if not success:
                     # CLI Fallback
-                    check_args = ['t', 'show', conv_id]
+                    check_args = ["t", "show", conv_id]
                     if space:
-                        check_args.extend(['--space', space])
+                        check_args.extend(["--space", space])
 
                     thread_exists = False
                     try:
@@ -800,14 +851,10 @@ def retry_unsynced_sessions() -> None:
                         # Append trailing unmatched messages to existing thread
                         cli_append_msgs = messages[matched_count:] if matched_count > 0 else messages
                         if cli_append_msgs:
-                            append_args = ['t']
+                            append_args = ["t"]
                             if space:
-                                append_args.extend(['--space', space])
-                            append_args.extend([
-                                'append',
-                                conv_id,
-                                '-m', json.dumps(cli_append_msgs)
-                            ])
+                                append_args.extend(["--space", space])
+                            append_args.extend(["append", conv_id, "-m", json.dumps(cli_append_msgs)])
                             try:
                                 result = run_nmem_command(append_args, timeout=3.0)
                                 if result.returncode == 0:
@@ -819,18 +866,23 @@ def retry_unsynced_sessions() -> None:
                     else:
                         # Import new thread
                         import_args = [
-                            't', 'import',
-                            '-m', json.dumps(messages),
-                            '--id', conv_id,
-                            '-t', title,
-                            '-s', 'google-antigravity'
+                            "t",
+                            "import",
+                            "-m",
+                            json.dumps(messages),
+                            "--id",
+                            conv_id,
+                            "-t",
+                            title,
+                            "-s",
+                            "google-antigravity",
                         ]
                         if space:
-                            import_args.extend(['--space', space])
+                            import_args.extend(["--space", space])
 
                         env = {}
                         if host_agent_id:
-                            env['NMEM_HOST_AGENT_ID'] = host_agent_id
+                            env["NMEM_HOST_AGENT_ID"] = host_agent_id
                         try:
                             result = run_nmem_command(import_args, env=env, timeout=3.0)
                             if result.returncode == 0:
@@ -850,10 +902,13 @@ def retry_unsynced_sessions() -> None:
             except Exception:
                 pass
     except Exception as e:
-        if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+        if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
             sys.stderr.write(f"Warning: Failed to lock unsynced sessions file for retry: {e}\n")
 
-def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_directory_path: str, space: str | None) -> None:
+
+def sync_learnings_if_any(
+    conversation_id: str, transcript_path: str, artifact_directory_path: str, space: str | None
+) -> None:
     """Scan for learning_proposal.md, verify approval in transcript, and sync to nmem (as rule, skill, or memory)."""
     if not space:
         space = resolve_space()
@@ -870,7 +925,7 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
 
     approved = False
     try:
-        with open(transcript_path, encoding='utf-8') as f:
+        with open(transcript_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -885,7 +940,7 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
                 except Exception:
                     pass
     except Exception as e:
-        if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+        if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
             sys.stderr.write(f"Error checking transcript for approval: {e}\n")
 
     if not approved:
@@ -893,14 +948,14 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
 
     # Parse learning_proposal.md
     try:
-        content = proposal_path.read_text(encoding='utf-8')
+        content = proposal_path.read_text(encoding="utf-8")
     except Exception as e:
-        if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+        if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
             sys.stderr.write(f"Error reading learning proposal: {e}\n")
         return
 
     # Extract title
-    title_match = re.search(r'^#\s*Learning\s+Proposal\s*-\s*(.*)$', content, re.IGNORECASE | re.MULTILINE)
+    title_match = re.search(r"^#\s*Learning\s+Proposal\s*-\s*(.*)$", content, re.IGNORECASE | re.MULTILINE)
     title = title_match.group(1).strip() if title_match else "Google Antigravity Learning"
 
     # Generate deterministic UUID v5 from conversation_id and title
@@ -916,7 +971,11 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
         proposed_additions_part = content
 
     # Find first code block in that part
-    code_block_match = re.search(r'```(?:markdown|properties|text|bash|sh|json|yaml|diff|python)?\s*\n([\s\S]*?)\n```', proposed_additions_part, re.IGNORECASE)
+    code_block_match = re.search(
+        r"```(?:markdown|properties|text|bash|sh|json|yaml|diff|python)?\s*\n([\s\S]*?)\n```",
+        proposed_additions_part,
+        re.IGNORECASE,
+    )
     if code_block_match:
         rule_content = code_block_match.group(1).strip()
     else:
@@ -926,17 +985,17 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
         rule_content = "\n".join(lines).strip()
 
     # Avoid repeated syncing (performance optimization)
-    proposal_hash = hashlib.sha256(rule_content.encode('utf-8')).hexdigest()
+    proposal_hash = hashlib.sha256(rule_content.encode("utf-8")).hexdigest()
     synced_state_file = Path(artifact_directory_path) / ".nmem_synced"
     synced_hashes = []
     if synced_state_file.exists():
         try:
-            synced_hashes = json.loads(synced_state_file.read_text(encoding='utf-8'))
+            synced_hashes = json.loads(synced_state_file.read_text(encoding="utf-8"))
         except Exception:
             pass
 
     if proposal_hash in synced_hashes:
-        if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+        if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
             sys.stderr.write(f"Learning proposal already synced (hash: {proposal_hash}). Skipping.\n")
         return
 
@@ -945,7 +1004,7 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
     is_skill = False
 
     # Check classification type
-    type_match = re.search(r'-\s*\*\*Type\*\*\s*:\s*(.*)', content, re.IGNORECASE)
+    type_match = re.search(r"-\s*\*\*Type\*\*\s*:\s*(.*)", content, re.IGNORECASE)
     if type_match:
         type_str = type_match.group(1).lower()
         if "rule" in type_str:
@@ -955,7 +1014,7 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
 
     # Parse target files in the proposal to determine if rules or skills are modified
     skill_dirs = []
-    file_urls = re.findall(r'file://([^\s\)\?\#]+)', content)
+    file_urls = re.findall(r"file://([^\s\)\?\#]+)", content)
     for url in file_urls:
         try:
             path = Path(url)
@@ -977,18 +1036,18 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
     # 1. Sync Skills
     if is_skill and skill_dirs:
         for s_dir in set(skill_dirs):
-            enroll_args = ['skills', 'enroll', s_dir, '-y']
+            enroll_args = ["skills", "enroll", s_dir, "-y"]
             try:
                 result = run_nmem_command(enroll_args, timeout=15)
                 if result.returncode == 0:
                     synced_any = True
-                    if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+                    if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                         sys.stderr.write(f"Successfully enrolled skill to nmem: {s_dir}\n")
                 else:
-                    if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+                    if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                         sys.stderr.write(f"Failed to enroll skill to nmem: {result.stderr}\n")
             except Exception as e:
-                if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+                if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                     sys.stderr.write(f"Error enrolling skill: {e}\n")
 
     # 2. Sync Rules
@@ -996,26 +1055,21 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
         # Avoid CLI length limits by writing rule body to a temporary file
         temp_body_file = Path(artifact_directory_path) / f".temp_rule_{memory_id}.md"
         try:
-            temp_body_file.write_text(rule_content, encoding='utf-8')
-            upsert_args = [
-                'rules', 'upsert',
-                memory_id,
-                '--title', title,
-                '--body-file', str(temp_body_file)
-            ]
+            temp_body_file.write_text(rule_content, encoding="utf-8")
+            upsert_args = ["rules", "upsert", memory_id, "--title", title, "--body-file", str(temp_body_file)]
             if space:
-                upsert_args.extend(['--space', space])
+                upsert_args.extend(["--space", space])
 
             result = run_nmem_command(upsert_args, timeout=15)
             if result.returncode == 0:
                 synced_any = True
-                if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+                if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                     sys.stderr.write(f"Successfully upserted rule to nmem. ID: {memory_id}\n")
             else:
-                if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+                if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                     sys.stderr.write(f"Failed to upsert rule to nmem: {result.stderr}\n")
         except Exception as e:
-            if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+            if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                 sys.stderr.write(f"Error executing nmem rules upsert: {e}\n")
         finally:
             try:
@@ -1043,30 +1097,35 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
             labels.append("skill")
 
         add_args = [
-            'memories', 'add',
-            '--id', memory_id,
-            '--unit-type', 'learning',
-            '--source-thread', conversation_id,
-            '--source', 'google-antigravity',
-            '--stdin'
+            "memories",
+            "add",
+            "--id",
+            memory_id,
+            "--unit-type",
+            "learning",
+            "--source-thread",
+            conversation_id,
+            "--source",
+            "google-antigravity",
+            "--stdin",
         ]
         if space:
-            add_args.extend(['--space', space])
+            add_args.extend(["--space", space])
         for label in set(labels):
-            add_args.extend(['--label', label])
-        add_args.extend(['--title', title])
+            add_args.extend(["--label", label])
+        add_args.extend(["--title", title])
 
         try:
             result = run_nmem_command(add_args, input_str=rule_content, timeout=15)
             if result.returncode == 0:
                 synced_any = True
-                if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+                if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                     sys.stderr.write(f"Successfully upserted memory to nmem. ID: {memory_id}\n")
             else:
-                if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+                if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                     sys.stderr.write(f"Failed to upsert memory to nmem: {result.stderr}\n")
         except Exception as e:
-            if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+            if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                 sys.stderr.write(f"Error executing nmem memories add: {e}\n")
 
     # Mark as synced to prevent repeated sync operations on subsequent steps
@@ -1074,6 +1133,6 @@ def sync_learnings_if_any(conversation_id: str, transcript_path: str, artifact_d
         if proposal_hash not in synced_hashes:
             synced_hashes.append(proposal_hash)
         try:
-            synced_state_file.write_text(json.dumps(synced_hashes), encoding='utf-8')
+            synced_state_file.write_text(json.dumps(synced_hashes), encoding="utf-8")
         except Exception:
             pass
