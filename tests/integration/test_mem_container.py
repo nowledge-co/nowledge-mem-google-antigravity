@@ -116,16 +116,19 @@ def test_space_header_support(mem_server: MemServerContext) -> None:
 
 
 def test_unauthenticated_request_rejected(mem_server: MemServerContext) -> None:
-    """Negative Test: Verify unauthenticated requests with invalid API keys are rejected or handled."""
+    """Negative Test: Verify unauthenticated requests with invalid API keys are rejected when auth is configured."""
     invalid_headers = {"Authorization": "Bearer invalid_secret_key_12345", "X-NMEM-API-Key": "invalid_secret_key_12345"}
-    mcp_status, mcp_body, _ = mem_server.post_json(
+    mcp_status, _, _ = mem_server.post_json(
         "/mcp/", {"jsonrpc": "2.0", "id": 1, "method": "initialize"}, headers=invalid_headers
     )
-    assert mcp_status in (200, 401, 403), f"Unexpected HTTP status for invalid key: {mcp_status}"
+    if mem_server.api_key:
+        assert mcp_status in (401, 403), f"Expected 401/403 for invalid credentials, got {mcp_status}"
+    else:
+        assert mcp_status in (200, 401, 403), f"Unexpected status for invalid key: {mcp_status}"
 
 
 def test_malformed_json_body(mem_server: MemServerContext) -> None:
-    """Negative Test: Verify server returns error status or JSON-RPC parse error for malformed non-JSON body."""
+    """Negative Test: Verify server returns client error status or JSON-RPC error for malformed non-JSON body."""
     url = f"{mem_server.base_url.rstrip('/')}/mcp/"
     headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
     if mem_server.api_key:
@@ -133,7 +136,7 @@ def test_malformed_json_body(mem_server: MemServerContext) -> None:
 
     res = httpx.post(url, content=b"INVALID_NON_JSON{{{", headers=headers, timeout=5.0)
     assert (
-        res.status_code in (400, 406, 422, 500) or "error" in res.text.lower() or "fail" in res.text.lower()
+        res.status_code in (400, 406, 422) or "error" in res.text.lower() or "fail" in res.text.lower()
     ), f"Expected client error status or error text for malformed JSON, got status {res.status_code}: {res.text}"
 
 
