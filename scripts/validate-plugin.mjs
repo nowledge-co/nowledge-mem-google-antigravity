@@ -138,7 +138,24 @@ async function main() {
 
   console.log('Validated Google Antigravity plugin manifest, config files, and required release files.');
 
+  console.log('Running pre-commit static analysis...');
+  const precommitProc = spawnSync('uv', ['run', 'pre-commit', 'run', '--all-files'], {
+    cwd: pluginRoot,
+    stdio: 'inherit'
+  });
+  if (precommitProc.status !== 0) {
+    const ruffProc = spawnSync('uv', ['run', 'ruff', 'check', '.'], {
+      cwd: pluginRoot,
+      stdio: 'inherit'
+    });
+    if (ruffProc.status !== 0) {
+      fail('Pre-commit static analysis checks failed.');
+    }
+  }
+
+
   console.log('Running hooks unit test suite...');
+
   const testProc = spawnSync('uv', ['run', 'pytest', 'tests/test_hooks.py'], {
     cwd: pluginRoot,
     stdio: 'inherit'
