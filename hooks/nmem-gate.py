@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-import sys
 import json
 import os
 import re
+import sys
+
 
 def read_hook_input():
     try:
@@ -45,12 +46,12 @@ def main():
 
     # 1. Read-only tools (auto-allow)
     read_only = {
-        "memory_search", "thread_search", "read_context_bundle", 
+        "memory_search", "thread_search", "read_context_bundle",
         "read_working_memory", "list_memory_labels", "thread_fetch_messages",
-        "search_thread_messages", "list_crystals", "graph_stats", 
+        "search_thread_messages", "list_crystals", "graph_stats",
         "list_communities", "get_community_details", "get_wiki_page",
-        "explore_graph", "query_sources", "query_library", "read_source_content", 
-        "read_artifact_content", "search_source_chunks", "search_artifact_chunks", 
+        "explore_graph", "query_sources", "query_library", "read_source_content",
+        "read_artifact_content", "search_source_chunks", "search_artifact_chunks",
         "analyze_source_data", "analyze_artifact_data", "mem_fs",
         "get_memory_by_id", "memory_neighbors", "report_skill_outcome",
         "memory_evolves_chain", "memory_relation_suggest", "memory_relation_list",
@@ -86,7 +87,7 @@ def main():
         if transcript_path and os.path.exists(transcript_path):
             try:
                 user_authorized = False
-                with open(transcript_path, 'r', encoding='utf-8') as f:
+                with open(transcript_path, encoding='utf-8') as f:
                     for line in f:
                         line = line.strip()
                         if not line:
@@ -107,7 +108,7 @@ def main():
                     return
             except Exception:
                 pass
-        
+
         # Fallback to ask if no recent intent is found
         emit({
             "decision": "ask",

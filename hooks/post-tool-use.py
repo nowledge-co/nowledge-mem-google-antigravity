@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """PostToolUse hook handler for Nowledge Mem Google Antigravity plugin."""
 import sys
-import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import nmem_shared
+
 
 def main():
     try:

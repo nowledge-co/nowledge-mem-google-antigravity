@@ -1,18 +1,20 @@
-import sys
-import os
 import json
+import os
+import sys
 import tempfile
 import unittest
-from unittest.mock import patch, MagicMock, mock_open
 from pathlib import Path
+from unittest.mock import MagicMock, mock_open, patch
 
 # Add hooks directory to path to import nmem_shared and others
 HOOKS_DIR = Path(__file__).parent.parent / "hooks"
 sys.path.insert(0, str(HOOKS_DIR))
 
+import importlib.util
+
 import nmem_shared
 
-import importlib.util
+
 def import_module_from_path(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
@@ -27,7 +29,7 @@ nmem_gate = import_module_from_path("nmem_gate", str(HOOKS_DIR / "nmem-gate.py")
 nmem_status = import_module_from_path("nmem_status", str(HOOKS_DIR / "nmem_status.py"))
 
 class TestNmemShared(unittest.TestCase):
-    
+
     @patch("os.access", return_value=True)
     @patch("pathlib.Path.is_file", return_value=True)
     @patch("pathlib.Path.resolve")
@@ -48,7 +50,7 @@ class TestNmemShared(unittest.TestCase):
     def test_cmd_exe_path_conversion(self):
         # WSL mount to Windows path
         self.assertEqual(nmem_shared._cmd_exe_path("/mnt/c/Users/test"), "C:\\Users\\test")
-        
+
         # Already Windows path
         self.assertEqual(nmem_shared._cmd_exe_path("C:\\Users\\test"), "C:\\Users\\test")
         self.assertEqual(nmem_shared._cmd_exe_path("C:/Users/test"), "C:\\Users\\test")
@@ -59,11 +61,11 @@ class TestNmemShared(unittest.TestCase):
     @patch("nmem_shared._cmd_exe_path")
     def test_build_nmem_command(self, mock_cmd_path):
         mock_cmd_path.side_effect = lambda x: "C:\\bin\\nmem.cmd" if "nmem.cmd" in x else x
-        
+
         # Non-Windows cmd path
         cmd = nmem_shared._build_nmem_command("/usr/bin/nmem", "t", "show")
         self.assertEqual(cmd, ["/usr/bin/nmem", "t", "show"])
-        
+
         # Windows cmd path
         cmd = nmem_shared._build_nmem_command("C:\\bin\\nmem.cmd", "t", "show")
         self.assertEqual(cmd[0], "cmd.exe")
@@ -75,7 +77,7 @@ class TestNmemShared(unittest.TestCase):
     def test_run_nmem_command(self, mock_run, mock_nmem_command):
         mock_nmem_command.return_value = "/usr/bin/nmem"
         mock_run.return_value = MagicMock(returncode=0, stdout="success", stderr="")
-        
+
         res = nmem_shared.run_nmem_command(["t", "show"])
         self.assertEqual(res.stdout, "success")
         mock_run.assert_called_once()
@@ -85,7 +87,7 @@ class TestNmemShared(unittest.TestCase):
     def test_host_agent_fingerprint(self, mock_gethostname, mock_getnode):
         mock_getnode.return_value = 123456789
         mock_gethostname.return_value = "my-host"
-        
+
         fp = nmem_shared.get_host_agent_fingerprint()
         self.assertTrue(fp.startswith("antigravity-"))
 
@@ -103,7 +105,7 @@ class TestNmemShared(unittest.TestCase):
             self.assertEqual(data["mcpServers"]["nowledge-mem"]["headers"]["Authorization"], "Bearer nmem_sec_123")
             self.assertEqual(data["mcpServers"]["nowledge-mem"]["headers"]["X-NMEM-API-Key"], "nmem_sec_123")
             self.assertNotIn("X-MEM-API-Key", data["mcpServers"]["nowledge-mem"]["headers"])
-            
+
             # Second call should return False (already up to date)
             updated_again = nmem_shared.sync_mcp_config_file(tf_path)
             self.assertFalse(updated_again)
@@ -116,14 +118,14 @@ class TestNmemShared(unittest.TestCase):
     @patch("nmem_shared.run_nmem_command")
     def test_sync_host_skills_async(self, mock_run_cmd, mock_nmem_cmd, mock_thread):
         mock_nmem_cmd.return_value = "/usr/bin/nmem"
-        
+
         # Make the mocked Thread's start call target immediately
         def mock_start():
             target = mock_thread.call_args[1].get('target')
             if target:
                 target()
         mock_thread.return_value.start.side_effect = mock_start
-        
+
         nmem_shared.sync_host_skills_async()
         self.assertTrue(mock_run_cmd.called)
         calls = [c[0][0] for c in mock_run_cmd.call_args_list]
@@ -198,6 +200,28 @@ class TestNmemShared(unittest.TestCase):
         # Explicit env override returns explicitly requested space even if it doesn't exist on server
         self.assertEqual(nmem_shared.resolve_space("/path/to/random"), "custom-explicit-space")
 
+    @patch("pathlib.Path.is_file", return_value=True)
+    @patch("pathlib.Path.read_text")
+    def test_get_effective_config_ignore_host_config(self, mock_read_text, mock_is_file):
+        mock_read_text.return_value = '{"apiUrl": "http://127.0.0.1:14242", "apiKey": "host_secret_key"}'
+        env_dict = {"NMEM_IGNORE_HOST_CONFIG": "1", "NMEM_API_URL": "http://127.0.0.1:9999"}
+        with patch.dict(os.environ, env_dict, clear=True):
+            url, key = nmem_shared.get_effective_config()
+            self.assertEqual(url, "http://127.0.0.1:9999")
+            self.assertIsNone(key)
+
+    @patch("pathlib.Path.is_file", return_value=True)
+    @patch("pathlib.Path.read_text")
+    def test_get_effective_config_prevents_host_key_leak_on_url_mismatch(self, mock_read_text, mock_is_file):
+        mock_read_text.return_value = '{"apiUrl": "http://127.0.0.1:14242", "apiKey": "host_prod_key"}'
+        # NMEM_API_URL set to test server 8888 without explicit API key -> should NOT leak host_prod_key from config.json
+        env_dict = {"NMEM_API_URL": "http://127.0.0.1:8888"}
+        with patch.dict(os.environ, env_dict, clear=True):
+            url, key = nmem_shared.get_effective_config()
+            self.assertEqual(url, "http://127.0.0.1:8888")
+            self.assertIsNone(key)
+
+
     @patch("nmem_shared.get_existing_spaces")
     def test_resolve_space_dynamic_existing(self, mock_get_spaces):
         mock_get_spaces.return_value = [
@@ -230,7 +254,7 @@ class TestNmemShared(unittest.TestCase):
 
 
 class TestSessionStart(unittest.TestCase):
-    
+
     def setUp(self):
         nmem_shared.reset_backend_unreachable()
 
@@ -244,15 +268,15 @@ class TestSessionStart(unittest.TestCase):
     def test_session_start_ephemeral_injection(self, mock_sync_mcp, mock_sync, mock_popen, mock_run, mock_emit, mock_http, mock_input):
         nmem_shared.reset_backend_unreachable()
         mock_input.return_value = {"invocationNum": 0}
-        
+
         # Mock Context Bundle output
         context_json = json.dumps({
             "rendered_markdown": "Startup context bundle content"
         })
         mock_run.return_value = MagicMock(returncode=0, stdout=context_json)
-        
+
         session_start.main()
-        
+
         mock_emit.assert_called_once()
         args, _ = mock_emit.call_args
         payload = args[0]
@@ -261,16 +285,16 @@ class TestSessionStart(unittest.TestCase):
 
 
 class TestPostInvocation(unittest.TestCase):
-    
+
     @patch("nmem_shared.get_unsynced_sessions")
     @patch("nmem_shared.read_hook_input")
     @patch("nmem_shared.emit")
     def test_post_invocation_injects_warning_when_unsynced_exists(self, mock_emit, mock_input, mock_unsynced):
         mock_input.return_value = {"invocationNum": 1}
         mock_unsynced.return_value = {"conv-1": {"title": "Test"}}
-        
+
         post_invocation.main()
-        
+
         mock_emit.assert_called_once()
         args, _ = mock_emit.call_args
         payload = args[0]
@@ -283,70 +307,42 @@ class TestPostInvocation(unittest.TestCase):
     def test_post_invocation_emits_empty_when_no_unsynced(self, mock_emit, mock_input, mock_unsynced):
         mock_input.return_value = {"invocationNum": 1}
         mock_unsynced.return_value = {}
-        
+
         post_invocation.main()
-        
+
         mock_emit.assert_called_once_with({})
 
 
 class TestSessionEnd(unittest.TestCase):
-    
+
     def setUp(self):
         nmem_shared.reset_backend_unreachable()
 
-    @patch("nmem_shared.http_request", return_value=None)
     @patch("nmem_shared.get_existing_spaces", return_value=[{"id": "default"}])
     @patch("nmem_shared.read_hook_input")
     @patch("nmem_shared.emit")
     @patch("nmem_shared.run_nmem_command")
     @patch("os.path.exists")
     @patch("builtins.open", new_callable=mock_open, read_data='{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"<USER_REQUEST>Test request</USER_REQUEST>"}\n{"source":"MODEL","type":"PLANNER_RESPONSE","content":"Hello world!"}\n')
-    def test_session_end_captures_transcript(self, mock_file, mock_exists, mock_run, mock_emit, mock_input, mock_spaces, mock_http):
+    def test_session_end_captures_transcript(self, mock_file, mock_exists, mock_run, mock_emit, mock_input, mock_spaces):
         mock_input.return_value = {
             "conversationId": "conv-12345",
             "transcriptPath": "/fake/transcript.jsonl"
         }
         mock_exists.return_value = True
-        
+
         # Thread show returns non-zero (does not exist)
         # Thread import returns 0 (success)
         mock_run.side_effect = [
             MagicMock(returncode=1, stdout="", stderr=""), # show
             MagicMock(returncode=0, stdout="imported", stderr="") # import
         ]
-        
+
         session_end.main()
-        
+
         mock_emit.assert_called_once_with({})
         # Verify show and import commands were executed
         self.assertEqual(mock_run.call_count, 2)
-
-    @patch("nmem_shared.http_request")
-    @patch("nmem_shared.get_existing_spaces", return_value=[{"id": "default"}])
-    @patch("nmem_shared.read_hook_input")
-    @patch("nmem_shared.emit")
-    @patch("nmem_shared.run_nmem_command")
-    @patch("os.path.exists")
-    @patch("builtins.open", new_callable=mock_open, read_data='{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"<USER_REQUEST>Test request</USER_REQUEST>"}\n{"source":"MODEL","type":"PLANNER_RESPONSE","content":"Hello world!"}\n')
-    def test_session_end_http_import_success(self, mock_file, mock_exists, mock_run, mock_emit, mock_input, mock_spaces, mock_http):
-        mock_input.return_value = {
-            "conversationId": "conv-12345",
-            "transcriptPath": "/fake/transcript.jsonl"
-        }
-        mock_exists.return_value = True
-        
-        # 1st HTTP request (GET /threads/conv-12345) returns 404 error dict
-        # 2nd HTTP request (POST /threads/import) returns success dict
-        mock_http.side_effect = [
-            {"error": "not_found", "status": 404},
-            {"id": "conv-12345", "status": "ok"}
-        ]
-        
-        session_end.main()
-        
-        mock_emit.assert_called_once_with({})
-        self.assertEqual(mock_http.call_count, 2)
-        mock_run.assert_not_called()
 
     @patch("nmem_shared.save_unsynced_session")
     @patch("nmem_shared.get_existing_spaces", return_value=[{"id": "default"}])
@@ -361,9 +357,9 @@ class TestSessionEnd(unittest.TestCase):
         }
         # Mark backend unreachable prior to session-end
         nmem_shared.mark_backend_unreachable()
-        
+
         session_end.main()
-        
+
         # Verify save_unsynced_session was called with non-empty populated messages & clean title
         mock_save.assert_called_once()
         call_args = mock_save.call_args[0]
@@ -387,9 +383,21 @@ class TestSessionEnd(unittest.TestCase):
         mock_emit.assert_called_once_with({})
         mock_run.assert_not_called()
 
+    @patch("nmem_shared.read_hook_input")
+    @patch("nmem_shared.emit")
+    @patch("os.path.exists", return_value=False)
+    def test_session_end_missing_transcript_file(self, mock_exists, mock_emit, mock_input):
+        mock_input.return_value = {
+            "conversationId": "conv-12345",
+            "transcriptPath": "/fake/non_existent_transcript.jsonl"
+        }
+        session_end.main()
+        mock_emit.assert_called_once_with({})
+
+
 
 class TestNmemGate(unittest.TestCase):
-    
+
     @patch("nmem_gate.read_hook_input")
     @patch("sys.stdout.write")
     @patch("sys.stdout.flush")
@@ -403,9 +411,9 @@ class TestNmemGate(unittest.TestCase):
                 }
             }
         }
-        
+
         nmem_gate.main()
-        
+
         # Gather stdout write calls
         written = "".join(call.args[0] for call in mock_write.call_args_list)
         payload = json.loads(written)
@@ -423,9 +431,9 @@ class TestNmemGate(unittest.TestCase):
                 }
             }
         }
-        
+
         nmem_gate.main()
-        
+
         written = "".join(call.args[0] for call in mock_write.call_args_list)
         payload = json.loads(written)
         self.assertEqual(payload["decision"], "force_ask")
@@ -463,9 +471,9 @@ class TestNmemGate(unittest.TestCase):
             "transcriptPath": "/fake/transcript.jsonl"
         }
         mock_exists.return_value = True
-        
+
         nmem_gate.main()
-        
+
         written = "".join(call.args[0] for call in mock_write.call_args_list)
         payload = json.loads(written)
         self.assertEqual(payload["decision"], "allow")
@@ -553,7 +561,7 @@ class TestNmemGate(unittest.TestCase):
 
 
 class TestNmemStatus(unittest.TestCase):
-    
+
     @patch("nmem_shared.get_existing_spaces", return_value=[{"id": "default"}])
     @patch("nmem_shared.run_nmem_command")
     @patch("nmem_shared.get_host_agent_fingerprint")
@@ -566,20 +574,19 @@ class TestNmemStatus(unittest.TestCase):
             "conv-123": {"title": "Test thread"},
             "conv-2": {"title": "Another thread"}
         })
-        
+
         mock_run.side_effect = [
             MagicMock(returncode=0, stdout="Connected to backend", stderr=""),
             MagicMock(returncode=0, stdout="Thread: conv-123\nMessages: 5", stderr="")
         ]
-        
+
         import io
         from contextlib import redirect_stdout
-        
+
         f = io.StringIO()
-        with redirect_stdout(f):
-            with patch("sys.argv", ["nmem_status.py", "--conv-id", "conv-123"]):
-                nmem_status.main()
-                
+        with redirect_stdout(f), patch("sys.argv", ["nmem_status.py", "--conv-id", "conv-123"]):
+            nmem_status.main()
+
         output = f.getvalue()
         self.assertIn("🟢 Connected", output)
         self.assertIn("🟢 Synced", output)
@@ -588,7 +595,7 @@ class TestNmemStatus(unittest.TestCase):
 
 
 class TestSyncLearnings(unittest.TestCase):
-    
+
     @patch("nmem_shared.run_nmem_command")
     @patch("pathlib.Path.exists")
     @patch("pathlib.Path.read_text")
@@ -598,7 +605,7 @@ class TestSyncLearnings(unittest.TestCase):
     def test_sync_learnings_rules(self, mock_file, mock_os_exists, mock_write_text, mock_read_text, mock_exists, mock_run):
         mock_os_exists.side_effect = lambda x: True
         mock_exists.return_value = True
-        
+
         proposal_content = """# Learning Proposal - My Rule
 
 ## Classification
@@ -611,12 +618,12 @@ class TestSyncLearnings(unittest.TestCase):
 """
         # First read_text for proposal, second for checking synced state file (doesn't exist)
         mock_read_text.side_effect = [proposal_content, "[]"]
-        
+
         mock_run.return_value = MagicMock(returncode=0, stdout="success", stderr="")
-        
+
         with patch("pathlib.Path.unlink") as mock_unlink:
             nmem_shared.sync_learnings_if_any("conv-123", "/path/to/transcript.jsonl", "/path/to/artifacts", "default")
-            
+
         mock_run.assert_called_once()
         args = mock_run.call_args[0][0]
         self.assertEqual(args[0], "rules")
@@ -664,7 +671,7 @@ class TestNmemEntrypoint(unittest.TestCase):
 
 
 class TestLoadSkill(unittest.TestCase):
-    
+
     @patch("load_skill.make_request")
     def test_search_skills(self, mock_make_request):
         mock_make_request.return_value = {
@@ -688,7 +695,7 @@ class TestLoadSkill(unittest.TestCase):
 
 
 class TestManageSkills(unittest.TestCase):
-    
+
     def test_compute_trust_badge(self):
         self.assertEqual(manage_skills.compute_trust_badge({"trust_badge": "proven"}), "Proven")
         self.assertEqual(manage_skills.compute_trust_badge({"passed_tests_count": 2}), "Proven")
@@ -699,7 +706,7 @@ class TestManageSkills(unittest.TestCase):
     @patch("manage_skills.make_request")
     def test_restore_merge(self, mock_make_request):
         mock_make_request.return_value = {"status": "success", "skill_id": "makefile-pattern"}
-        
+
         import io
         from contextlib import redirect_stdout
         f = io.StringIO()
@@ -716,24 +723,24 @@ class TestManageSkills(unittest.TestCase):
     @patch("urllib.request.urlopen")
     @patch("manage_skills.load_config")
     def test_make_request_token_rotation_retry(self, mock_load_config, mock_urlopen):
-        import urllib.error
         import io
-        
+        import urllib.error
+
         # 1st call raises 401
         err = urllib.error.HTTPError("http://localhost/skills", 401, "Unauthorized", {}, None)
         err.fp = io.BytesIO(b'{"detail": "Token expired"}')
-        
+
         # 2nd call returns success
         mock_resp = MagicMock()
         mock_resp.read.return_value = b'{"status": "ok"}'
         mock_resp.__enter__.return_value = mock_resp
-        
+
         mock_urlopen.side_effect = [err, mock_resp]
         mock_load_config.return_value = {"apiUrl": "http://localhost", "apiKey": "new_key"}
-        
+
         config = {"apiUrl": "http://localhost", "apiKey": "old_key"}
         res = manage_skills.make_request(config, "/skills")
-        
+
         self.assertEqual(res, {"status": "ok"})
         self.assertEqual(config["apiKey"], "new_key")
         self.assertEqual(mock_urlopen.call_count, 2)

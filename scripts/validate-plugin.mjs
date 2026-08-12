@@ -1,5 +1,4 @@
 import { readFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -42,8 +41,7 @@ async function main() {
   assertString(manifest.version, 'manifest.version');
   assertString(manifest.description, 'manifest.description');
 
-  const isGitRepo = existsSync(path.join(pluginRoot, '.git')) || spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: pluginRoot, encoding: 'utf8' }).status === 0;
-  if (!isGitRepo && manifest.name !== pluginDirName && pluginDirName !== 'nmem' && pluginDirName !== 'nowledge-mem') {
+  if (manifest.name !== pluginDirName && pluginDirName !== 'nmem' && pluginDirName !== 'nowledge-mem') {
     fail(`manifest.name (${manifest.name}) must match directory name (or be "nmem" or "nowledge-mem"), but got "${pluginDirName}"`);
   }
 
@@ -103,6 +101,9 @@ async function main() {
     'scripts/validate-plugin.mjs',
     'scripts/package-plugin.mjs',
     'tests/test_hooks.py',
+    'tests/integration/conftest.py',
+    'tests/integration/test_mem_container.py',
+    'requirements-test.txt',
     `release-notes/${manifest.version}.md`
   ];
 

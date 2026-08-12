@@ -83,11 +83,35 @@ function verifyArchive(filePath) {
     })
   );
 
+  const forbiddenSubstrings = [
+    'tests/',
+    'conftest.py',
+    'pyproject.toml',
+    'requirements-test.txt',
+    'uv.lock',
+    '.python-version',
+    '.pre-commit-config.yaml',
+    '.venv/',
+    '.pytest_cache/',
+    '__pycache__',
+    '.pyc'
+  ];
+
   for (const entry of rawEntries) {
     const normalized = entry.startsWith('./') ? entry.slice(2) : entry;
     if (normalized === '._.' || normalized.startsWith('._') || normalized.includes('/._')) {
       console.error(`ERROR: release archive contains macOS metadata entry ${entry}`);
       process.exit(1);
+    }
+    if (normalized === 'scripts' || normalized.startsWith('scripts/')) {
+      console.error(`ERROR: release archive contains forbidden build script: ${entry}`);
+      process.exit(1);
+    }
+    for (const forbidden of forbiddenSubstrings) {
+      if (normalized.includes(forbidden)) {
+        console.error(`ERROR: release archive contains forbidden development asset: ${entry}`);
+        process.exit(1);
+      }
     }
   }
 
@@ -112,12 +136,17 @@ async function main() {
     });
   }
 
+  // Remove python bytecode and pycache from staging root
+  run('find', [stageDir, '-type', 'd', '-name', '__pycache__', '-exec', 'rm', '-rf', '{}', '+']);
+  run('find', [stageDir, '-type', 'f', '-name', '*.pyc', '-delete']);
+
   run('tar', ['-czf', archivePath, '-C', stageDir, '.'], pluginRoot, {
     env: {
       ...process.env,
       COPYFILE_DISABLE: '1'
     }
   });
+
   verifyArchive(archivePath);
 
   const checksum = await fileSha256(archivePath);

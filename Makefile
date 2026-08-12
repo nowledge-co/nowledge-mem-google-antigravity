@@ -13,8 +13,20 @@ setup: ## Install project dependencies and configure local git index
 test: ## Run hooks unit tests
 	npm run test
 
+test-integration: ## Run pytest container integration test suite
+	uv run pytest -v tests/integration/ || python3 -m pytest -v tests/integration/
+
+lint: ## Run ruff linter and ty type checks
+	uv run ruff check tests/integration/
+	uv run ty check tests/integration/
+
+format: ## Run ruff code formatter
+	uv run ruff format tests/integration/
+
 validate: ## Validate manifest and run unit tests
 	npm run validate
+
+
 
 ##@ Build & Packaging
 

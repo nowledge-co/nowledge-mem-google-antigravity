@@ -1,46 +1,50 @@
 #!/usr/bin/env python3
-import sys
-import os
-import json
-import urllib.request
-import urllib.error
-import re
 import argparse
+import json
+import os
+import re
 import subprocess
+import sys
+import urllib.error
+import urllib.request
+
 
 def load_config():
-    config_path = os.path.expanduser('~/.nowledge-mem/config.json')
-    config = {
-        'apiUrl': 'http://127.0.0.1:14242',
-        'apiKey': ''
-    }
-    
-    # 1. Load from config file
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if 'apiUrl' in data:
-                    config['apiUrl'] = data['apiUrl'].rstrip('/')
-                if 'apiKey' in data:
-                    config['apiKey'] = data['apiKey']
-        except Exception as e:
-            sys.stderr.write(f"Warning: Failed to load config from {config_path}: {e}\n")
+    env_url = os.environ.get('NMEM_API_URL', '').strip()
+    env_key = os.environ.get('NMEM_API_KEY', '').strip() or None
+    ignore_host = os.environ.get('NMEM_IGNORE_HOST_CONFIG', '').strip().lower() in ('1', 'true', 'yes')
 
-    # 2. Environment variables override
-    env_url = os.environ.get('NMEM_API_URL')
-    if env_url:
-        config['apiUrl'] = env_url.rstrip('/')
-    env_key = os.environ.get('NMEM_API_KEY')
-    if env_key:
-        config['apiKey'] = env_key
+    config = {
+        'apiUrl': env_url.rstrip('/') if env_url else 'http://127.0.0.1:14242',
+        'apiKey': env_key or ''
+    }
+
+    if not ignore_host:
+        custom_cfg = os.environ.get('NMEM_CONFIG_PATH', '').strip()
+        config_file = Path(custom_cfg).expanduser() if custom_cfg else Path('~/.nowledge-mem/config.json').expanduser()
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, encoding='utf-8') as f:
+                    data = json.load(f)
+                    file_url = str(data.get('apiUrl', '')).strip().rstrip('/')
+                    file_key = str(data.get('apiKey', '')).strip() or ''
+
+                    if not env_url and file_url:
+                        config['apiUrl'] = file_url
+                    if not env_key and file_key:
+                        if not env_url or env_url.rstrip('/') == file_url:
+                            config['apiKey'] = file_key
+            except Exception as e:
+                if os.environ.get('DEBUG') or os.environ.get('NMEM_DEBUG'):
+                    sys.stderr.write(f"Warning: Failed to load config from {config_file}: {e}\n")
 
     return config
+
 
 def get_endpoint_url(config, path):
     api_url = config['apiUrl'].rstrip('/')
     is_loopback = any(x in api_url for x in ['127.0.0.1', 'localhost', '::1'])
-    
+
     if not is_loopback and not api_url.endswith('/remote-api'):
         return f"{api_url}/remote-api{path}"
     else:
@@ -101,7 +105,7 @@ def find_matching_existing_skill(config, target_name):
             skills = data.get('skills', [])
 
         target_slug = target_name.strip().lower().replace('_', '-').replace(' ', '-')
-        
+
         active_matches = []
         other_matches = []
 
@@ -122,7 +126,7 @@ def find_matching_existing_skill(config, target_name):
             return active_matches[0]
         elif other_matches:
             return other_matches[0]
-            
+
     except Exception as e:
         sys.stderr.write(f"Notice: Existing skill check warning ({e}).\n")
     return None
@@ -165,7 +169,7 @@ def main():
         sys.exit(1)
 
     try:
-        with open(draft_path, 'r', encoding='utf-8') as f:
+        with open(draft_path, encoding='utf-8') as f:
             skill_md = f.read()
     except Exception as e:
         sys.stderr.write(f"Error: Failed to read '{draft_path}': {e}\n")
@@ -252,7 +256,7 @@ def main():
                 'skill_md': skill_md,
                 'force': args.force
             })
-            
+
             created = response_data.get('created', False)
             skill = response_data.get('skill', {})
             matched = response_data.get('matched', {})

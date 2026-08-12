@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Update Library Artifact content and metadata in-place via Nowledge Mem REST API."""
-import sys
-import os
-import json
-import urllib.request
-import urllib.error
-import re
 import argparse
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+
 
 def load_config():
     config_path = os.path.expanduser('~/.nowledge-mem/config.json')
@@ -14,10 +15,10 @@ def load_config():
         'apiUrl': 'http://127.0.0.1:14242',
         'apiKey': ''
     }
-    
+
     if os.path.exists(config_path):
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
+            with open(config_path, encoding='utf-8') as f:
                 data = json.load(f)
                 if 'apiUrl' in data:
                     config['apiUrl'] = data['apiUrl'].rstrip('/')
@@ -118,7 +119,7 @@ def search_existing_artifact(config, title):
         with urllib.request.urlopen(req, timeout=15) as res:
             data = json.loads(res.read().decode('utf-8'))
             sources = data.get('sources', []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
-            
+
             target_slug = title.strip().lower()
             for s in sources:
                 s_title = (s.get('title') or '').strip().lower()
@@ -142,7 +143,7 @@ def main():
         sys.exit(1)
 
     try:
-        with open(args.artifact_path, 'r', encoding='utf-8') as f:
+        with open(args.artifact_path, encoding='utf-8') as f:
             content = f.read()
     except Exception as e:
         sys.stderr.write(f"Error reading '{args.artifact_path}': {e}\n")
@@ -166,7 +167,7 @@ def main():
     try:
         res_content = update_artifact_content(config, artifact_id, content, space_id=args.space_id)
         print(f"Content updated for artifact '{artifact_id}'.")
-        
+
         if args.reparse:
             update_artifact_reparse(config, artifact_id, space_id=args.space_id)
             print(f"Reparse triggered for artifact '{artifact_id}'.")

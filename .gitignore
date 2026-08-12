@@ -6,3 +6,6 @@ __pycache__/
 *.pyc
 *.tgz
 mcp_config.json
+.venv/
+.pytest_cache/
+

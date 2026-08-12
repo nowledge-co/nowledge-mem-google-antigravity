@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Unified entrypoint router for Nowledge Mem Google Antigravity plugin."""
 import sys
-import os
 from pathlib import Path
 
 HOOKS_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(HOOKS_DIR))
-import nmem_shared
 
 def main():
     if len(sys.argv) < 2:
