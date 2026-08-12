@@ -3,9 +3,7 @@
     "nowledge-mem": {
       "serverUrl": "http://127.0.0.1:14242/mcp/",
       "headers": {
-        "APP": "Google Antigravity",
-        "Authorization": "Bearer nmem_your_key",
-        "X-NMEM-API-Key": "nmem_your_key"
+        "APP": "Google Antigravity"
       }
     }
   }
