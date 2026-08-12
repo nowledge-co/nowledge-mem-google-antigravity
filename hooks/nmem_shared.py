@@ -108,7 +108,8 @@ def _get_windows_machine_guid() -> str:
         out = subprocess.check_output(
             ["powershell.exe", "-Command", "(Get-ItemProperty -Path 'Registry::HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography').MachineGuid"],
             stderr=subprocess.DEVNULL,
-            text=True
+            text=True,
+            timeout=2.0
         )
         if out.strip():
             return out.strip()
@@ -122,7 +123,8 @@ def _get_macos_hardware_uuid() -> str:
         out = subprocess.check_output(
             ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
             stderr=subprocess.DEVNULL,
-            text=True
+            text=True,
+            timeout=2.0
         )
         m = re.search(r'"IOPlatformUUID" = "([^"]+)"', out)
         if m:
@@ -134,7 +136,8 @@ def _get_macos_hardware_uuid() -> str:
         out = subprocess.check_output(
             ["sysctl", "-n", "kern.uuid"],
             stderr=subprocess.DEVNULL,
-            text=True
+            text=True,
+            timeout=2.0
         )
         if out.strip():
             return out.strip()
@@ -185,6 +188,23 @@ def get_effective_config() -> tuple[str, str | None]:
 
     return api_url.rstrip("/"), api_key
 
+_BACKEND_UNREACHABLE_UNTIL = 0.0
+
+def is_backend_unreachable() -> bool:
+    """Check if recent connection failures indicate the backend is currently unreachable."""
+    global _BACKEND_UNREACHABLE_UNTIL
+    return time.time() < _BACKEND_UNREACHABLE_UNTIL
+
+def mark_backend_unreachable(cooldown: float = 30.0):
+    """Mark backend as unreachable for a cooldown window to fail fast without repeated timeouts."""
+    global _BACKEND_UNREACHABLE_UNTIL
+    _BACKEND_UNREACHABLE_UNTIL = time.time() + cooldown
+
+def reset_backend_unreachable():
+    """Reset backend unreachability state."""
+    global _BACKEND_UNREACHABLE_UNTIL
+    _BACKEND_UNREACHABLE_UNTIL = 0.0
+
 _SPACES_CACHE = {"timestamp": 0.0, "spaces": None}
 
 def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
@@ -211,7 +231,7 @@ def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
     spaces_data = None
 
     # 2. Try HTTP GET /spaces
-    res = http_request("/spaces", method="GET", timeout=3.0)
+    res = http_request("/spaces", method="GET", timeout=1.5)
     if isinstance(res, dict):
         if "spaces" in res and isinstance(res["spaces"], list):
             spaces_data = res["spaces"]
@@ -220,10 +240,10 @@ def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
     elif isinstance(res, list):
         spaces_data = res
 
-    # 3. Fallback to CLI nmem --json spaces list
-    if spaces_data is None:
+    # 3. Fallback to CLI nmem --json spaces list if backend is not marked unreachable
+    if spaces_data is None and not is_backend_unreachable():
         try:
-            cmd_res = run_nmem_command(["--json", "spaces", "list"], timeout=5)
+            cmd_res = run_nmem_command(["--json", "spaces", "list"], timeout=2.5)
             if cmd_res.returncode == 0 and cmd_res.stdout:
                 parsed = json.loads(cmd_res.stdout)
                 if isinstance(parsed, dict) and "spaces" in parsed and isinstance(parsed["spaces"], list):
@@ -365,10 +385,13 @@ def sync_host_skills_async() -> None:
     t = threading.Thread(target=_do_sync, daemon=True)
     t.start()
 
-def http_request(endpoint: str, method: str = "GET", payload: dict | None = None, timeout: float = 5.0) -> dict | None:
+def http_request(endpoint: str, method: str = "GET", payload: dict | None = None, timeout: float = 1.5, skip_circuit_breaker: bool = False) -> dict | None:
     """Make a direct HTTP request to the Nowledge Mem backend prior to CLI fallback."""
     import urllib.request
     import urllib.error
+
+    if not skip_circuit_breaker and is_backend_unreachable():
+        return None
 
     api_url, api_key = get_effective_config()
     url = f"{api_url}{endpoint}"
@@ -388,6 +411,7 @@ def http_request(endpoint: str, method: str = "GET", payload: dict | None = None
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status in (200, 201):
+                reset_backend_unreachable()
                 body = resp.read().decode("utf-8")
                 return json.loads(body) if body else {}
     except urllib.error.HTTPError as e:
@@ -408,17 +432,22 @@ def http_request(endpoint: str, method: str = "GET", payload: dict | None = None
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     if resp.status in (200, 201):
+                        reset_backend_unreachable()
                         body = resp.read().decode("utf-8")
                         e.close()
                         return json.loads(body) if body else {}
             except Exception as retry_err:
+                mark_backend_unreachable()
                 if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                     sys.stderr.write(f"Retry HTTP request to {url} failed: {retry_err}\n")
         else:
+            if e.code >= 500:
+                mark_backend_unreachable()
             if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                 sys.stderr.write(f"HTTP request to {url} failed: {e}\n")
         e.close()
     except Exception as e:
+        mark_backend_unreachable()
         if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
             sys.stderr.write(f"HTTP request to {url} failed: {e}\n")
 
@@ -496,7 +525,7 @@ def _build_nmem_command(nmem: str, *args: str) -> list[str]:
         ]
     return [nmem, *args]
 
-def run_nmem_command(args: list[str], env: dict | None = None, cwd: str | None = None, timeout: float | None = 15.0, input_str: str | None = None) -> subprocess.CompletedProcess:
+def run_nmem_command(args: list[str], env: dict | None = None, cwd: str | None = None, timeout: float | None = 5.0, input_str: str | None = None) -> subprocess.CompletedProcess:
     """Run an nmem command, finding the binary, translating path arguments if needed, and executing safely."""
     nmem = _nmem_command()
     if not nmem:
@@ -529,8 +558,34 @@ def run_nmem_command(args: list[str], env: dict | None = None, cwd: str | None =
         **_windows_no_window_kwargs()
     )
 
+def _is_pid_alive(pid: int) -> bool:
+    """Check whether a given PID is currently active on the host system."""
+    if pid <= 0:
+        return False
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            h_process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not h_process:
+                return False
+            exit_code = ctypes.c_ulong()
+            success = kernel32.GetExitCodeProcess(h_process, ctypes.byref(exit_code))
+            kernel32.CloseHandle(h_process)
+            STILL_ACTIVE = 259
+            return bool(success and exit_code.value == STILL_ACTIVE)
+        else:
+            os.kill(pid, 0)
+            return True
+    except OSError as e:
+        import errno
+        return e.errno == errno.EPERM
+    except Exception:
+        return False
+
 class FileLock:
-    """A simple platform-independent directory/file locking mechanism using exclusive creation."""
+    """A simple platform-independent directory/file locking mechanism using exclusive creation and PID ownership checking."""
     def __init__(self, lock_path: Path):
         self.lock_path = lock_path
         self.acquired = False
@@ -540,10 +595,27 @@ class FileLock:
         while retries > 0:
             try:
                 fd = os.open(str(self.lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(fd)
+                try:
+                    os.write(fd, str(os.getpid()).encode("utf-8"))
+                finally:
+                    os.close(fd)
                 self.acquired = True
                 return self
             except FileExistsError:
+                try:
+                    if self.lock_path.exists():
+                        content = self.lock_path.read_text(encoding="utf-8").strip()
+                        owner_pid = int(content) if content.isdigit() else 0
+                        if owner_pid > 0 and not _is_pid_alive(owner_pid):
+                            # Stale orphan lock from a dead process -> safe to unlink
+                            self.lock_path.unlink(missing_ok=True)
+                            continue
+                        elif owner_pid == 0 and (time.time() - self.lock_path.stat().st_mtime) > 10.0:
+                            # Corrupted or unreadable lock file older than 10s -> safe to unlink
+                            self.lock_path.unlink(missing_ok=True)
+                            continue
+                except Exception:
+                    pass
                 time.sleep(0.1)
                 retries -= 1
         raise TimeoutError(f"Could not acquire lock on {self.lock_path} within timeout.")
@@ -625,6 +697,9 @@ def retry_unsynced_sessions() -> None:
 
             updated_queue = dict(queue)
             for conv_id, data in queue.items():
+                if is_backend_unreachable():
+                    break
+
                 messages = data.get("messages", [])
                 title = data.get("title", f"Antigravity Session {conv_id[:8]}")
                 space = data.get("space")
@@ -635,7 +710,7 @@ def retry_unsynced_sessions() -> None:
                 # Try HTTP transport first
                 try:
                     space_param = f"?space={space}" if space else ""
-                    check_res = http_request(f"/threads/{conv_id}{space_param}", method="GET", timeout=3.0)
+                    check_res = http_request(f"/threads/{conv_id}{space_param}", method="GET", timeout=1.5)
                     if isinstance(check_res, dict) and (check_res.get("id") or check_res.get("thread_id") or "messages" in check_res):
                         existing_msgs = check_res.get("messages") or []
                         if isinstance(existing_msgs, list):
@@ -654,17 +729,17 @@ def retry_unsynced_sessions() -> None:
                             rec_payload = {"matched_count": matched_count, "messages": messages[matched_count:]}
                             if space:
                                 rec_payload["space"] = space
-                            rec_res = http_request(f"/threads/{conv_id}/reconcile-tail", method="POST", payload=rec_payload, timeout=5.0)
+                            rec_res = http_request(f"/threads/{conv_id}/reconcile-tail", method="POST", payload=rec_payload, timeout=2.5)
                             if isinstance(rec_res, dict) and not rec_res.get("error"):
                                 success = True
                         else:
                             app_payload = {"messages": messages}
                             if space:
                                 app_payload["space"] = space
-                            app_res = http_request(f"/threads/{conv_id}/append", method="POST", payload=app_payload, timeout=5.0)
+                            app_res = http_request(f"/threads/{conv_id}/append", method="POST", payload=app_payload, timeout=2.5)
                             if isinstance(app_res, dict) and not app_res.get("error"):
                                 success = True
-                    elif isinstance(check_res, dict) and (check_res.get("error") in ("not_found", "thread_not_found") or check_res.get("status") == 404 or not check_res):
+                    elif isinstance(check_res, dict) and (check_res.get("error") in ("not_found", "thread_not_found") or check_res.get("status") == 404):
                         # Explicit 404 / thread not found -> import new thread
                         import_payload = {
                             "id": conv_id,
@@ -674,11 +749,14 @@ def retry_unsynced_sessions() -> None:
                         }
                         if space:
                             import_payload["space"] = space
-                        imp_res = http_request("/threads/import", method="POST", payload=import_payload, timeout=5.0)
+                        imp_res = http_request("/threads/import", method="POST", payload=import_payload, timeout=2.5)
                         if isinstance(imp_res, dict) and not imp_res.get("error"):
                             success = True
                 except Exception:
                     pass
+
+                if is_backend_unreachable():
+                    break
 
                 if not success:
                     # CLI Fallback
@@ -688,7 +766,7 @@ def retry_unsynced_sessions() -> None:
 
                     thread_exists = False
                     try:
-                        result = run_nmem_command(check_args, timeout=5)
+                        result = run_nmem_command(check_args, timeout=2.0)
                         if result.returncode == 0:
                             thread_exists = True
                     except Exception:
@@ -707,7 +785,7 @@ def retry_unsynced_sessions() -> None:
                                 '-m', json.dumps(cli_append_msgs)
                             ])
                             try:
-                                result = run_nmem_command(append_args, timeout=5)
+                                result = run_nmem_command(append_args, timeout=3.0)
                                 if result.returncode == 0:
                                     success = True
                             except Exception:
@@ -730,7 +808,7 @@ def retry_unsynced_sessions() -> None:
                         if host_agent_id:
                             env['NMEM_HOST_AGENT_ID'] = host_agent_id
                         try:
-                            result = run_nmem_command(import_args, env=env, timeout=5)
+                            result = run_nmem_command(import_args, env=env, timeout=3.0)
                             if result.returncode == 0:
                                 success = True
                         except Exception:
