@@ -30,14 +30,19 @@ class TestNmemShared(unittest.TestCase):
     
     @patch("os.access", return_value=True)
     @patch("pathlib.Path.is_file", return_value=True)
+    @patch("pathlib.Path.resolve")
     @patch("shutil.which")
-    def test_nmem_command_resolution(self, mock_which, mock_is_file, mock_access):
+    def test_nmem_command_resolution(self, mock_which, mock_resolve, mock_is_file, mock_access):
         # Case 1: nmem exists
         mock_which.side_effect = lambda x: "/usr/bin/nmem" if x == "nmem" else None
+        mock_resolve.side_effect = lambda: Path("/usr/bin/nmem")
+        self.assertEqual(nmem_shared._nmem_command(), "/usr/bin/nmem")
+        mock_resolve.side_effect = lambda: Path("/usr/bin/nmem")
         self.assertEqual(nmem_shared._nmem_command(), "/usr/bin/nmem")
 
         # Case 2: nmem.cmd exists
         mock_which.side_effect = lambda x: "/usr/bin/nmem.cmd" if x == "nmem.cmd" else None
+        mock_resolve.side_effect = lambda: Path("/usr/bin/nmem.cmd")
         self.assertEqual(nmem_shared._nmem_command(), "/usr/bin/nmem.cmd")
 
     def test_cmd_exe_path_conversion(self):

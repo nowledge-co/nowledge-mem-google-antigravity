@@ -6,6 +6,7 @@ import urllib.request
 import urllib.error
 import re
 import argparse
+import subprocess
 
 def load_config():
     config_path = os.path.expanduser('~/.nowledge-mem/config.json')
@@ -99,19 +100,19 @@ def find_matching_existing_skill(config, target_name):
             data = json.loads(res.read().decode('utf-8'))
             skills = data.get('skills', [])
 
-        target_slug = target_name.strip().lower().replace('_', '-')
+        target_slug = target_name.strip().lower().replace('_', '-').replace(' ', '-')
         
         active_matches = []
         other_matches = []
 
         for s in skills:
             sid = s.get('id', '')
-            s_name = (s.get('name') or s.get('title') or '').strip().lower().replace('_', '-')
+            s_name = (s.get('name') or s.get('title') or '').strip().lower().replace('_', '-').replace(' ', '-')
             s_stage = s.get('stage', '')
             if s_stage in ('archived', 'rejected'):
                 continue
 
-            if s_name == target_slug or s_name.replace('-', '') == target_slug.replace('-', ''):
+            if sid == target_name or s_name == target_slug or s_name.replace('-', '') == target_slug.replace('-', ''):
                 if s_stage == 'active':
                     active_matches.append(s)
                 else:
@@ -126,6 +127,27 @@ def find_matching_existing_skill(config, target_name):
         sys.stderr.write(f"Notice: Existing skill check warning ({e}).\n")
     return None
 
+def activate_skill(config, skill_id):
+    if not skill_id or skill_id == 'unknown':
+        return False
+    try:
+        act_res = make_request(config, f"/skills/{skill_id}/activate", payload={}, method='POST')
+        print(f"🟢 Activated skill '{skill_id}' on Nowledge Mem.")
+        return True
+    except Exception as e:
+        sys.stderr.write(f"Notice: REST API activation notice ({e}). Trying CLI fallback...\n")
+        try:
+            cmd = ['nmem', 'skills', 'activate', '-y', skill_id]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            if res.returncode == 0:
+                print(f"🟢 Activated skill '{skill_id}' via nmem CLI.")
+                return True
+            else:
+                sys.stderr.write(f"Warning: CLI activation failed: {res.stderr.strip()}\n")
+        except Exception as ex:
+            sys.stderr.write(f"Warning: Failed to activate skill '{skill_id}': {ex}\n")
+        return False
+
 def main():
     parser = argparse.ArgumentParser(description="Propose or Update a Nowledge Mem Skill")
     parser.add_argument("draft_path", help="Path to the skill draft markdown file")
@@ -133,6 +155,8 @@ def main():
     parser.add_argument("--create-new", action="store_true", help="Force creation of a new skill even if a name match exists")
     parser.add_argument("--force", "-f", action="store_true", help="Force import / overwrite")
     parser.add_argument("--no-apply", action="store_true", help="Stage edit-body without applying version immediately")
+    parser.add_argument("--activate", "-a", dest="should_activate", action="store_true", default=True, help="Activate skill on Nowledge Mem after proposal/import or update (default)")
+    parser.add_argument("--no-activate", dest="should_activate", action="store_false", help="Keep skill in proposal stage on Nowledge Mem without activating")
     args = parser.parse_args()
 
     draft_path = args.draft_path
@@ -208,11 +232,16 @@ def main():
             except Exception as e:
                 sys.stderr.write(f"Warning: Failed to apply version ({e}). Staged version remains pending.\n")
 
+        activated = False
+        if args.should_activate:
+            activated = activate_skill(config, skill_id)
+
         print("\n" + "="*50)
         print("🟢 Skill Successfully Updated In-Place!")
         print("="*50)
         print(f"Skill ID:    {skill_id}")
         print(f"Status:      Updated (v{version})")
+        print(f"Stage:       {'active' if activated else 'proposal/staged'}")
         print("="*50 + "\n")
 
     else:
@@ -221,25 +250,49 @@ def main():
         try:
             response_data = make_request(config, "/agent/skill-builder/import", {
                 'skill_md': skill_md,
-                'force': args.force or True
+                'force': args.force
             })
             
             created = response_data.get('created', False)
             skill = response_data.get('skill', {})
-            new_skill_id = skill.get('id', 'unknown')
-            s_name = skill.get('name', skill_name or 'unknown')
-            stage = skill.get('stage', 'unknown')
+            matched = response_data.get('matched', {})
+            new_skill_id = skill.get('id') or matched.get('id') or 'unknown'
+            s_name = skill.get('name') or skill.get('title') or skill_name or 'unknown'
+            stage = skill.get('stage', 'proposal')
+
+            if not created and matched and matched.get('id'):
+                # Backend detected an existing skill match when force=False
+                matched_id = matched['id']
+                print(f"Notice: Import matched existing skill '{matched_id}'. Transitioning to in-place update...")
+                edit_res = make_request(config, "/agent/skill-builder/edit-body", {
+                    "skill_id": matched_id,
+                    "body": skill_md
+                })
+                if not args.no_apply:
+                    apply_url = f"{config['apiUrl'].rstrip('/')}/skills/{matched_id}/apply-version"
+                    make_request(config, f"/skills/{matched_id}/apply-version", payload={}, method='POST')
+                new_skill_id = matched_id
+                stage = matched.get('stage', 'active')
+
+            activated = False
+            if args.should_activate and new_skill_id != 'unknown':
+                activated = activate_skill(config, new_skill_id)
+                if activated:
+                    stage = 'active'
 
             print("\n" + "="*50)
-            print("🟢 Skill Proposal Successfully Submitted!")
+            print("🟢 Skill Proposal Successfully Processed!")
             print("="*50)
             print(f"Skill ID:    {new_skill_id}")
             print(f"Name:        {s_name}")
             print(f"Stage:       {stage}")
             print(f"Status:      {'Created' if created else 'Updated'}")
             print("-"*50)
-            print("To make this skill live to your AI tools, run:")
-            print(f"  nmem skills activate -y {new_skill_id}")
+            if not activated:
+                print("To make this skill live to your AI tools, run:")
+                print(f"  nmem skills activate -y {new_skill_id}")
+            else:
+                print("Skill is now ACTIVE and available to all connected AI agents.")
             print("="*50 + "\n")
 
         except urllib.error.HTTPError as e:
@@ -257,5 +310,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-

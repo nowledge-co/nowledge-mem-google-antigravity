@@ -186,9 +186,9 @@ nmem --json t create -t "Antigravity Session - topic" -c "Goal: ... Decisions: .
 Use this skill ONLY when the user explicitly asks you to create, write, teach, or save an agent Skill, or when proposing a concrete improvement to an existing skill's procedure.
 - Do NOT use for general codebase modifications, project documentation, or conversational memories.
 - A skill is a reusable procedure for agents, not a memory card, so do NOT use `memory_add` or save a skill draft as a memory card.
-- Draft the skill's name, purpose, and grounding evidence (or the proposed improvement changes).
+- Draft the skill's name, purpose, and grounding evidence (or the proposed improvement changes). If updating an existing skill, include `id: <skill_id>` in the frontmatter.
 - Write the draft to `skill_draft.md` in the artifact directory, setting `RequestFeedback: true` and `UserFacing: true` to request approval via the interactive "Proceed" button.
-- Once approved, run the proposal helper script `python3 skills/nmem-propose-skill/scripts/propose_skill.py <appDataDir>/brain/<conversation-id>/skill_draft.md` to directly import the drafted skill markdown. Use the MCP tool `create_skill` or `propose_skill_improvement` only as a fallback.
+- Once approved, ask the user whether to activate immediately (`--activate`, recommended) or keep as a proposal (`--no-activate`), then run `python3 skills/nmem-skill-propose/scripts/propose_skill.py <appDataDir>/brain/<conversation-id>/skill_draft.md [--activate | --no-activate]`. Use the MCP tool `create_skill` or `propose_skill_improvement` only as a fallback.
 
 ## Token Optimization Guidelines
 
