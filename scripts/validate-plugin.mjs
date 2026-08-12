@@ -104,7 +104,6 @@ async function main() {
     'tests/test_hooks.py',
     'tests/integration/conftest.py',
     'tests/integration/test_mem_container.py',
-    'requirements-test.txt',
     `release-notes/${manifest.version}.md`
   ];
 

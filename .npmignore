@@ -4,7 +4,6 @@ tests/
 __pycache__/
 *.pyc
 pyproject.toml
-requirements-test.txt
 uv.lock
 .python-version
 .pre-commit-config.yaml

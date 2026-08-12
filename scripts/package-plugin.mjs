@@ -87,7 +87,6 @@ function verifyArchive(filePath) {
     'tests/',
     'conftest.py',
     'pyproject.toml',
-    'requirements-test.txt',
     'uv.lock',
     '.python-version',
     '.pre-commit-config.yaml',
