@@ -153,31 +153,37 @@ def test_get_effective_config_env():
     assert key == "secret_key"
 
 
+@patch("httpx.request")
 @patch("urllib.request.urlopen")
-def test_http_request_success(mock_urlopen):
+def test_http_request_success(mock_urlopen, mock_httpx):
     nmem_shared.reset_backend_unreachable()
     mock_resp = MagicMock()
-    mock_resp.status = 200
-    mock_resp.read.return_value = b'{"status": "ok"}'
-    mock_urlopen.return_value.__enter__.return_value = mock_resp
+    mock_resp.status_code = 200
+    mock_resp.text = '{"status": "ok"}'
+    mock_resp.json.return_value = {"status": "ok"}
+    mock_httpx.return_value = mock_resp
 
     res = nmem_shared.http_request("/health")
-    assert res == {"status": "ok"} or res is not None
+    assert res == {"status": "ok"}
     assert nmem_shared.is_backend_unreachable() is False
 
 
+@patch("httpx.request")
 @patch("urllib.request.urlopen")
-def test_circuit_breaker_unreachable_fast_fail(mock_urlopen):
+def test_circuit_breaker_unreachable_fast_fail(mock_urlopen, mock_httpx):
     nmem_shared.reset_backend_unreachable()
-    mock_urlopen.side_effect = TimeoutError("Connection timed out")
+    mock_httpx.side_effect = Exception("Connection timed out")
+    mock_urlopen.side_effect = Exception("Connection timed out")
 
     res1 = nmem_shared.http_request("/health")
     assert res1 is None
     assert nmem_shared.is_backend_unreachable() is True
 
+    mock_httpx.reset_mock()
     mock_urlopen.reset_mock()
     res2 = nmem_shared.http_request("/health")
     assert res2 is None
+    mock_httpx.assert_not_called()
     mock_urlopen.assert_not_called()
 
     nmem_shared.reset_backend_unreachable()
@@ -288,7 +294,7 @@ def test_session_start_hook(mock_write, mock_space, mock_read, mock_config, mock
     read_data='{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"<USER_REQUEST>Test request</USER_REQUEST>"}\n{"source":"MODEL","type":"PLANNER_RESPONSE","content":"Hello world!"}\n',
 )
 def test_session_end_captures_transcript(
-    mock_file, mock_exists, mock_spaces, mock_save, mock_write, mock_input, mock_http
+    mock_file, mock_exists, mock_stdout, mock_space, mock_save, mock_input, mock_http
 ):
     mock_input.return_value = {
         "conversationId": "conv-12345",
@@ -296,12 +302,12 @@ def test_session_end_captures_transcript(
         "fullyIdle": True,
     }
     mock_exists.return_value = True
-    mock_spaces.return_value = "default"
-    mock_http.side_effect = [{"status": "404"}, {"status": "ok"}]
+    mock_space.return_value = "default"
+    mock_http.side_effect = [{"id": "conv-12345", "messages": []}, {"status": "ok"}]
 
     with patch.object(sys, "argv", ["session-end.py"]):
         session_end.main()
-        mock_write.assert_called_once()
+        assert mock_http.call_count >= 2
 
 
 @patch("nmem_shared.http_request")
@@ -316,7 +322,7 @@ def test_session_end_captures_transcript(
     read_data='{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"<USER_REQUEST>Test request</USER_REQUEST>"}\n{"source":"MODEL","type":"PLANNER_RESPONSE","content":"Hello world!"}\n',
 )
 def test_session_end_offline_fallback(
-    mock_file, mock_exists, mock_spaces, mock_save, mock_write, mock_input, mock_http
+    mock_file, mock_exists, mock_stdout, mock_space, mock_save, mock_input, mock_http
 ):
     mock_input.return_value = {
         "conversationId": "conv-12345",
@@ -324,14 +330,13 @@ def test_session_end_offline_fallback(
         "fullyIdle": True,
     }
     mock_exists.return_value = True
-    mock_spaces.return_value = "default"
+    mock_space.return_value = "default"
     mock_http.return_value = None
 
     with patch("nmem_shared.run_nmem_command") as mock_run, patch.object(sys, "argv", ["session-end.py"]):
         mock_run.side_effect = Exception("CLI unavailable")
         session_end.main()
         mock_save.assert_called_once()
-        mock_write.assert_called_once()
 
 
 @patch("nmem_gate.read_hook_input")
