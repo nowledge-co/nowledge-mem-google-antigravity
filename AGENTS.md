@@ -31,7 +31,7 @@ When modifying or adding hook scripts under `hooks/` and configuring them in `ho
 * **Notification Throttling & Async Background Retries**: In `hooks/post-invocation.py`, throttle informational warnings (e.g. pending offline sessions) to at most once per conversation session using `should_emit_unsynced_warning()` to prevent agent context nag loops, and always trigger non-blocking background queue drainage via `retry_unsynced_sessions_async()`.
 * **Local Plugin Configuration (`.config.json`)**: Support a git-ignored `.config.json` file at the root of the plugin or workspace root.
   - Used for configuring server endpoints (`apiUrl`), credentials (`apiKey`), and default project space (`space`).
-  - Precedence hierarchy: `env vars > local config (.config.json) > global config (~/.nowledge-mem/config.json) > defaults`.
+  - Precedence hierarchy: `env vars > workspace config (.config.json) > plugin storage config (~/.nowledge-mem/plugins/antigravity/config.json) > global config (~/.nowledge-mem/config.json) > defaults`.
 * **Space Auto-Detection Heuristics**: Automatically map workspace directories to Nowledge Mem spaces.
   - Respect explicit override environment variables (`NMEM_SPACE` or `NMEM_SPACE_ID`), local config (`.config.json`), or workspace config files (`.nmemspace` / `.nowledge/config.json`) if set by the user.
   - Dynamically detected candidate spaces from workspace directory names must be verified against existing backend spaces (`get_existing_spaces()`).

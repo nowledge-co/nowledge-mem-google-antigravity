@@ -32,7 +32,7 @@ def main():
                 count = len(unsynced)
                 msg = (
                     f"[Nowledge Mem Info] There are {count} pending offline session(s) "
-                    "queued in ~/.nowledge-mem/cache/antigravity_unsynced.json. Background synchronization "
+                    "queued in ~/.nowledge-mem/plugins/antigravity/unsynced.json. Background synchronization "
                     "has been triggered automatically. (Do NOT call trigger_memory_catchup for offline queue sync)."
                 )
                 nmem_shared.emit({"injectSteps": [{"ephemeralMessage": msg}]})

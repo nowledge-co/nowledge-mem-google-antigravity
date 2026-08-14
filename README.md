@@ -66,9 +66,9 @@ Release packaging notes live in [`RELEASING.md`](./RELEASING.md).
 **Automatic lifecycle hooks**
 
 - **PreInvocation Hook**: Automatically loads Context Bundle when available, with Working Memory as the lightweight fallback, and injects it as situational context at the start of the session. Prioritizes direct native HTTP REST transport (<30ms latency), falling back to CLI subprocess execution. Concurrently launches a non-blocking background thread to connect and sync active host skills (`nmem skills connect antigravity` and `nmem skills sync`).
-- **PostInvocation Hook**: Evaluates mid-session runtime state (such as pending offline sessions in `~/.nowledge-mem/cache/antigravity_unsynced.json`), triggers asynchronous background synchronization, and throttles informational notifications to at most once per conversation session.
-- **Stop Hook**: Automatically imports conversation messages from Antigravity's `transcript.jsonl` log into Nowledge Mem under the current conversation ID when execution completes. Defers capture when background tasks are still running (`fullyIdle: false`), and prioritizes incremental tail reconciliation (`/threads/{id}/reconcile-tail`) to eliminate duplicate messages and reduce payload size. Prioritizes direct native HTTP REST transport, falling back to CLI execution and local offline buffer queuing (`~/.nowledge-mem/cache/antigravity_unsynced.json`).
-- **Space Resolution & Verification**: Resolves the active space by prioritizing explicit environment overrides (`NMEM_SPACE`/`NMEM_SPACE_ID`) and project config (`.nmemspace`/`.nowledge/config.json`). Dynamically detected candidate spaces from workspace directory names are verified against existing backend spaces; if the space does not exist on the server, Antigravity safely falls back to `default`.
+- **PostInvocation Hook**: Evaluates mid-session runtime state (such as pending offline sessions in `~/.nowledge-mem/plugins/antigravity/unsynced.json`), triggers asynchronous background synchronization, and throttles informational notifications to at most once per conversation session.
+- **Stop Hook**: Automatically imports conversation messages from Antigravity's `transcript.jsonl` log into Nowledge Mem under the current conversation ID when execution completes. Defers capture when background tasks are still running (`fullyIdle: false`), and prioritizes incremental tail reconciliation (`/threads/{id}/reconcile-tail`) to eliminate duplicate messages and reduce payload size. Prioritizes direct native HTTP REST transport, falling back to CLI execution and local offline buffer queuing (`~/.nowledge-mem/plugins/antigravity/unsynced.json`).
+- **Space Resolution & Verification**: Resolves the active space by prioritizing explicit environment overrides (`NMEM_SPACE`/`NMEM_SPACE_ID`), workspace/plugin config (`.config.json` / `~/.nowledge-mem/plugins/antigravity/config.json`), and project config (`.nmemspace`/`.nowledge/config.json`). Dynamically detected candidate spaces from workspace directory names are verified against existing backend spaces; if the space does not exist on the server, Antigravity safely falls back to `default`.
 
 **Bundled MCP**
 
@@ -100,7 +100,7 @@ By default, both `nmem` and the bundled MCP server point to the local Mem server
 Nowledge Mem resolves connection and space settings in the following strict order of precedence:
 
 1. **Environment Variables**: `NMEM_API_URL`, `NMEM_API_KEY`, `NMEM_SPACE` (or `NMEM_SPACE_ID`)
-2. **Local Plugin / Workspace Config (`.config.json`)**: Place a `.config.json` file at the root of the plugin (or workspace root). This file is git-ignored and allows configuring server endpoints, credentials, default space, and future settings locally:
+2. **Local Workspace Config (`.config.json`)**: Place a `.config.json` file at the root of the workspace (or plugin root). This file is git-ignored and allows configuring server endpoints, credentials, default space, and future settings locally for that specific workspace:
    ```json
    {
      "apiUrl": "https://mem.example.com",
@@ -108,8 +108,9 @@ Nowledge Mem resolves connection and space settings in the following strict orde
      "space": "my-project-space"
    }
    ```
-3. **Global Client Config**: `~/.nowledge-mem/config.json` (managed via `nmem config client set ...`)
-4. **Local Defaults**: `http://127.0.0.1:14242` and `default` space.
+3. **Plugin Storage Config**: `~/.nowledge-mem/plugins/antigravity/config.json` (persists Antigravity-specific plugin defaults across upgrades without polluting root files)
+4. **Global Client Config**: `~/.nowledge-mem/config.json` (managed via `nmem config client set ...`)
+5. **Local Defaults**: `http://127.0.0.1:14242` and `default` space.
 
 For global remote Mem setup via CLI, run:
 

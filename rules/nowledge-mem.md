@@ -263,7 +263,7 @@ Use `trigger_memory_catchup` strictly for memory health maintenance, decay re-sc
 ### 3. WHEN NOT to Trigger
 - Do **NOT** trigger on routine conversation turns or standard tool calls.
 - Do **NOT** use for standard fact/thread retrieval (use `memory_search` or `mem_fs recall` instead).
-- Do **NOT** trigger in response to offline session queue warnings (`antigravity_unsynced.json`) or routine status checks (queue syncing is handled automatically in the background by hooks).
+- Do **NOT** trigger in response to offline session queue warnings (`unsynced.json`) or routine status checks (queue syncing is handled automatically in the background by hooks).
 - Repeated calls within the same session or 1-hour cooldown window are debounced and auto-suppressed.
 
 ### 4. Horizon Parameter Selection
