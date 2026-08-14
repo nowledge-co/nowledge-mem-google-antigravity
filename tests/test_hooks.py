@@ -27,6 +27,7 @@ session_end = import_module_from_path("session_end", str(HOOKS_DIR / "session-en
 post_invocation = import_module_from_path("post_invocation", str(HOOKS_DIR / "post-invocation.py"))
 nmem_gate = import_module_from_path("nmem_gate", str(HOOKS_DIR / "nmem-gate.py"))
 nmem_status = import_module_from_path("nmem_status", str(HOOKS_DIR / "nmem_status.py"))
+update_artifact = import_module_from_path("update_artifact", str(HOOKS_DIR.parent / "scripts" / "update_artifact.py"))
 
 
 @patch("os.access", return_value=True)
@@ -522,3 +523,51 @@ def test_session_end_missing_transcript_file(mock_space):
             session_end.main()
             mock_write.assert_called_once()
             mock_http.assert_not_called()
+
+
+def test_extract_frontmatter_field():
+    content = "---\nid: src_12345\ntitle: Sample Artifact\n---\n# Header\nContent line"
+    assert update_artifact.extract_frontmatter_field(content, ("id", "source_id")) == "src_12345"
+    assert update_artifact.extract_frontmatter_field(content, ("title", "name")) == "Sample Artifact"
+
+
+@patch("urllib.request.urlopen")
+def test_update_artifact_content_put(mock_urlopen):
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = b'{"status": "success", "id": "src_12345"}'
+    mock_resp.__enter__.return_value = mock_resp
+    mock_urlopen.return_value = mock_resp
+
+    config = {"apiUrl": "http://localhost:14242", "apiKey": "test_key"}
+    res = update_artifact.update_artifact_content(config, "src_12345", "Updated content body", space_id="space_abc")
+
+    assert res == {"status": "success", "id": "src_12345"}
+    mock_urlopen.assert_called_once()
+    req = mock_urlopen.call_args[0][0]
+    assert req.get_full_url() == "http://localhost:14242/sources/src_12345/content?space_id=space_abc"
+    assert req.get_method() == "PUT"
+
+    payload = json.loads(req.data.decode("utf-8"))
+    assert payload == {"content": "Updated content body"}
+    assert req.headers.get("Authorization") == "Bearer test_key"
+
+
+@patch("urllib.request.urlopen")
+def test_update_artifact_reparse_patch(mock_urlopen):
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = b'{"status": "reparsed"}'
+    mock_resp.__enter__.return_value = mock_resp
+    mock_urlopen.return_value = mock_resp
+
+    config = {"apiUrl": "http://localhost:14242", "apiKey": "test_key"}
+    res = update_artifact.update_artifact_reparse(config, "src_12345", space_id="space_abc")
+
+    assert res == {"status": "reparsed"}
+    mock_urlopen.assert_called_once()
+    req = mock_urlopen.call_args[0][0]
+    assert req.get_full_url() == "http://localhost:14242/sources/src_12345?space_id=space_abc"
+    assert req.get_method() == "PATCH"
+    assert req.headers.get("Authorization") == "Bearer test_key"
+
+    payload = json.loads(req.data.decode("utf-8"))
+    assert payload == {"action": "reparse"}
