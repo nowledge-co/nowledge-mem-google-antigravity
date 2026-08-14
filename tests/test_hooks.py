@@ -206,12 +206,16 @@ def test_spaces_cache_legacy_discard():
             patch.dict(os.environ, {"HOME": tmpdir}),
             patch("nmem_shared.http_request", return_value=[{"id": "new_space"}]),
         ):
+            saved_cache = nmem_shared._SPACES_CACHE
             nmem_shared._SPACES_CACHE = {"timestamp": 0.0, "spaces": None}
-            spaces = nmem_shared.get_existing_spaces()
-            assert spaces == [{"id": "new_space"}]
-            assert not old_cache1.exists()
-            assert not old_cache2.exists()
-            assert new_cache.exists()
+            try:
+                spaces = nmem_shared.get_existing_spaces()
+                assert spaces == [{"id": "new_space"}]
+                assert not old_cache1.exists()
+                assert not old_cache2.exists()
+                assert new_cache.exists()
+            finally:
+                nmem_shared._SPACES_CACHE = saved_cache
 
 
 @patch("nmem_shared.FileLock")
@@ -351,6 +355,83 @@ def test_get_effective_config_ignore_host_config(mock_read_text, mock_is_file):
         url, key = nmem_shared.get_effective_config()
         assert url == "http://127.0.0.1:9999"
         assert key is None
+
+
+def test_get_effective_config_ignore_host_preserves_workspace_config():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ws_dir = Path(tmpdir) / "workspace"
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        local_cfg = ws_dir / ".config.json"
+        local_cfg.write_text(json.dumps({"apiUrl": "https://ws-mem.example.com", "apiKey": "ws_key"}))
+
+        global_cfg_dir = Path(tmpdir) / ".nowledge-mem"
+        global_cfg_dir.mkdir(parents=True, exist_ok=True)
+        global_cfg = global_cfg_dir / "config.json"
+        global_cfg.write_text(json.dumps({"apiUrl": "https://global-mem.example.com", "apiKey": "global_key"}))
+
+        env_dict = {"HOME": tmpdir, "NMEM_IGNORE_HOST_CONFIG": "1"}
+        with patch.dict(os.environ, env_dict, clear=True):
+            url, key = nmem_shared.get_effective_config(cwd=ws_dir)
+            assert url == "https://ws-mem.example.com"
+            assert key == "ws_key"
+
+
+def test_resolve_space_detailed_hierarchy():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ws_dir = Path(tmpdir) / "workspace"
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        ws_cfg = ws_dir / ".config.json"
+        ws_cfg.write_text(json.dumps({"space": "ws-config-space"}))
+
+        nmemspace_file = ws_dir / ".nmemspace"
+        nmemspace_file.write_text("ws-nmemspace-space")
+
+        plugin_cfg_dir = Path(tmpdir) / ".nowledge-mem" / "plugins" / "antigravity"
+        plugin_cfg_dir.mkdir(parents=True, exist_ok=True)
+        plugin_cfg = plugin_cfg_dir / "config.json"
+        plugin_cfg.write_text(json.dumps({"space": "plugin-storage-space"}))
+
+        global_cfg_dir = Path(tmpdir) / ".nowledge-mem"
+        global_cfg_dir.mkdir(parents=True, exist_ok=True)
+        global_cfg = global_cfg_dir / "config.json"
+        global_cfg.write_text(json.dumps({"space": "global-space"}))
+
+        with patch.dict(os.environ, {"HOME": tmpdir}, clear=True):
+            # 1. Workspace .config.json outranks .nmemspace
+            assert nmem_shared.resolve_space(cwd=ws_dir) == "ws-config-space"
+
+            # 2. .nmemspace outranks plugin storage
+            ws_cfg.unlink()
+            assert nmem_shared.resolve_space(cwd=ws_dir) == "ws-nmemspace-space"
+
+            # 3. Plugin storage outranks global
+            nmemspace_file.unlink()
+            assert nmem_shared.resolve_space(cwd=ws_dir) == "plugin-storage-space"
+
+            # 4. Global fallback
+            plugin_cfg.unlink()
+            assert nmem_shared.resolve_space(cwd=ws_dir) == "global-space"
+
+
+def test_retry_unsynced_sessions_async_spawn_guard():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plugin_dir = Path(tmpdir) / ".nowledge-mem" / "plugins" / "antigravity"
+        plugin_dir.mkdir(parents=True, exist_ok=True)
+        with (
+            patch.dict(os.environ, {"HOME": tmpdir}),
+            patch("subprocess.Popen") as mock_popen,
+        ):
+            mock_proc = MagicMock()
+            mock_proc.pid = 12345
+            mock_popen.return_value = mock_proc
+
+            # First spawn succeeds
+            nmem_shared.retry_unsynced_sessions_async(cooldown_seconds=10.0)
+            assert mock_popen.call_count == 1
+
+            # Second immediate spawn is suppressed by cooldown
+            nmem_shared.retry_unsynced_sessions_async(cooldown_seconds=10.0)
+            assert mock_popen.call_count == 1
 
 
 @patch("pathlib.Path.is_file", return_value=True)
@@ -659,16 +740,19 @@ def test_nmem_gate_trigger_memory_catchup_without_intent(mock_flush, mock_write,
             "args": {
                 "ServerName": "nowledge-mem",
                 "ToolName": "trigger_memory_catchup",
-                "Arguments": {"horizon": "today"},
+                "Arguments": {"horizon": 3},
             },
         },
         "conversationId": "conv-test-catchup",
     }
     with (
-        patch("nmem_shared.should_allow_catchup", return_value=(True, "")),
+        patch("nmem_shared.should_allow_catchup", return_value=(True, "")) as mock_should,
+        patch("nmem_shared.record_catchup_execution") as mock_record,
         patch.object(sys, "argv", ["nmem-gate.py"]),
     ):
         nmem_gate.main()
+        mock_should.assert_called_once_with("3", "conv-test-catchup", session_dir=None, transcript_path=None)
+        mock_record.assert_called_once_with("3", "conv-test-catchup", session_dir=None, transcript_path=None)
         written = "".join(call.args[0] for call in mock_write.call_args_list)
         payload = json.loads(written)
         assert payload["decision"] == "ask"
@@ -697,7 +781,7 @@ def test_nmem_gate_trigger_memory_catchup_debounced(mock_flush, mock_write, mock
         nmem_gate.main()
         written = "".join(call.args[0] for call in mock_write.call_args_list)
         payload = json.loads(written)
-        assert payload["decision"] == "allow"
+        assert payload["decision"] == "deny"
         assert "Auto-suppressing redundant memory catchup" in payload["reason"]
 
 

@@ -100,7 +100,7 @@ By default, both `nmem` and the bundled MCP server point to the local Mem server
 Nowledge Mem resolves connection and space settings in the following strict order of precedence:
 
 1. **Environment Variables**: `NMEM_API_URL`, `NMEM_API_KEY`, `NMEM_SPACE` (or `NMEM_SPACE_ID`)
-2. **Local Workspace Config (`.config.json`)**: Place a `.config.json` file at the root of the workspace (or plugin root). This file is git-ignored and allows configuring server endpoints, credentials, default space, and future settings locally for that specific workspace:
+2. **Local Workspace Config (`.config.json`)**: Place a `.config.json` file at the root of the workspace. This file is git-ignored and allows configuring server endpoints, credentials, default space, and future settings locally for that specific workspace:
    ```json
    {
      "apiUrl": "https://mem.example.com",
@@ -108,9 +108,11 @@ Nowledge Mem resolves connection and space settings in the following strict orde
      "space": "my-project-space"
    }
    ```
-3. **Plugin Storage Config**: `~/.nowledge-mem/plugins/antigravity/config.json` (persists Antigravity-specific plugin defaults across upgrades without polluting root files)
-4. **Global Client Config**: `~/.nowledge-mem/config.json` (managed via `nmem config client set ...`)
-5. **Local Defaults**: `http://127.0.0.1:14242` and `default` space.
+3. **Explicit Workspace Space Files**: `.nmemspace` or `.nowledge/config.json` in the workspace root.
+4. **Plugin Root Config (`.config.json`)**: Place a `.config.json` in the plugin repository root for plugin-wide local testing defaults.
+5. **Plugin Storage Config**: `~/.nowledge-mem/plugins/antigravity/config.json` (persists Antigravity-specific plugin defaults across upgrades without polluting root files).
+6. **Global Client Config**: `~/.nowledge-mem/config.json` (managed via `nmem config client set ...`).
+7. **Local Defaults**: `http://127.0.0.1:14242` and `default` space.
 
 For global remote Mem setup via CLI, run:
 

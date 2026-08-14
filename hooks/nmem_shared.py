@@ -209,7 +209,7 @@ def get_plugin_config() -> dict:
 def get_effective_config(cwd: str | Path | None = None) -> tuple[str, str | None]:
     """Resolve effective API URL and API key following the hierarchy:
     1. NMEM_API_URL / NMEM_API_KEY environment variables
-    2. Local workspace .config.json at plugin root or workspace root
+    2. Local workspace .config.json at workspace root or plugin root
     3. Plugin storage configuration (~/.nowledge-mem/plugins/antigravity/config.json)
     4. NMEM_CONFIG_PATH if set, or global ~/.nowledge-mem/config.json (unless NMEM_IGNORE_HOST_CONFIG is set)
     5. Fallback default http://127.0.0.1:14242
@@ -224,8 +224,8 @@ def get_effective_config(cwd: str | Path | None = None) -> tuple[str, str | None
     api_url = env_url
     api_key = env_key
 
-    # 2. Check local workspace .config.json if not ignored
-    if not ignore_host and (not api_url or not api_key):
+    # 2. Check local workspace .config.json (workspace-local config is not ignored by NMEM_IGNORE_HOST_CONFIG)
+    if not api_url or not api_key:
         local_cfg = get_local_config(cwd)
         local_url = str(local_cfg.get("apiUrl") or local_cfg.get("api_url") or "").strip().rstrip("/")
         local_key = str(local_cfg.get("apiKey") or local_cfg.get("api_key") or "").strip() or None
@@ -374,26 +374,35 @@ def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
 def resolve_space(cwd: str | Path | None = None) -> str:
     """Resolve active space following priority:
     1. Explicit environment variables (NMEM_SPACE or NMEM_SPACE_ID)
-    2. Local plugin / workspace configuration (.config.json)
+    2. Local workspace configuration (<workspace_root>/.config.json)
     3. Explicit workspace configuration files (.nmemspace or .nowledge/config.json)
-    4. Plugin storage configuration (~/.nowledge-mem/plugins/antigravity/config.json space)
-    5. Global configuration (~/.nowledge-mem/config.json space)
-    6. Dynamically detected space from workspace directory IF it exists on backend
-    7. Fallback to 'default' space
+    4. Plugin root configuration (<plugin_root>/.config.json)
+    5. Plugin storage configuration (~/.nowledge-mem/plugins/antigravity/config.json space)
+    6. Global configuration (~/.nowledge-mem/config.json space)
+    7. Dynamically detected space from workspace directory IF it exists on backend
+    8. Fallback to 'default' space
     """
     # 1. Check explicit environment override
     env_space = os.environ.get("NMEM_SPACE", "").strip() or os.environ.get("NMEM_SPACE_ID", "").strip()
     if env_space:
         return env_space
 
-    # 2. Check local plugin / workspace .config.json
-    local_cfg = get_local_config(cwd)
-    local_space = local_cfg.get("space") or local_cfg.get("space_id")
-    if isinstance(local_space, str) and local_space.strip():
-        return local_space.strip()
-
-    # 3. Check explicit workspace config files
     target_dir = Path(cwd).resolve() if cwd else Path.cwd().resolve()
+    plugin_root = Path(__file__).parent.parent.resolve()
+
+    # 2. Check local workspace .config.json (at workspace root)
+    ws_cfg_path = target_dir / ".config.json"
+    if ws_cfg_path.is_file():
+        try:
+            data = json.loads(ws_cfg_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                ws_space = data.get("space") or data.get("space_id")
+                if isinstance(ws_space, str) and ws_space.strip():
+                    return ws_space.strip()
+        except Exception:
+            pass
+
+    # 3. Check explicit workspace config files (.nmemspace or .nowledge/config.json)
     for cfg_path in (target_dir / ".nmemspace", target_dir / ".nowledge" / "config.json"):
         if cfg_path.is_file():
             try:
@@ -409,13 +418,26 @@ def resolve_space(cwd: str | Path | None = None) -> str:
             except Exception:
                 pass
 
-    # 4. Check plugin storage config file (~/.nowledge-mem/plugins/antigravity/config.json)
+    # 4. Check plugin root .config.json if distinct from workspace root
+    if plugin_root != target_dir:
+        plugin_root_cfg = plugin_root / ".config.json"
+        if plugin_root_cfg.is_file():
+            try:
+                data = json.loads(plugin_root_cfg.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    p_space = data.get("space") or data.get("space_id")
+                    if isinstance(p_space, str) and p_space.strip():
+                        return p_space.strip()
+            except Exception:
+                pass
+
+    # 5. Check plugin storage config file (~/.nowledge-mem/plugins/antigravity/config.json)
     plugin_cfg = get_plugin_config()
     plugin_space = plugin_cfg.get("space") or plugin_cfg.get("space_id")
     if isinstance(plugin_space, str) and plugin_space.strip():
         return plugin_space.strip()
 
-    # 5. Check global config file (~/.nowledge-mem/config.json)
+    # 6. Check global config file (~/.nowledge-mem/config.json)
     config_file = Path("~/.nowledge-mem/config.json").expanduser()
     if config_file.is_file():
         try:
@@ -426,7 +448,7 @@ def resolve_space(cwd: str | Path | None = None) -> str:
         except Exception:
             pass
 
-    # 5. Dynamic space auto-detection from workspace directory
+    # 7. Dynamic space auto-detection from workspace directory
     candidate = target_dir.name.strip()
     if not candidate or candidate.lower() == "default":
         return "default"
@@ -828,7 +850,8 @@ def get_unsynced_queue_path() -> Path:
             try:
                 plugin_dir.mkdir(parents=True, exist_ok=True)
                 old_lock = old_path.with_suffix(".lock")
-                with FileLock(old_lock):
+                new_lock = new_path.with_suffix(".lock")
+                with FileLock(old_lock), FileLock(new_lock):
                     if old_path.exists():
                         try:
                             old_data = json.loads(old_path.read_text(encoding="utf-8"))
@@ -1344,17 +1367,42 @@ def resolve_session_dir(
     return None
 
 
-def retry_unsynced_sessions_async() -> None:
-    """Spawns an asynchronous background worker to retry unsynced sessions without blocking."""
+def retry_unsynced_sessions_async(cooldown_seconds: float = 15.0) -> None:
+    """Spawns an asynchronous background worker to retry unsynced sessions without blocking, guarded by a PID/cooldown lock."""
     try:
+        plugin_dir = get_plugin_storage_dir()
+        cache_dir = plugin_dir / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        pid_file = cache_dir / "retry_worker.pid"
+
+        now = time.time()
+        if pid_file.exists():
+            try:
+                content = pid_file.read_text(encoding="utf-8").strip()
+                if content:
+                    parts = content.split(":")
+                    pid = int(parts[0]) if parts[0].isdigit() else 0
+                    spawn_time = float(parts[1]) if len(parts) > 1 and parts[1].replace(".", "", 1).isdigit() else 0.0
+                    # If process is still alive and was started recently, or was spawned less than cooldown_seconds ago
+                    if pid > 0 and _is_pid_alive(pid) and (now - spawn_time) < 120.0:
+                        return
+                    if (now - spawn_time) < cooldown_seconds:
+                        return
+            except Exception:
+                pass
+
         session_start_script = Path(__file__).parent / "session-start.py"
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [sys.executable, str(session_start_script), "--retry-only"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
             **_windows_no_window_kwargs(),
         )
+        try:
+            pid_file.write_text(f"{proc.pid}:{now}", encoding="utf-8")
+        except Exception:
+            pass
     except Exception:
         pass
 

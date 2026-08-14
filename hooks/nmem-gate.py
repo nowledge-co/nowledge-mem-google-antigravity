@@ -58,7 +58,7 @@ def main():
     # 1. Memory Health Catchup (Debounced & Intent-Gated)
     if sub_tool == "trigger_memory_catchup":
         call_arguments = tool_args.get("Arguments") if isinstance(tool_args.get("Arguments"), dict) else tool_args
-        horizon = call_arguments.get("horizon", "today")
+        horizon = str(call_arguments.get("horizon") or "today").strip() or "today"
         conv_id = data.get("conversationId")
         artifact_dir = data.get("artifactDirectoryPath")
         transcript_path = data.get("transcriptPath")
@@ -70,9 +70,8 @@ def main():
         if not should_proceed:
             emit(
                 {
-                    "decision": "allow",
+                    "decision": "deny",
                     "reason": f"Auto-suppressing redundant memory catchup: {debounce_reason}",
-                    "permissionOverrides": [f"mcp(nowledge-mem/{sub_tool})"],
                 }
             )
             return
@@ -112,6 +111,9 @@ def main():
                 pass
 
         # Ask user confirmation if no explicit intent detected
+        nmem_shared.record_catchup_execution(
+            horizon, conv_id, session_dir=artifact_dir, transcript_path=transcript_path
+        )
         emit(
             {
                 "decision": "ask",

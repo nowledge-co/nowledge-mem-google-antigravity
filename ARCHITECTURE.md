@@ -90,7 +90,7 @@ flowchart TD
 ### Config Resolution Order
 `hooks/nmem_shared.py` resolves connection settings using the following precedence:
 1. **Environment Variables**: `NMEM_API_URL` and `NMEM_API_KEY`.
-2. **Local Workspace Config (`.config.json`)**: Reads `.config.json` at workspace root or plugin root (`apiUrl` / `api_url` and `apiKey` / `api_key`).
+2. **Local Workspace Config (`.config.json`)**: Reads `.config.json` at workspace root (or plugin root) (`apiUrl` / `api_url` and `apiKey` / `api_key`).
 3. **Plugin Storage Config File**: `~/.nowledge-mem/plugins/antigravity/config.json` (persists plugin-specific configuration defaults across updates).
 4. **Global Client Config File**: `~/.nowledge-mem/config.json` (`apiUrl` and `apiKey`).
 5. **Default Fallback**: `http://127.0.0.1:14242` (default local loopback).
@@ -108,16 +108,17 @@ To ensure subshells running inside sandboxed tool environments (`BypassSandbox: 
 ### Space Resolution & Verification Pipeline
 `hooks/nmem_shared.py` resolves the active space using `resolve_space(cwd=None)` following this pipeline:
 1. **Explicit Environment Variables**: Returns `NMEM_SPACE` or `NMEM_SPACE_ID` if explicitly set by user.
-2. **Local Workspace Configuration (`.config.json`)**: Reads `space` or `space_id` from `.config.json` at workspace root or plugin root.
-3. **Explicit Workspace Configuration**: Returns explicit `space` defined in `.nmemspace` or `.nowledge/config.json` at the workspace root.
-4. **Plugin Storage Configuration**: Returns `space` or `space_id` defined in `~/.nowledge-mem/plugins/antigravity/config.json`.
-5. **Global Client Configuration**: Returns `space` or `space_id` defined in `~/.nowledge-mem/config.json`.
-6. **Dynamic Space Auto-Detection with Existence Verification**:
+2. **Local Workspace Configuration (`.config.json`)**: Reads `space` or `space_id` from `<workspace_root>/.config.json`.
+3. **Explicit Workspace Configuration Files**: Returns explicit `space` defined in `.nmemspace` or `.nowledge/config.json` at the workspace root.
+4. **Plugin Root Configuration (`.config.json`)**: Reads `space` or `space_id` from `<plugin_root>/.config.json` if distinct from workspace.
+5. **Plugin Storage Configuration**: Returns `space` or `space_id` defined in `~/.nowledge-mem/plugins/antigravity/config.json`.
+6. **Global Client Configuration**: Returns `space` or `space_id` defined in `~/.nowledge-mem/config.json`.
+7. **Dynamic Space Auto-Detection with Existence Verification**:
    - Infer candidate space name from workspace directory basename (e.g. `Path(cwd).name`).
    - Query existing backend spaces (`get_existing_spaces()`) via `/spaces` HTTP GET or `nmem --json spaces list`.
    - Match candidate against `id`, `key`, `name`, or `aliases`.
    - If candidate space exists, use it.
-7. **Fallback to Default Space**: If the dynamically detected space does NOT exist on the backend and the user has not explicitly configured a project space, fall back to `"default"`.
+8. **Fallback to Default Space**: If the dynamically detected space does NOT exist on the backend and the user has not explicitly configured a project space, fall back to `"default"`.
 
 ---
 
