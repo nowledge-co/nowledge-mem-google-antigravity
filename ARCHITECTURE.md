@@ -86,8 +86,9 @@ flowchart TD
 ### Config Resolution Order
 `hooks/nmem_shared.py` resolves connection settings using the following precedence:
 1. **Environment Variables**: `NMEM_API_URL` and `NMEM_API_KEY`.
-2. **Client Config File**: `~/.nowledge-mem/config.json` (`apiUrl` and `apiKey`).
-3. **Default Fallback**: `http://127.0.0.1:14242` (default local loopback).
+2. **Local Plugin / Workspace Config (`.config.json`)**: Reads `.config.json` at plugin root or workspace root (`apiUrl` / `api_url` and `apiKey` / `api_key`).
+3. **Global Client Config File**: `~/.nowledge-mem/config.json` (`apiUrl` and `apiKey`).
+4. **Default Fallback**: `http://127.0.0.1:14242` (default local loopback).
 
 ### Multi-Path System Binary Resolution
 To ensure subshells running inside sandboxed tool environments (`BypassSandbox: false`) can locate the `nmem` binary when user `$PATH` symlinks are hidden, `_nmem_command()` checks paths in order:
@@ -102,13 +103,15 @@ To ensure subshells running inside sandboxed tool environments (`BypassSandbox: 
 ### Space Resolution & Verification Pipeline
 `hooks/nmem_shared.py` resolves the active space using `resolve_space(cwd=None)` following this pipeline:
 1. **Explicit Environment Variables**: Returns `NMEM_SPACE` or `NMEM_SPACE_ID` if explicitly set by user.
-2. **Explicit Workspace Configuration**: Returns explicit `space` defined in `.nmemspace` or `.nowledge/config.json` at the workspace root.
-3. **Dynamic Space Auto-Detection with Existence Verification**:
+2. **Local Plugin / Workspace Configuration (`.config.json`)**: Reads `space` or `space_id` from `.config.json` at plugin root or workspace root.
+3. **Explicit Workspace Configuration**: Returns explicit `space` defined in `.nmemspace` or `.nowledge/config.json` at the workspace root.
+4. **Global Client Configuration**: Returns `space` or `space_id` defined in `~/.nowledge-mem/config.json`.
+5. **Dynamic Space Auto-Detection with Existence Verification**:
    - Infer candidate space name from workspace directory basename (e.g. `Path(cwd).name`).
    - Query existing backend spaces (`get_existing_spaces()`) via `/spaces` HTTP GET or `nmem --json spaces list`.
    - Match candidate against `id`, `key`, `name`, or `aliases`.
    - If candidate space exists, use it.
-4. **Fallback to Default Space**: If the dynamically detected space does NOT exist on the backend and the user has not explicitly configured a project space, fall back to `"default"`.
+6. **Fallback to Default Space**: If the dynamically detected space does NOT exist on the backend and the user has not explicitly configured a project space, fall back to `"default"`.
 
 ---
 

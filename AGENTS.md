@@ -29,8 +29,11 @@ When modifying or adding hook scripts under `hooks/` and configuring them in `ho
   - Memory health catchup (`trigger_memory_catchup`) is debounced (1-hour cooldown / session debounce via `nmem_shared.should_allow_catchup`) to prevent repetitive server-side compaction, and requires explicit user intent keywords (`catch up`, `rescore`, `decay`, `compaction`, `maintenance`) to auto-allow.
   - Under `PreToolUse` in `hooks.json`, the `run_command` tool is monitored. Auto-approve specific commands (such as the native status script `nmem_status.py`) to bypass command confirmation prompts and provide a premium, prompt-free UX.
 * **Notification Throttling & Async Background Retries**: In `hooks/post-invocation.py`, throttle informational warnings (e.g. pending offline sessions) to at most once per conversation session using `should_emit_unsynced_warning()` to prevent agent context nag loops, and always trigger non-blocking background queue drainage via `retry_unsynced_sessions_async()`.
+* **Local Plugin Configuration (`.config.json`)**: Support a git-ignored `.config.json` file at the root of the plugin or workspace root.
+  - Used for configuring server endpoints (`apiUrl`), credentials (`apiKey`), and default project space (`space`).
+  - Precedence hierarchy: `env vars > local config (.config.json) > global config (~/.nowledge-mem/config.json) > defaults`.
 * **Space Auto-Detection Heuristics**: Automatically map workspace directories to Nowledge Mem spaces.
-  - Respect explicit override environment variables (`NMEM_SPACE` or `NMEM_SPACE_ID`) or workspace config files (`.nmemspace` / `.nowledge/config.json`) if set by the user.
+  - Respect explicit override environment variables (`NMEM_SPACE` or `NMEM_SPACE_ID`), local config (`.config.json`), or workspace config files (`.nmemspace` / `.nowledge/config.json`) if set by the user.
   - Dynamically detected candidate spaces from workspace directory names must be verified against existing backend spaces (`get_existing_spaces()`).
   - If a dynamically detected space does NOT exist on the backend and the user has not explicitly configured a project space, hooks must fall back gracefully to the `default` space.
 * **Host Agent ID Fingerprinting**: Use the shared hooks utility `hooks/nmem_shared.py` to resolve and propagate the host agent ID.

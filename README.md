@@ -93,25 +93,32 @@ Release packaging notes live in [`RELEASING.md`](./RELEASING.md).
 - `nmem-thread-handoff`
 - `nmem-thread-save`
 
-## Local vs Remote
+## Local vs Remote & Configuration Precedence
 
 By default, both `nmem` and the bundled MCP server point to the local Mem server at `http://127.0.0.1:14242`.
 
-For remote Mem, run:
+Nowledge Mem resolves connection and space settings in the following strict order of precedence:
+
+1. **Environment Variables**: `NMEM_API_URL`, `NMEM_API_KEY`, `NMEM_SPACE` (or `NMEM_SPACE_ID`)
+2. **Local Plugin / Workspace Config (`.config.json`)**: Place a `.config.json` file at the root of the plugin (or workspace root). This file is git-ignored and allows configuring server endpoints, credentials, default space, and future settings locally:
+   ```json
+   {
+     "apiUrl": "https://mem.example.com",
+     "apiKey": "nmem_your_key",
+     "space": "my-project-space"
+   }
+   ```
+3. **Global Client Config**: `~/.nowledge-mem/config.json` (managed via `nmem config client set ...`)
+4. **Local Defaults**: `http://127.0.0.1:14242` and `default` space.
+
+For global remote Mem setup via CLI, run:
 
 ```bash
 nmem config client set url https://mem.example.com
 nmem config client set api-key nmem_your_key
 ```
 
-`nmem` loads connection settings with this priority:
-
-- `--api-url` flag
-- `NMEM_API_URL` / `NMEM_API_KEY`
-- `~/.nowledge-mem/config.json`
-- defaults
-
-If you need a temporary override for one session, launch Antigravity from a shell where `NMEM_API_URL` and `NMEM_API_KEY` are exported.
+If you need a temporary override for one session, launch Antigravity from a shell where `NMEM_API_URL`, `NMEM_API_KEY`, or `NMEM_SPACE` are exported.
 
 For MCP tools in remote mode, generate the host config:
 
@@ -120,6 +127,7 @@ nmem config mcp show --host google-antigravity
 ```
 
 Paste the generated JSON into Antigravity's custom MCP config (`~/.gemini/config/mcp_config.json` or modified raw via the MCP Store).
+
 
 ## Direct `nmem` Use Is Always Allowed
 

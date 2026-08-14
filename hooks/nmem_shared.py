@@ -166,12 +166,30 @@ def _windows_no_window_kwargs() -> dict[str, int]:
         return {}
     return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
 
+def get_local_config(cwd: str | Path | None = None) -> dict:
+    """Read local .config.json from the plugin root or workspace root if present."""
+    config = {}
+    plugin_root = Path(__file__).parent.parent.resolve()
+    target_dir = Path(cwd).resolve() if cwd else Path.cwd().resolve()
 
-def get_effective_config() -> tuple[str, str | None]:
+    # Check plugin root .config.json first, then workspace root .config.json
+    for cfg_path in (plugin_root / ".config.json", target_dir / ".config.json"):
+        if cfg_path.is_file():
+            try:
+                data = json.loads(cfg_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    config.update(data)
+            except Exception:
+                pass
+    return config
+
+
+def get_effective_config(cwd: str | Path | None = None) -> tuple[str, str | None]:
     """Resolve effective API URL and API key following the hierarchy:
     1. NMEM_API_URL / NMEM_API_KEY environment variables
-    2. NMEM_CONFIG_PATH if set, or ~/.nowledge-mem/config.json (unless NMEM_IGNORE_HOST_CONFIG is set)
-    3. Fallback default http://127.0.0.1:14242
+    2. Local .config.json at plugin root or workspace root
+    3. NMEM_CONFIG_PATH if set, or ~/.nowledge-mem/config.json (unless NMEM_IGNORE_HOST_CONFIG is set)
+    4. Fallback default http://127.0.0.1:14242
 
     Guards against inadvertently picking up host ~/.nowledge-mem/config.json credentials
     when targeting custom server URLs or running isolated test environments.
@@ -183,14 +201,26 @@ def get_effective_config() -> tuple[str, str | None]:
     api_url = env_url
     api_key = env_key
 
-    if not ignore_host:
+    # 2. Check local .config.json if not ignored
+    if not ignore_host and (not api_url or not api_key):
+        local_cfg = get_local_config(cwd)
+        local_url = str(local_cfg.get("apiUrl") or local_cfg.get("api_url") or "").strip().rstrip("/")
+        local_key = str(local_cfg.get("apiKey") or local_cfg.get("api_key") or "").strip() or None
+        if not api_url and local_url:
+            api_url = local_url
+        if not api_key and local_key:
+            if not env_url or env_url.rstrip("/") == local_url:
+                api_key = local_key
+
+    # 3. Check global config file
+    if not ignore_host and (not api_url or not api_key):
         custom_cfg = os.environ.get("NMEM_CONFIG_PATH", "").strip()
         config_file = Path(custom_cfg).expanduser() if custom_cfg else Path("~/.nowledge-mem/config.json").expanduser()
         if config_file.is_file():
             try:
                 data = json.loads(config_file.read_text(encoding="utf-8"))
-                file_url = str(data.get("apiUrl", "")).strip().rstrip("/")
-                file_key = str(data.get("apiKey", "")).strip() or None
+                file_url = str(data.get("apiUrl") or data.get("api_url") or "").strip().rstrip("/")
+                file_key = str(data.get("apiKey") or data.get("api_key") or "").strip() or None
 
                 if not api_url and file_url:
                     api_url = file_url
@@ -203,6 +233,7 @@ def get_effective_config() -> tuple[str, str | None]:
             except Exception:
                 pass
 
+    # 4. Fallback default
     if not api_url:
         api_url = "http://127.0.0.1:14242"
 
@@ -295,16 +326,24 @@ def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
 def resolve_space(cwd: str | Path | None = None) -> str:
     """Resolve active space following priority:
     1. Explicit environment variables (NMEM_SPACE or NMEM_SPACE_ID)
-    2. Explicit workspace configuration (.nmemspace or .nowledge/config.json)
-    3. Dynamically detected space from workspace directory IF it exists on backend
-    4. Fallback to 'default' space
+    2. Local plugin / workspace configuration (.config.json)
+    3. Explicit workspace configuration files (.nmemspace or .nowledge/config.json)
+    4. Global configuration (~/.nowledge-mem/config.json space)
+    5. Dynamically detected space from workspace directory IF it exists on backend
+    6. Fallback to 'default' space
     """
     # 1. Check explicit environment override
     env_space = os.environ.get("NMEM_SPACE", "").strip() or os.environ.get("NMEM_SPACE_ID", "").strip()
     if env_space:
         return env_space
 
-    # 2. Check explicit workspace config file
+    # 2. Check local plugin / workspace .config.json
+    local_cfg = get_local_config(cwd)
+    local_space = local_cfg.get("space") or local_cfg.get("space_id")
+    if isinstance(local_space, str) and local_space.strip():
+        return local_space.strip()
+
+    # 3. Check explicit workspace config files
     target_dir = Path(cwd).resolve() if cwd else Path.cwd().resolve()
     for cfg_path in (target_dir / ".nmemspace", target_dir / ".nowledge" / "config.json"):
         if cfg_path.is_file():
@@ -321,7 +360,18 @@ def resolve_space(cwd: str | Path | None = None) -> str:
             except Exception:
                 pass
 
-    # 3. Dynamic space auto-detection from workspace directory
+    # 4. Check global config file
+    config_file = Path("~/.nowledge-mem/config.json").expanduser()
+    if config_file.is_file():
+        try:
+            data = json.loads(config_file.read_text(encoding="utf-8"))
+            val = data.get("space") or data.get("space_id")
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        except Exception:
+            pass
+
+    # 5. Dynamic space auto-detection from workspace directory
     candidate = target_dir.name.strip()
     if not candidate or candidate.lower() == "default":
         return "default"
@@ -341,7 +391,7 @@ def resolve_space(cwd: str | Path | None = None) -> str:
             if cand_lower in (s_id.lower(), s_key.lower(), s_name.lower()) or cand_lower in aliases:
                 return s_id or s_key or candidate
 
-    # Dynamically detected space does not exist on backend and user has not explicitly set project space -> fall back to default
+    # 6. Dynamically detected space does not exist on backend and user has not explicitly set project space -> fall back to default
     return "default"
 
 

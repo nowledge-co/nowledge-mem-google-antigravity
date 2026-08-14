@@ -186,10 +186,8 @@ def test_unsynced_warning_throttle():
 
         with patch.dict(os.environ, {"HOME": tmpdir}):
             assert nmem_shared.should_emit_unsynced_warning("conv-1", session_dir=session_dir) is True
-
             nmem_shared.record_unsynced_warning_emitted("conv-1", session_dir=session_dir)
             assert (session_dir / ".nmem" / "warning_history.json").exists()
-
             assert nmem_shared.should_emit_unsynced_warning("conv-1", session_dir=session_dir) is False
 
 
@@ -198,6 +196,54 @@ def test_get_effective_config_env():
     url, key = nmem_shared.get_effective_config()
     assert url == "https://remote.example.com"
     assert key == "secret_key"
+
+
+def test_get_effective_config_precedence():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ws_dir = Path(tmpdir) / "workspace"
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        local_cfg = ws_dir / ".config.json"
+        local_cfg.write_text(json.dumps({"apiUrl": "https://local-mem.example.com", "apiKey": "local_key"}))
+
+        global_cfg_dir = Path(tmpdir) / ".nowledge-mem"
+        global_cfg_dir.mkdir(parents=True, exist_ok=True)
+        global_cfg = global_cfg_dir / "config.json"
+        global_cfg.write_text(json.dumps({"apiUrl": "https://global-mem.example.com", "apiKey": "global_key"}))
+
+        with patch.dict(os.environ, {"HOME": tmpdir}, clear=True):
+            # 1. Local overrides global
+            url, key = nmem_shared.get_effective_config(cwd=ws_dir)
+            assert url == "https://local-mem.example.com"
+            assert key == "local_key"
+
+            # 2. Env var overrides local
+            with patch.dict(os.environ, {"NMEM_API_URL": "https://env-mem.example.com", "NMEM_API_KEY": "env_key"}):
+                url, key = nmem_shared.get_effective_config(cwd=ws_dir)
+                assert url == "https://env-mem.example.com"
+                assert key == "env_key"
+
+
+def test_resolve_space_precedence():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ws_dir = Path(tmpdir) / "workspace"
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        local_cfg = ws_dir / ".config.json"
+        local_cfg.write_text(json.dumps({"space": "local-space"}))
+
+        global_cfg_dir = Path(tmpdir) / ".nowledge-mem"
+        global_cfg_dir.mkdir(parents=True, exist_ok=True)
+        global_cfg = global_cfg_dir / "config.json"
+        global_cfg.write_text(json.dumps({"space": "global-space"}))
+
+        with patch.dict(os.environ, {"HOME": tmpdir}, clear=True):
+            # 1. Local overrides global
+            space = nmem_shared.resolve_space(cwd=ws_dir)
+            assert space == "local-space"
+
+            # 2. Env var overrides local
+            with patch.dict(os.environ, {"NMEM_SPACE": "env-space"}):
+                space = nmem_shared.resolve_space(cwd=ws_dir)
+                assert space == "env-space"
 
 
 @patch("pathlib.Path.is_file", return_value=True)
