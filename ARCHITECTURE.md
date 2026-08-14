@@ -58,15 +58,14 @@ flowchart TD
   - **Auto-Allow**: Read-only tools (`mem_fs`, `memory_search`, `thread_search`, `query_library`, `explore_graph`, `get_memory_by_id`, etc.) return `{"decision": "allow"}` with permission overrides to prevent terminal prompt interruptions.
   - **Force Confirm**: Destructive operations (`memory_delete`, `thread_delete`, `memory_relation_delete`) return `{"decision": "force_ask"}`.
   - **Intent-Based Write Allow**: Write tools (`memory_add`, `memory_update`, etc.) check recent conversation steps for intent keywords (`save`, `remember`, `store`, `nmem`, `distill`, `handoff`). If found, returns `{"decision": "allow"}`.
-  - **Memory Health Catchup Debounce & Gating**: `trigger_memory_catchup` checks for prior execution in the current session / 1-hour cooldown window. Redundant calls are auto-suppressed with an explanation; new calls require explicit user maintenance intent (`catch up`, `rescore`, `decay`, `compaction`, `maintenance`) to auto-allow or prompt confirmation.
+  - **Memory Health Catchup Debounce & Gating**: `trigger_memory_catchup` checks for prior execution in the current session directory (`<session_dir>/.nmem/catchup_history.json`) and a 1-hour global cooldown. Redundant calls are auto-suppressed with an explanation; new calls require explicit user maintenance intent (`catch up`, `rescore`, `decay`, `compaction`, `maintenance`) to auto-allow or prompt confirmation.
 
 ### 3. PostInvocation Hook (`hooks/post-invocation.py`)
 - **Trigger**: Runs after each model invocation completes.
 - **Execution Flow**:
   1. Checks for pending unsynced offline sessions (`~/.nowledge-mem/antigravity_unsynced.json`) via `nmem_shared.get_unsynced_sessions()`.
   2. If pending items exist, automatically spawns an asynchronous background worker (`nmem_shared.retry_unsynced_sessions_async()`) to drain the queue.
-  3. Throttles warning notifications to at most once per conversation session (`should_emit_unsynced_warning`), emitting `injectSteps` with an informational message clarifying that background sync is in progress and `trigger_memory_catchup` is not required.
-
+  3. Throttles warning notifications to at most once per conversation session (`should_emit_unsynced_warning`), emitting `injectSteps` with an informational message clarifying that background sync is in progress and `trigger_memory_catchup` is not required. Session warning state is tracked locally in `<session_dir>/.nmem/warning_history.json`.
 
 ### 4. Stop Hook (`hooks/session-end.py`)
 - **Trigger**: Runs when the Antigravity session terminates.
@@ -75,9 +74,14 @@ flowchart TD
   2. If `fullyIdle: false` (background tasks still running), skips thread capture and defers to the final idle stop.
   3. Extracts user prompts (`USER_EXPLICIT`) and model responses (`MODEL`).
   4. Checks thread existence via `HTTP GET /threads/<id>` or `nmem t show <id>`. If all transcript messages match server thread messages, returns success immediately.
-  5. If leading messages match, uses `POST /threads/<id>/reconcile-tail` to append only missing trailing messages incrementally.
+  5. If leading messages match, uses `POST /threads/<id>/reconcile-tail` to append only missing trailing messages incrementally. If `reconcile-tail` fails (e.g. 400 Bad Request due to divergent message prefixes), it falls back directly to `POST /threads/<id>/append`.
   6. If backend calls fail, saves the session to `~/.nowledge-mem/antigravity_unsynced.json` via file-locked append for automatic background retry.
   7. Scans for approved `learning_proposal.md` artifacts and syncs them to rules (`nmem rules upsert`), skills (`nmem skills enroll`), or memories (`nmem memories add`).
+
+### 5. Session Directory State Isolation (`.nmem/`)
+- Rather than persisting session-level state into the global `~/.nowledge-mem/` configuration folder, hooks isolate session-scoped metadata within `<session_dir>/.nmem/` (resolved from `artifactDirectoryPath` or `transcriptPath`):
+  - `<session_dir>/.nmem/catchup_history.json`: Tracks per-horizon catchup executions within this session.
+  - `<session_dir>/.nmem/warning_history.json`: Tracks notification emissions for offline sync warnings to prevent repeating alerts in active conversations.
 
 ---
 

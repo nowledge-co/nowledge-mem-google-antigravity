@@ -166,6 +166,7 @@ def _windows_no_window_kwargs() -> dict[str, int]:
         return {}
     return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
 
+
 def get_local_config(cwd: str | Path | None = None) -> dict:
     """Read local .config.json from the plugin root or workspace root if present."""
     config = {}
@@ -1205,7 +1206,12 @@ def sync_learnings_if_any(
         except Exception:
             pass
 
-def resolve_session_dir(artifact_dir: str | Path | None = None, transcript_path: str | Path | None = None, conversation_id: str | None = None) -> Path | None:
+
+def resolve_session_dir(
+    artifact_dir: str | Path | None = None,
+    transcript_path: str | Path | None = None,
+    conversation_id: str | None = None,
+) -> Path | None:
     """Resolve the session/artifact directory for the active conversation."""
     if artifact_dir:
         p = Path(artifact_dir).expanduser()
@@ -1227,6 +1233,7 @@ def resolve_session_dir(artifact_dir: str | Path | None = None, transcript_path:
 
     return None
 
+
 def retry_unsynced_sessions_async() -> None:
     """Spawns an asynchronous background worker to retry unsynced sessions without blocking."""
     try:
@@ -1236,16 +1243,17 @@ def retry_unsynced_sessions_async() -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
-            **_windows_no_window_kwargs()
+            **_windows_no_window_kwargs(),
         )
     except Exception:
         pass
+
 
 def should_emit_unsynced_warning(
     conversation_id: str | None = None,
     cooldown_seconds: float = 1800.0,
     session_dir: str | Path | None = None,
-    transcript_path: str | Path | None = None
+    transcript_path: str | Path | None = None,
 ) -> bool:
     """Check if the unsynced session warning should be emitted, prioritizing session directory tracking."""
     sdir = resolve_session_dir(session_dir, transcript_path, conversation_id)
@@ -1276,10 +1284,9 @@ def should_emit_unsynced_warning(
     except Exception:
         return True
 
+
 def record_unsynced_warning_emitted(
-    conversation_id: str | None = None,
-    session_dir: str | Path | None = None,
-    transcript_path: str | Path | None = None
+    conversation_id: str | None = None, session_dir: str | Path | None = None, transcript_path: str | Path | None = None
 ) -> None:
     """Record that an unsynced session warning was emitted in the session directory."""
     now = time.time()
@@ -1314,20 +1321,21 @@ def record_unsynced_warning_emitted(
     except Exception:
         pass
 
+
 def should_allow_catchup(
     horizon: str = "today",
     conversation_id: str | None = None,
     cooldown_seconds: float = 3600.0,
     session_dir: str | Path | None = None,
-    transcript_path: str | Path | None = None
+    transcript_path: str | Path | None = None,
 ) -> tuple[bool, str]:
     """Check whether a memory catchup execution should proceed, checking session directory history first.
-    
+
     Returns (should_proceed, reason_if_suppressed).
     """
     now = time.time()
     sdir = resolve_session_dir(session_dir, transcript_path, conversation_id)
-    
+
     # 1. Check session directory catchup history
     if sdir:
         session_catchup_file = sdir / ".nmem" / "catchup_history.json"
@@ -1337,7 +1345,10 @@ def should_allow_catchup(
                 if horizon in data:
                     last_time = data[horizon]
                     if (now - last_time) < cooldown_seconds:
-                        return False, f"Memory catch-up for horizon '{horizon}' has already been executed in this session."
+                        return (
+                            False,
+                            f"Memory catch-up for horizon '{horizon}' has already been executed in this session.",
+                        )
             except Exception:
                 pass
 
@@ -1352,22 +1363,26 @@ def should_allow_catchup(
                 last_time = global_runs[horizon]
                 if (now - last_time) < cooldown_seconds:
                     mins_ago = max(1, int((now - last_time) / 60))
-                    return False, f"Memory catch-up for horizon '{horizon}' was already executed {mins_ago}m ago (cooldown is {int(cooldown_seconds/60)}m)."
+                    return (
+                        False,
+                        f"Memory catch-up for horizon '{horizon}' was already executed {mins_ago}m ago (cooldown is {int(cooldown_seconds/60)}m).",
+                    )
         except Exception:
             pass
 
     return True, ""
 
+
 def record_catchup_execution(
     horizon: str = "today",
     conversation_id: str | None = None,
     session_dir: str | Path | None = None,
-    transcript_path: str | Path | None = None
+    transcript_path: str | Path | None = None,
 ) -> None:
     """Record execution of trigger_memory_catchup in the session directory and global cache."""
     now = time.time()
     sdir = resolve_session_dir(session_dir, transcript_path, conversation_id)
-    
+
     # 1. Record in session directory
     if sdir:
         try:
@@ -1403,5 +1418,3 @@ def record_catchup_execution(
         cache_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except Exception:
         pass
-
-

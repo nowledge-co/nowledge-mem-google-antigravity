@@ -235,6 +235,16 @@ To minimize user interruption (via terminal permission popups), optimize latency
 4. **Diagnostics & Troubleshooting (Prefer CLI)**:
    - **Rule**: Use the `nmem` CLI for human workflows, debugging, and initial setup diagnostics (e.g. `nmem status` or `nmem config client set`).
 
+## Configuration Precedence Hierarchy
+
+Settings for endpoints (`apiUrl`), authentication (`apiKey`), and default project space (`space`) are resolved using the following precedence:
+
+1. **Environment Variables**: `NMEM_API_URL`, `NMEM_API_KEY`, `NMEM_SPACE` (or `NMEM_SPACE_ID`)
+2. **Local Plugin / Workspace Config (`.config.json`)**: Git-ignored `.config.json` at plugin root or workspace root.
+3. **Explicit Workspace Files**: `.nmemspace` or `.nowledge/config.json`.
+4. **Global Client Config**: `~/.nowledge-mem/config.json`.
+5. **Defaults**: `http://127.0.0.1:14242` and `default` space.
+
 ## Memory Health & Catchup (`trigger_memory_catchup`)
 
 Use `trigger_memory_catchup` strictly for memory health maintenance, decay re-scoring, and index compaction. Do **not** use it as a generic background-task runner or standard search replacement.

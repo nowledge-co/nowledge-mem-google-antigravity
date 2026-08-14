@@ -28,8 +28,12 @@ post_invocation = import_module_from_path("post_invocation", str(HOOKS_DIR / "po
 nmem_gate = import_module_from_path("nmem_gate", str(HOOKS_DIR / "nmem-gate.py"))
 nmem_status = import_module_from_path("nmem_status", str(HOOKS_DIR / "nmem_status.py"))
 nmem_entrypoint = import_module_from_path("nmem_entrypoint", str(HOOKS_DIR / "nmem_entrypoint.py"))
-load_skill = import_module_from_path("load_skill", str(HOOKS_DIR.parent / "skills" / "nmem-skill-load" / "scripts" / "load_skill.py"))
-manage_skills = import_module_from_path("manage_skills", str(HOOKS_DIR.parent / "skills" / "nmem-skill-manage" / "scripts" / "manage_skills.py"))
+load_skill = import_module_from_path(
+    "load_skill", str(HOOKS_DIR.parent / "skills" / "nmem-skill-load" / "scripts" / "load_skill.py")
+)
+manage_skills = import_module_from_path(
+    "manage_skills", str(HOOKS_DIR.parent / "skills" / "nmem-skill-manage" / "scripts" / "manage_skills.py")
+)
 update_artifact = import_module_from_path("update_artifact", str(HOOKS_DIR.parent / "scripts" / "update_artifact.py"))
 
 
@@ -540,15 +544,17 @@ def test_nmem_gate_trigger_memory_catchup_with_intent(mock_file, mock_exists, mo
     }
     mock_exists.return_value = True
 
-    with patch("nmem_shared.should_allow_catchup", return_value=(True, "")):
-        with patch("nmem_shared.record_catchup_execution") as mock_record:
-            with patch.object(sys, "argv", ["nmem-gate.py"]):
-                nmem_gate.main()
-                mock_record.assert_called_once()
-                written = "".join(call.args[0] for call in mock_write.call_args_list)
-                payload = json.loads(written)
-                assert payload["decision"] == "allow"
-                assert "Explicit user intent detected" in payload["reason"]
+    with (
+        patch("nmem_shared.should_allow_catchup", return_value=(True, "")),
+        patch("nmem_shared.record_catchup_execution") as mock_record,
+        patch.object(sys, "argv", ["nmem-gate.py"]),
+    ):
+        nmem_gate.main()
+        mock_record.assert_called_once()
+        written = "".join(call.args[0] for call in mock_write.call_args_list)
+        payload = json.loads(written)
+        assert payload["decision"] == "allow"
+        assert "Explicit user intent detected" in payload["reason"]
 
 
 @patch("nmem_gate.read_hook_input")
@@ -566,13 +572,15 @@ def test_nmem_gate_trigger_memory_catchup_without_intent(mock_flush, mock_write,
         },
         "conversationId": "conv-test-catchup",
     }
-    with patch("nmem_shared.should_allow_catchup", return_value=(True, "")):
-        with patch.object(sys, "argv", ["nmem-gate.py"]):
-            nmem_gate.main()
-            written = "".join(call.args[0] for call in mock_write.call_args_list)
-            payload = json.loads(written)
-            assert payload["decision"] == "ask"
-            assert "Confirmation required to run server-side memory maintenance" in payload["reason"]
+    with (
+        patch("nmem_shared.should_allow_catchup", return_value=(True, "")),
+        patch.object(sys, "argv", ["nmem-gate.py"]),
+    ):
+        nmem_gate.main()
+        written = "".join(call.args[0] for call in mock_write.call_args_list)
+        payload = json.loads(written)
+        assert payload["decision"] == "ask"
+        assert "Confirmation required to run server-side memory maintenance" in payload["reason"]
 
 
 @patch("nmem_gate.read_hook_input")
@@ -590,13 +598,15 @@ def test_nmem_gate_trigger_memory_catchup_debounced(mock_flush, mock_write, mock
         },
         "conversationId": "conv-test-catchup",
     }
-    with patch("nmem_shared.should_allow_catchup", return_value=(False, "Already executed in this session.")):
-        with patch.object(sys, "argv", ["nmem-gate.py"]):
-            nmem_gate.main()
-            written = "".join(call.args[0] for call in mock_write.call_args_list)
-            payload = json.loads(written)
-            assert payload["decision"] == "allow"
-            assert "Auto-suppressing redundant memory catchup" in payload["reason"]
+    with (
+        patch("nmem_shared.should_allow_catchup", return_value=(False, "Already executed in this session.")),
+        patch.object(sys, "argv", ["nmem-gate.py"]),
+    ):
+        nmem_gate.main()
+        written = "".join(call.args[0] for call in mock_write.call_args_list)
+        payload = json.loads(written)
+        assert payload["decision"] == "allow"
+        assert "Auto-suppressing redundant memory catchup" in payload["reason"]
 
 
 @patch("nmem_gate.read_hook_input")

@@ -35,13 +35,7 @@ def main():
                     "queued in ~/.nowledge-mem/antigravity_unsynced.json. Background synchronization "
                     "has been triggered automatically. (Do NOT call trigger_memory_catchup for offline queue sync)."
                 )
-                nmem_shared.emit({
-                    "injectSteps": [
-                        {
-                            "ephemeralMessage": msg
-                        }
-                    ]
-                })
+                nmem_shared.emit({"injectSteps": [{"ephemeralMessage": msg}]})
                 return
 
         nmem_shared.emit({})

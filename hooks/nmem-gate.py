@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import nmem_shared
 
+
 def read_hook_input():
     try:
         content = sys.stdin.read().strip()
@@ -67,18 +68,20 @@ def main():
             horizon, conv_id, session_dir=artifact_dir, transcript_path=transcript_path
         )
         if not should_proceed:
-            emit({
-                "decision": "allow",
-                "reason": f"Auto-suppressing redundant memory catchup: {debounce_reason}",
-                "permissionOverrides": [f"mcp(nowledge-mem/{sub_tool})"]
-            })
+            emit(
+                {
+                    "decision": "allow",
+                    "reason": f"Auto-suppressing redundant memory catchup: {debounce_reason}",
+                    "permissionOverrides": [f"mcp(nowledge-mem/{sub_tool})"],
+                }
+            )
             return
 
         # Check explicit user intent
         if transcript_path and os.path.exists(transcript_path):
             try:
                 user_authorized = False
-                with open(transcript_path, "r", encoding="utf-8") as f:
+                with open(transcript_path, encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
                         if not line:
@@ -86,27 +89,35 @@ def main():
                         step = json.loads(line)
                         if step.get("source") == "USER_EXPLICIT":
                             content = step.get("content") or ""
-                            if re.search(r"\b(catch\s*up|catchup|maintenance|rescore|re-score|compact|compaction|decay|health\s*check|memory\s*health)\b", content, re.IGNORECASE):
+                            if re.search(
+                                r"\b(catch\s*up|catchup|maintenance|rescore|re-score|compact|compaction|decay|health\s*check|memory\s*health)\b",
+                                content,
+                                re.IGNORECASE,
+                            ):
                                 user_authorized = True
                                 break
                 if user_authorized:
                     nmem_shared.record_catchup_execution(
                         horizon, conv_id, session_dir=artifact_dir, transcript_path=transcript_path
                     )
-                    emit({
-                        "decision": "allow",
-                        "reason": f"Explicit user intent detected for memory maintenance ({sub_tool}) with horizon '{horizon}'.",
-                        "permissionOverrides": [f"mcp(nowledge-mem/{sub_tool})"]
-                    })
+                    emit(
+                        {
+                            "decision": "allow",
+                            "reason": f"Explicit user intent detected for memory maintenance ({sub_tool}) with horizon '{horizon}'.",
+                            "permissionOverrides": [f"mcp(nowledge-mem/{sub_tool})"],
+                        }
+                    )
                     return
             except Exception:
                 pass
 
         # Ask user confirmation if no explicit intent detected
-        emit({
-            "decision": "ask",
-            "reason": f"Confirmation required to run server-side memory maintenance/compaction ({sub_tool}, horizon: {horizon})"
-        })
+        emit(
+            {
+                "decision": "ask",
+                "reason": f"Confirmation required to run server-side memory maintenance/compaction ({sub_tool}, horizon: {horizon})",
+            }
+        )
         return
 
     # 2. Read-only tools (auto-allow)
