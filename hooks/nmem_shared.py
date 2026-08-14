@@ -595,6 +595,14 @@ def run_nmem_command(
     cmd = _build_nmem_command(nmem, *processed_args)
 
     run_env = os.environ.copy()
+    try:
+        api_url, api_key = get_effective_config()
+        if api_url and "NMEM_API_URL" not in run_env:
+            run_env["NMEM_API_URL"] = api_url
+        if api_key and "NMEM_API_KEY" not in run_env:
+            run_env["NMEM_API_KEY"] = api_key
+    except Exception:
+        pass
     if env:
         run_env.update(env)
 
@@ -803,6 +811,16 @@ def retry_unsynced_sessions() -> None:
                             )
                             if isinstance(rec_res, dict) and not rec_res.get("error"):
                                 success = True
+                            else:
+                                # Fallback to append if reconcile-tail fails (e.g. prefix divergence)
+                                app_payload = {"messages": messages[matched_count:]}
+                                if space:
+                                    app_payload["space"] = space
+                                app_res = http_request(
+                                    f"/threads/{conv_id}/append", method="POST", payload=app_payload, timeout=2.5
+                                )
+                                if isinstance(app_res, dict) and not app_res.get("error"):
+                                    success = True
                         else:
                             app_payload = {"messages": messages}
                             if space:
@@ -1136,3 +1154,122 @@ def sync_learnings_if_any(
             synced_state_file.write_text(json.dumps(synced_hashes), encoding="utf-8")
         except Exception:
             pass
+
+def retry_unsynced_sessions_async() -> None:
+    """Spawns an asynchronous background worker to retry unsynced sessions without blocking."""
+    try:
+        session_start_script = Path(__file__).parent / "session-start.py"
+        subprocess.Popen(
+            [sys.executable, str(session_start_script), "--retry-only"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            **_windows_no_window_kwargs()
+        )
+    except Exception:
+        pass
+
+def should_emit_unsynced_warning(conversation_id: str | None = None, cooldown_seconds: float = 1800.0) -> bool:
+    """Check if the unsynced session warning should be emitted, throttling to once per session/cooldown."""
+    config_dir = Path("~/.nowledge-mem").expanduser()
+    cache_file = config_dir / "cache" / "warning_history.json"
+    if not cache_file.exists():
+        return True
+    try:
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+        now = time.time()
+        # Check by conversation_id first if provided
+        if conversation_id and conversation_id in data.get("conversations", {}):
+            return False
+        last_emitted = data.get("last_unsynced_warning", 0.0)
+        return (now - last_emitted) >= cooldown_seconds
+    except Exception:
+        return True
+
+def record_unsynced_warning_emitted(conversation_id: str | None = None) -> None:
+    """Record that an unsynced session warning was emitted."""
+    config_dir = Path("~/.nowledge-mem").expanduser()
+    cache_dir = config_dir / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / "warning_history.json"
+    try:
+        data = {}
+        if cache_file.exists():
+            try:
+                data = json.loads(cache_file.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        data["last_unsynced_warning"] = time.time()
+        if conversation_id:
+            convs = data.get("conversations", {})
+            convs[conversation_id] = time.time()
+            data["conversations"] = convs
+        cache_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+def should_allow_catchup(horizon: str = "today", conversation_id: str | None = None, cooldown_seconds: float = 3600.0) -> tuple[bool, str]:
+    """Check whether a memory catchup execution should proceed or be debounced/suppressed.
+    
+    Returns (should_proceed, reason_if_suppressed).
+    """
+    config_dir = Path("~/.nowledge-mem").expanduser()
+    cache_file = config_dir / "cache" / "catchup_history.json"
+    if not cache_file.exists():
+        return True, ""
+    try:
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+        now = time.time()
+        
+        # Check session-level execution
+        if conversation_id:
+            conv_runs = data.get("sessions", {}).get(conversation_id, {})
+            if horizon in conv_runs:
+                last_time = conv_runs[horizon]
+                if (now - last_time) < cooldown_seconds:
+                    return False, f"Memory catch-up for horizon '{horizon}' has already been executed in this session."
+                    
+        # Check global horizon cooldown
+        global_runs = data.get("global", {})
+        if horizon in global_runs:
+            last_time = global_runs[horizon]
+            if (now - last_time) < cooldown_seconds:
+                mins_ago = max(1, int((now - last_time) / 60))
+                return False, f"Memory catch-up for horizon '{horizon}' was already executed {mins_ago}m ago (cooldown is {int(cooldown_seconds/60)}m)."
+                
+        return True, ""
+    except Exception:
+        return True, ""
+
+def record_catchup_execution(horizon: str = "today", conversation_id: str | None = None) -> None:
+    """Record execution of trigger_memory_catchup for debounce tracking."""
+    config_dir = Path("~/.nowledge-mem").expanduser()
+    cache_dir = config_dir / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / "catchup_history.json"
+    try:
+        data = {}
+        if cache_file.exists():
+            try:
+                data = json.loads(cache_file.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        now = time.time()
+        
+        # Update global horizon
+        global_runs = data.get("global", {})
+        global_runs[horizon] = now
+        data["global"] = global_runs
+        
+        # Update session horizon
+        if conversation_id:
+            sessions = data.get("sessions", {})
+            conv_runs = sessions.get(conversation_id, {})
+            conv_runs[horizon] = now
+            sessions[conversation_id] = conv_runs
+            data["sessions"] = sessions
+            
+        cache_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+

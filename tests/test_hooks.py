@@ -27,6 +27,9 @@ session_end = import_module_from_path("session_end", str(HOOKS_DIR / "session-en
 post_invocation = import_module_from_path("post_invocation", str(HOOKS_DIR / "post-invocation.py"))
 nmem_gate = import_module_from_path("nmem_gate", str(HOOKS_DIR / "nmem-gate.py"))
 nmem_status = import_module_from_path("nmem_status", str(HOOKS_DIR / "nmem_status.py"))
+nmem_entrypoint = import_module_from_path("nmem_entrypoint", str(HOOKS_DIR / "nmem_entrypoint.py"))
+load_skill = import_module_from_path("load_skill", str(HOOKS_DIR.parent / "skills" / "nmem-skill-load" / "scripts" / "load_skill.py"))
+manage_skills = import_module_from_path("manage_skills", str(HOOKS_DIR.parent / "skills" / "nmem-skill-manage" / "scripts" / "manage_skills.py"))
 update_artifact = import_module_from_path("update_artifact", str(HOOKS_DIR.parent / "scripts" / "update_artifact.py"))
 
 
@@ -147,11 +150,72 @@ def test_save_unsynced_session(mock_read, mock_write, mock_mkdir, mock_exists, m
     mock_write.assert_called_once()
 
 
+@patch("subprocess.Popen")
+def test_retry_unsynced_sessions_async(mock_popen):
+    nmem_shared.retry_unsynced_sessions_async()
+    mock_popen.assert_called_once()
+
+
+def test_catchup_debounce():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache_dir = Path(tmpdir) / ".nowledge-mem" / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        with patch.dict(os.environ, {"HOME": tmpdir}):
+            allowed, reason = nmem_shared.should_allow_catchup("today", "conv-1")
+            assert allowed is True
+            assert reason == ""
+
+            nmem_shared.record_catchup_execution("today", "conv-1")
+
+            allowed, reason = nmem_shared.should_allow_catchup("today", "conv-1")
+            assert allowed is False
+            assert "already been executed in this session" in reason
+
+            allowed, reason = nmem_shared.should_allow_catchup("today", "conv-2")
+            assert allowed is False
+            assert "already executed" in reason
+
+
+def test_unsynced_warning_throttle():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache_dir = Path(tmpdir) / ".nowledge-mem" / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        with patch.dict(os.environ, {"HOME": tmpdir}):
+            assert nmem_shared.should_emit_unsynced_warning("conv-1") is True
+            nmem_shared.record_unsynced_warning_emitted("conv-1")
+            assert nmem_shared.should_emit_unsynced_warning("conv-1") is False
+
+
+
 @patch.dict(os.environ, {"NMEM_API_URL": "https://remote.example.com", "NMEM_API_KEY": "secret_key"})
 def test_get_effective_config_env():
     url, key = nmem_shared.get_effective_config()
     assert url == "https://remote.example.com"
     assert key == "secret_key"
+
+
+@patch("pathlib.Path.is_file", return_value=True)
+@patch("pathlib.Path.read_text")
+def test_get_effective_config_ignore_host_config(mock_read_text, mock_is_file):
+    mock_read_text.return_value = '{"apiUrl": "http://127.0.0.1:14242", "apiKey": "host_secret_key"}'
+    env_dict = {"NMEM_IGNORE_HOST_CONFIG": "1", "NMEM_API_URL": "http://127.0.0.1:9999"}
+    with patch.dict(os.environ, env_dict, clear=True):
+        url, key = nmem_shared.get_effective_config()
+        assert url == "http://127.0.0.1:9999"
+        assert key is None
+
+
+@patch("pathlib.Path.is_file", return_value=True)
+@patch("pathlib.Path.read_text")
+def test_get_effective_config_prevents_host_key_leak_on_url_mismatch(mock_read_text, mock_is_file):
+    mock_read_text.return_value = '{"apiUrl": "http://127.0.0.1:14242", "apiKey": "host_prod_key"}'
+    env_dict = {"NMEM_API_URL": "http://127.0.0.1:8888"}
+    with patch.dict(os.environ, env_dict, clear=True):
+        url, key = nmem_shared.get_effective_config()
+        assert url == "http://127.0.0.1:8888"
+        assert key is None
 
 
 @patch("httpx.request")
@@ -206,28 +270,6 @@ def test_file_lock_stale_pid_recovery(mock_pid_alive):
 @patch.dict(os.environ, {"NMEM_SPACE": "custom-explicit-space"}, clear=False)
 def test_resolve_space_explicit_env():
     assert nmem_shared.resolve_space("/path/to/random") == "custom-explicit-space"
-
-
-@patch("pathlib.Path.is_file", return_value=True)
-@patch("pathlib.Path.read_text")
-def test_get_effective_config_ignore_host_config(mock_read_text, mock_is_file):
-    mock_read_text.return_value = '{"apiUrl": "http://127.0.0.1:14242", "apiKey": "host_secret_key"}'
-    env_dict = {"NMEM_IGNORE_HOST_CONFIG": "1", "NMEM_API_URL": "http://127.0.0.1:9999"}
-    with patch.dict(os.environ, env_dict, clear=True):
-        url, key = nmem_shared.get_effective_config()
-        assert url == "http://127.0.0.1:9999"
-        assert key is None
-
-
-@patch("pathlib.Path.is_file", return_value=True)
-@patch("pathlib.Path.read_text")
-def test_get_effective_config_prevents_host_key_leak_on_url_mismatch(mock_read_text, mock_is_file):
-    mock_read_text.return_value = '{"apiUrl": "http://127.0.0.1:14242", "apiKey": "host_prod_key"}'
-    env_dict = {"NMEM_API_URL": "http://127.0.0.1:8888"}
-    with patch.dict(os.environ, env_dict, clear=True):
-        url, key = nmem_shared.get_effective_config()
-        assert url == "http://127.0.0.1:8888"
-        assert key is None
 
 
 @patch("nmem_shared.get_existing_spaces")
@@ -411,6 +453,105 @@ def test_nmem_gate_read_tool(mock_flush, mock_write, mock_input):
 @patch("nmem_gate.read_hook_input")
 @patch("sys.stdout.write")
 @patch("sys.stdout.flush")
+def test_nmem_gate_delete_destructive(mock_flush, mock_write, mock_input):
+    mock_input.return_value = {
+        "toolCall": {"name": "mcp_nowledge-mem_memory_delete", "args": {"id": "mem-1"}},
+        "conversationId": "conv-123",
+    }
+
+    with patch.object(sys, "argv", ["nmem-gate.py"]):
+        nmem_gate.main()
+        written = "".join(call.args[0] for call in mock_write.call_args_list)
+        payload = json.loads(written)
+        assert payload["decision"] == "force_ask"
+
+
+@patch("nmem_gate.read_hook_input")
+@patch("sys.stdout.write")
+@patch("sys.stdout.flush")
+@patch("os.path.exists")
+@patch(
+    "builtins.open",
+    new_callable=mock_open,
+    read_data='{"source":"USER_EXPLICIT","content":"Please run memory maintenance catch up"}\n',
+)
+def test_nmem_gate_trigger_memory_catchup_with_intent(mock_file, mock_exists, mock_flush, mock_write, mock_input):
+    mock_input.return_value = {
+        "toolCall": {
+            "name": "call_mcp_tool",
+            "args": {
+                "ServerName": "nowledge-mem",
+                "ToolName": "trigger_memory_catchup",
+                "Arguments": {"horizon": "today"},
+            },
+        },
+        "conversationId": "conv-test-catchup",
+        "transcriptPath": "/fake/transcript.jsonl",
+    }
+    mock_exists.return_value = True
+
+    with patch("nmem_shared.should_allow_catchup", return_value=(True, "")):
+        with patch("nmem_shared.record_catchup_execution") as mock_record:
+            with patch.object(sys, "argv", ["nmem-gate.py"]):
+                nmem_gate.main()
+                mock_record.assert_called_once()
+                written = "".join(call.args[0] for call in mock_write.call_args_list)
+                payload = json.loads(written)
+                assert payload["decision"] == "allow"
+                assert "Explicit user intent detected" in payload["reason"]
+
+
+@patch("nmem_gate.read_hook_input")
+@patch("sys.stdout.write")
+@patch("sys.stdout.flush")
+def test_nmem_gate_trigger_memory_catchup_without_intent(mock_flush, mock_write, mock_input):
+    mock_input.return_value = {
+        "toolCall": {
+            "name": "call_mcp_tool",
+            "args": {
+                "ServerName": "nowledge-mem",
+                "ToolName": "trigger_memory_catchup",
+                "Arguments": {"horizon": "today"},
+            },
+        },
+        "conversationId": "conv-test-catchup",
+    }
+    with patch("nmem_shared.should_allow_catchup", return_value=(True, "")):
+        with patch.object(sys, "argv", ["nmem-gate.py"]):
+            nmem_gate.main()
+            written = "".join(call.args[0] for call in mock_write.call_args_list)
+            payload = json.loads(written)
+            assert payload["decision"] == "ask"
+            assert "Confirmation required to run server-side memory maintenance" in payload["reason"]
+
+
+@patch("nmem_gate.read_hook_input")
+@patch("sys.stdout.write")
+@patch("sys.stdout.flush")
+def test_nmem_gate_trigger_memory_catchup_debounced(mock_flush, mock_write, mock_input):
+    mock_input.return_value = {
+        "toolCall": {
+            "name": "call_mcp_tool",
+            "args": {
+                "ServerName": "nowledge-mem",
+                "ToolName": "trigger_memory_catchup",
+                "Arguments": {"horizon": "today"},
+            },
+        },
+        "conversationId": "conv-test-catchup",
+    }
+    with patch("nmem_shared.should_allow_catchup", return_value=(False, "Already executed in this session.")):
+        with patch.object(sys, "argv", ["nmem-gate.py"]):
+            nmem_gate.main()
+            written = "".join(call.args[0] for call in mock_write.call_args_list)
+            payload = json.loads(written)
+            assert payload["decision"] == "allow"
+            assert "Auto-suppressing redundant memory catchup" in payload["reason"]
+
+
+@patch("nmem_gate.read_hook_input")
+@patch("sys.stdout.write")
+@patch("sys.stdout.flush")
 @patch("os.path.exists")
 @patch(
     "builtins.open",
@@ -457,6 +598,48 @@ def test_post_invocation_runs(mock_write, mock_input):
         post_invocation.main()
         mock_unsynced.assert_called_once()
         mock_write.assert_called_once()
+
+
+@patch("nmem_shared.retry_unsynced_sessions_async")
+@patch("nmem_shared.should_emit_unsynced_warning", return_value=True)
+@patch("nmem_shared.record_unsynced_warning_emitted")
+@patch("nmem_shared.get_unsynced_sessions")
+@patch("nmem_shared.read_hook_input")
+@patch("nmem_shared.emit")
+def test_post_invocation_injects_warning_when_unsynced_exists(
+    mock_emit, mock_input, mock_unsynced, mock_record, mock_should_emit, mock_retry
+):
+    mock_input.return_value = {"invocationNum": 1, "conversationId": "conv-test-1"}
+    mock_unsynced.return_value = {"conv-1": {"title": "Test"}}
+
+    with patch.object(sys, "argv", ["post-invocation.py"]):
+        post_invocation.main()
+
+    mock_retry.assert_called_once()
+    mock_record.assert_called_once()
+    mock_emit.assert_called_once()
+    payload = mock_emit.call_args[0][0]
+    assert "injectSteps" in payload
+    assert "pending offline session(s)" in payload["injectSteps"][0]["ephemeralMessage"]
+    assert "Do NOT call trigger_memory_catchup" in payload["injectSteps"][0]["ephemeralMessage"]
+
+
+@patch("nmem_shared.retry_unsynced_sessions_async")
+@patch("nmem_shared.should_emit_unsynced_warning", return_value=False)
+@patch("nmem_shared.get_unsynced_sessions")
+@patch("nmem_shared.read_hook_input")
+@patch("nmem_shared.emit")
+def test_post_invocation_throttles_warning_when_already_emitted(
+    mock_emit, mock_input, mock_unsynced, mock_should_emit, mock_retry
+):
+    mock_input.return_value = {"invocationNum": 2, "conversationId": "conv-test-1"}
+    mock_unsynced.return_value = {"conv-1": {"title": "Test"}}
+
+    with patch.object(sys, "argv", ["post-invocation.py"]):
+        post_invocation.main()
+
+    mock_retry.assert_called_once()
+    mock_emit.assert_called_once_with({})
 
 
 @patch("nmem_shared.run_nmem_command")
@@ -571,3 +754,45 @@ def test_update_artifact_reparse_patch(mock_urlopen):
 
     payload = json.loads(req.data.decode("utf-8"))
     assert payload == {"action": "reparse"}
+
+
+@patch("nmem_status.main")
+def test_nmem_entrypoint_status(mock_status_main):
+    with patch.object(sys, "argv", ["nmem_entrypoint.py", "status"]):
+        nmem_entrypoint.main()
+        mock_status_main.assert_called_once()
+
+
+@patch("load_skill.make_request")
+def test_search_and_fetch_skill(mock_make_request):
+    mock_make_request.side_effect = [
+        {"skills": [{"id": "makefile-pattern", "name": "Makefile Pattern", "description": "Makefile guidelines"}]},
+        {"id": "makefile-pattern", "body": "# Makefile Pattern"}
+    ]
+    res = load_skill.search_skills("make")
+    assert len(res) == 1
+    assert res[0]["id"] == "makefile-pattern"
+
+    body = load_skill.fetch_skill("makefile-pattern")
+    assert body["body"] == "# Makefile Pattern"
+
+
+def test_manage_skills_badges():
+    assert manage_skills.compute_trust_badge({"trust_badge": "proven"}) == "Proven"
+    assert manage_skills.compute_trust_badge({"passed_tests_count": 2}) == "Proven"
+    assert manage_skills.compute_trust_badge({"passed_tests_count": 1}) == "Checked"
+    assert manage_skills.compute_trust_badge({"stage": "active"}) == "Checked"
+    assert manage_skills.compute_trust_badge({"stage": "candidate"}) == "Draft"
+
+
+def load_tests(loader, tests, pattern):
+    import inspect
+    import unittest
+
+    suite = unittest.TestSuite()
+    current_module = sys.modules[__name__]
+    for name, obj in inspect.getmembers(current_module):
+        if name.startswith("test_") and inspect.isfunction(obj):
+            suite.addTest(unittest.FunctionTestCase(obj))
+    return suite
+

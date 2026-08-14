@@ -58,12 +58,15 @@ flowchart TD
   - **Auto-Allow**: Read-only tools (`mem_fs`, `memory_search`, `thread_search`, `query_library`, `explore_graph`, `get_memory_by_id`, etc.) return `{"decision": "allow"}` with permission overrides to prevent terminal prompt interruptions.
   - **Force Confirm**: Destructive operations (`memory_delete`, `thread_delete`, `memory_relation_delete`) return `{"decision": "force_ask"}`.
   - **Intent-Based Write Allow**: Write tools (`memory_add`, `memory_update`, etc.) check recent conversation steps for intent keywords (`save`, `remember`, `store`, `nmem`, `distill`, `handoff`). If found, returns `{"decision": "allow"}`.
+  - **Memory Health Catchup Debounce & Gating**: `trigger_memory_catchup` checks for prior execution in the current session / 1-hour cooldown window. Redundant calls are auto-suppressed with an explanation; new calls require explicit user maintenance intent (`catch up`, `rescore`, `decay`, `compaction`, `maintenance`) to auto-allow or prompt confirmation.
 
 ### 3. PostInvocation Hook (`hooks/post-invocation.py`)
 - **Trigger**: Runs after each model invocation completes.
 - **Execution Flow**:
   1. Checks for pending unsynced offline sessions (`~/.nowledge-mem/antigravity_unsynced.json`) via `nmem_shared.get_unsynced_sessions()`.
-  2. If pending items exist, emits `injectSteps` with an `ephemeralMessage` warning informing the agent mid-session.
+  2. If pending items exist, automatically spawns an asynchronous background worker (`nmem_shared.retry_unsynced_sessions_async()`) to drain the queue.
+  3. Throttles warning notifications to at most once per conversation session (`should_emit_unsynced_warning`), emitting `injectSteps` with an informational message clarifying that background sync is in progress and `trigger_memory_catchup` is not required.
+
 
 ### 4. Stop Hook (`hooks/session-end.py`)
 - **Trigger**: Runs when the Antigravity session terminates.
