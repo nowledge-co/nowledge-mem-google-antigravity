@@ -59,9 +59,13 @@ def main():
         call_arguments = tool_args.get("Arguments") if isinstance(tool_args.get("Arguments"), dict) else tool_args
         horizon = call_arguments.get("horizon", "today")
         conv_id = data.get("conversationId")
+        artifact_dir = data.get("artifactDirectoryPath")
+        transcript_path = data.get("transcriptPath")
 
         # Check session and global cooldown
-        should_proceed, debounce_reason = nmem_shared.should_allow_catchup(horizon, conv_id)
+        should_proceed, debounce_reason = nmem_shared.should_allow_catchup(
+            horizon, conv_id, session_dir=artifact_dir, transcript_path=transcript_path
+        )
         if not should_proceed:
             emit({
                 "decision": "allow",
@@ -71,7 +75,6 @@ def main():
             return
 
         # Check explicit user intent
-        transcript_path = data.get("transcriptPath")
         if transcript_path and os.path.exists(transcript_path):
             try:
                 user_authorized = False
@@ -87,7 +90,9 @@ def main():
                                 user_authorized = True
                                 break
                 if user_authorized:
-                    nmem_shared.record_catchup_execution(horizon, conv_id)
+                    nmem_shared.record_catchup_execution(
+                        horizon, conv_id, session_dir=artifact_dir, transcript_path=transcript_path
+                    )
                     emit({
                         "decision": "allow",
                         "reason": f"Explicit user intent detected for memory maintenance ({sub_tool}) with horizon '{horizon}'.",

@@ -12,6 +12,8 @@ def main():
     try:
         hook_input = nmem_shared.read_hook_input()
         conversation_id = hook_input.get("conversationId")
+        artifact_dir = hook_input.get("artifactDirectoryPath")
+        transcript_path = hook_input.get("transcriptPath")
         # PostInvocation handler can return injectSteps or terminationBehavior.
         # Check if there are pending unsynced offline sessions or warning signals
         # that should be injected mid-turn.
@@ -21,8 +23,12 @@ def main():
             nmem_shared.retry_unsynced_sessions_async()
 
             # Throttle warning to at most once per conversation/session to prevent context nag loops
-            if nmem_shared.should_emit_unsynced_warning(conversation_id):
-                nmem_shared.record_unsynced_warning_emitted(conversation_id)
+            if nmem_shared.should_emit_unsynced_warning(
+                conversation_id, session_dir=artifact_dir, transcript_path=transcript_path
+            ):
+                nmem_shared.record_unsynced_warning_emitted(
+                    conversation_id, session_dir=artifact_dir, transcript_path=transcript_path
+                )
                 count = len(unsynced)
                 msg = (
                     f"[Nowledge Mem Info] There are {count} pending offline session(s) "

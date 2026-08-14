@@ -158,35 +158,39 @@ def test_retry_unsynced_sessions_async(mock_popen):
 
 def test_catchup_debounce():
     with tempfile.TemporaryDirectory() as tmpdir:
-        cache_dir = Path(tmpdir) / ".nowledge-mem" / "cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        session_dir = Path(tmpdir) / "session_1"
+        session_dir.mkdir(parents=True, exist_ok=True)
 
         with patch.dict(os.environ, {"HOME": tmpdir}):
-            allowed, reason = nmem_shared.should_allow_catchup("today", "conv-1")
+            allowed, reason = nmem_shared.should_allow_catchup("today", session_dir=session_dir)
             assert allowed is True
             assert reason == ""
 
-            nmem_shared.record_catchup_execution("today", "conv-1")
+            nmem_shared.record_catchup_execution("today", session_dir=session_dir)
+            assert (session_dir / ".nmem" / "catchup_history.json").exists()
 
-            allowed, reason = nmem_shared.should_allow_catchup("today", "conv-1")
+            allowed, reason = nmem_shared.should_allow_catchup("today", session_dir=session_dir)
             assert allowed is False
             assert "already been executed in this session" in reason
 
-            allowed, reason = nmem_shared.should_allow_catchup("today", "conv-2")
+            other_session_dir = Path(tmpdir) / "session_2"
+            allowed, reason = nmem_shared.should_allow_catchup("today", session_dir=other_session_dir)
             assert allowed is False
             assert "already executed" in reason
 
 
 def test_unsynced_warning_throttle():
     with tempfile.TemporaryDirectory() as tmpdir:
-        cache_dir = Path(tmpdir) / ".nowledge-mem" / "cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        session_dir = Path(tmpdir) / "session_1"
+        session_dir.mkdir(parents=True, exist_ok=True)
 
         with patch.dict(os.environ, {"HOME": tmpdir}):
-            assert nmem_shared.should_emit_unsynced_warning("conv-1") is True
-            nmem_shared.record_unsynced_warning_emitted("conv-1")
-            assert nmem_shared.should_emit_unsynced_warning("conv-1") is False
+            assert nmem_shared.should_emit_unsynced_warning("conv-1", session_dir=session_dir) is True
 
+            nmem_shared.record_unsynced_warning_emitted("conv-1", session_dir=session_dir)
+            assert (session_dir / ".nmem" / "warning_history.json").exists()
+
+            assert nmem_shared.should_emit_unsynced_warning("conv-1", session_dir=session_dir) is False
 
 
 @patch.dict(os.environ, {"NMEM_API_URL": "https://remote.example.com", "NMEM_API_KEY": "secret_key"})
@@ -767,7 +771,7 @@ def test_nmem_entrypoint_status(mock_status_main):
 def test_search_and_fetch_skill(mock_make_request):
     mock_make_request.side_effect = [
         {"skills": [{"id": "makefile-pattern", "name": "Makefile Pattern", "description": "Makefile guidelines"}]},
-        {"id": "makefile-pattern", "body": "# Makefile Pattern"}
+        {"id": "makefile-pattern", "body": "# Makefile Pattern"},
     ]
     res = load_skill.search_skills("make")
     assert len(res) == 1
@@ -795,4 +799,3 @@ def load_tests(loader, tests, pattern):
         if name.startswith("test_") and inspect.isfunction(obj):
             suite.addTest(unittest.FunctionTestCase(obj))
     return suite
-
