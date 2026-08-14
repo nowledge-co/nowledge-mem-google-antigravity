@@ -142,6 +142,71 @@ def test_sync_host_skills_async(mock_run_cmd, mock_nmem_cmd, mock_thread):
     assert ["skills", "sync"] in calls
 
 
+def test_unsynced_queue_migration_from_legacy_path():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_dir = Path(tmpdir) / ".nowledge-mem"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        old_path = config_dir / "antigravity_unsynced.json"
+        new_path = config_dir / "cache" / "antigravity_unsynced.json"
+
+        # Write legacy queue file
+        legacy_data = {"conv-legacy": {"title": "Legacy Session", "messages": []}}
+        old_path.write_text(json.dumps(legacy_data), encoding="utf-8")
+
+        with patch.dict(os.environ, {"HOME": tmpdir}):
+            assert not new_path.exists()
+            q_path = nmem_shared.get_unsynced_queue_path()
+            assert q_path == new_path
+            assert new_path.exists()
+            assert not old_path.exists()
+
+            loaded = json.loads(new_path.read_text(encoding="utf-8"))
+            assert "conv-legacy" in loaded
+            assert loaded["conv-legacy"]["title"] == "Legacy Session"
+
+
+def test_unsynced_queue_migration_merges_with_existing_new_path():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_dir = Path(tmpdir) / ".nowledge-mem"
+        cache_dir = config_dir / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        old_path = config_dir / "antigravity_unsynced.json"
+        new_path = cache_dir / "antigravity_unsynced.json"
+
+        # Both legacy and new queue files exist
+        old_path.write_text(json.dumps({"conv-old": {"title": "Old Session"}}), encoding="utf-8")
+        new_path.write_text(json.dumps({"conv-new": {"title": "New Session"}}), encoding="utf-8")
+
+        with patch.dict(os.environ, {"HOME": tmpdir}):
+            q_path = nmem_shared.get_unsynced_queue_path()
+            assert q_path == new_path
+            assert not old_path.exists()
+
+            loaded = json.loads(new_path.read_text(encoding="utf-8"))
+            assert "conv-old" in loaded
+            assert "conv-new" in loaded
+
+
+def test_spaces_cache_legacy_discard():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_dir = Path(tmpdir) / ".nowledge-mem"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        old_cache = config_dir / "spaces_cache.json"
+        new_cache = config_dir / "cache" / "spaces_cache.json"
+
+        old_cache.write_text(json.dumps([{"id": "old_space"}]), encoding="utf-8")
+
+        with (
+            patch.dict(os.environ, {"HOME": tmpdir}),
+            patch("nmem_shared.http_request", return_value=[{"id": "new_space"}]),
+        ):
+            nmem_shared._SPACES_CACHE = {"timestamp": 0.0, "spaces": None}
+            spaces = nmem_shared.get_existing_spaces()
+            assert spaces == [{"id": "new_space"}]
+            assert not old_cache.exists()
+            assert new_cache.exists()
+
+
 @patch("nmem_shared.FileLock")
 @patch("pathlib.Path.exists")
 @patch("pathlib.Path.mkdir")

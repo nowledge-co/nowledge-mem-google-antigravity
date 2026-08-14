@@ -272,8 +272,19 @@ def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
     if _SPACES_CACHE["spaces"] is not None and (now - _SPACES_CACHE["timestamp"]) < ttl:
         return _SPACES_CACHE["spaces"]
 
-    # 1. Try file cache first (~/.nowledge-mem/spaces_cache.json) if valid
-    cache_file = Path("~/.nowledge-mem/spaces_cache.json").expanduser()
+    config_dir = Path("~/.nowledge-mem").expanduser()
+    cache_dir = config_dir / "cache"
+
+    # Clean up legacy root-level spaces_cache.json if present
+    legacy_cache = config_dir / "spaces_cache.json"
+    if legacy_cache.is_file():
+        try:
+            legacy_cache.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    # 1. Try file cache first (~/.nowledge-mem/cache/spaces_cache.json) if valid
+    cache_file = cache_dir / "spaces_cache.json"
     if cache_file.is_file():
         try:
             mtime = cache_file.stat().st_mtime
@@ -315,7 +326,7 @@ def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
         _SPACES_CACHE["spaces"] = spaces_data
         _SPACES_CACHE["timestamp"] = now
         try:
-            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_dir.mkdir(parents=True, exist_ok=True)
             cache_file.write_text(json.dumps(spaces_data), encoding="utf-8")
         except Exception:
             pass
@@ -749,15 +760,67 @@ class FileLock:
                 pass
 
 
+def get_unsynced_queue_path() -> Path:
+    """Return the Path to the unsynced sessions queue file, migrating any legacy file if needed.
+
+    New path: ~/.nowledge-mem/cache/antigravity_unsynced.json
+    Legacy path: ~/.nowledge-mem/antigravity_unsynced.json
+
+    If the new path does not exist but the legacy path does, migrates the legacy file
+    to the new path atomically so that existing backlogs are preserved.
+    If both exist, merges legacy sessions into the new queue file.
+    """
+    config_dir = Path("~/.nowledge-mem").expanduser()
+    cache_dir = config_dir / "cache"
+    new_path = cache_dir / "antigravity_unsynced.json"
+    old_path = config_dir / "antigravity_unsynced.json"
+
+    if old_path.exists():
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            old_lock = old_path.with_suffix(".lock")
+            with FileLock(old_lock):
+                if old_path.exists():
+                    try:
+                        old_data = json.loads(old_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        old_data = None
+
+                    if isinstance(old_data, dict) and old_data:
+                        merged = {}
+                        if new_path.exists():
+                            try:
+                                merged = json.loads(new_path.read_text(encoding="utf-8"))
+                                if not isinstance(merged, dict):
+                                    merged = {}
+                            except Exception:
+                                merged = {}
+                        for k, v in old_data.items():
+                            if k not in merged:
+                                merged[k] = v
+                        new_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+
+                    try:
+                        old_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+        except Exception as e:
+            if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+                sys.stderr.write(f"Warning: Failed to migrate unsynced sessions queue: {e}\n")
+            if not new_path.exists():
+                return old_path
+
+    return new_path
+
+
 def save_unsynced_session(
     conv_id: str, messages: list, title: str, space: str | None, host_agent_id: str | None
 ) -> None:
     """Save a failed session to the unsynced queue file."""
     if not space:
         space = resolve_space()
-    config_dir = Path("~/.nowledge-mem").expanduser()
-    config_dir.mkdir(parents=True, exist_ok=True)
-    queue_path = config_dir / "antigravity_unsynced.json"
+    queue_path = get_unsynced_queue_path()
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = queue_path.with_suffix(".lock")
 
     try:
@@ -791,8 +854,7 @@ def save_unsynced_session(
 
 def get_unsynced_sessions() -> dict:
     """Return dict of pending unsynced sessions from the queue file."""
-    config_dir = Path("~/.nowledge-mem").expanduser()
-    queue_path = config_dir / "antigravity_unsynced.json"
+    queue_path = get_unsynced_queue_path()
     if not queue_path.exists():
         return {}
     try:
@@ -804,8 +866,7 @@ def get_unsynced_sessions() -> dict:
 
 def retry_unsynced_sessions() -> None:
     """Attempt to sync any unsynced sessions in the queue."""
-    config_dir = Path("~/.nowledge-mem").expanduser()
-    queue_path = config_dir / "antigravity_unsynced.json"
+    queue_path = get_unsynced_queue_path()
     lock_path = queue_path.with_suffix(".lock")
 
     if not queue_path.exists():

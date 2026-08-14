@@ -31,7 +31,7 @@ flowchart TD
     subgraph Transport Layer ["Transport & Resolution Layer"]
         H -->|1. Primary: Native HTTP| K[http_request urllib.request]
         H -->|2. Secondary: Multi-Path CLI| L[nmem Binary Subprocess]
-        H -->|3. Tertiary: Local Buffer| M[~/.nowledge-mem/antigravity_unsynced.json]
+        H -->|3. Tertiary: Local Buffer| M[~/.nowledge-mem/cache/antigravity_unsynced.json]
     end
 
     subgraph Backend ["Nowledge Mem Backend"]
@@ -50,7 +50,7 @@ flowchart TD
   1. Queries the Nowledge Mem backend via `nmem_shared.http_request("/context?source_app=google-antigravity")`.
   2. If Context Bundle is unavailable, falls back to `/working-memory`.
   3. Emits `injectSteps` containing a `<nowledge_context_bundle>` block into Antigravity's active session.
-  4. Launches a background retry daemon (`python3 session-start.py --retry-only`) to flush any pending unsynced sessions from `~/.nowledge-mem/antigravity_unsynced.json`.
+  4. Launches a background retry daemon (`python3 session-start.py --retry-only`) to flush any pending unsynced sessions from `~/.nowledge-mem/cache/antigravity_unsynced.json`.
 
 ### 2. PreToolUse Gate Hook (`hooks/nmem-gate.py`)
 - **Trigger**: Evaluated before executing `call_mcp_tool`, `mcp_nowledge-mem_*`, or `run_command`.
@@ -63,7 +63,7 @@ flowchart TD
 ### 3. PostInvocation Hook (`hooks/post-invocation.py`)
 - **Trigger**: Runs after each model invocation completes.
 - **Execution Flow**:
-  1. Checks for pending unsynced offline sessions (`~/.nowledge-mem/antigravity_unsynced.json`) via `nmem_shared.get_unsynced_sessions()`.
+  1. Checks for pending unsynced offline sessions (`~/.nowledge-mem/cache/antigravity_unsynced.json`) via `nmem_shared.get_unsynced_sessions()`.
   2. If pending items exist, automatically spawns an asynchronous background worker (`nmem_shared.retry_unsynced_sessions_async()`) to drain the queue.
   3. Throttles warning notifications to at most once per conversation session (`should_emit_unsynced_warning`), emitting `injectSteps` with an informational message clarifying that background sync is in progress and `trigger_memory_catchup` is not required. Session warning state is tracked locally in `<session_dir>/.nmem/warning_history.json`.
 
@@ -75,7 +75,7 @@ flowchart TD
   3. Extracts user prompts (`USER_EXPLICIT`) and model responses (`MODEL`).
   4. Checks thread existence via `HTTP GET /threads/<id>` or `nmem t show <id>`. If all transcript messages match server thread messages, returns success immediately.
   5. If leading messages match, uses `POST /threads/<id>/reconcile-tail` to append only missing trailing messages incrementally. If `reconcile-tail` fails (e.g. 400 Bad Request due to divergent message prefixes), it falls back directly to `POST /threads/<id>/append`.
-  6. If backend calls fail, saves the session to `~/.nowledge-mem/antigravity_unsynced.json` via file-locked append for automatic background retry.
+  6. If backend calls fail, saves the session to `~/.nowledge-mem/cache/antigravity_unsynced.json` via file-locked append for automatic background retry.
   7. Scans for approved `learning_proposal.md` artifacts and syncs them to rules (`nmem rules upsert`), skills (`nmem skills enroll`), or memories (`nmem memories add`).
 
 ### 5. Session Directory State Isolation (`.nmem/`)
