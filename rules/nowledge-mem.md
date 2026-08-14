@@ -1,3 +1,7 @@
+---
+description: Rules for using Nowledge Mem context, working memory, memories, threads, and skills.
+---
+
 # Nowledge Mem for Google Antigravity
 
 You have access to the user's Nowledge Mem through the bundled MCP server and the `nmem` CLI.
