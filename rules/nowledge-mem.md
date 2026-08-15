@@ -1,3 +1,7 @@
+---
+description: Rules for using Nowledge Mem context, working memory, memories, threads, and skills.
+---
+
 # Nowledge Mem for Google Antigravity
 
 You have access to the user's Nowledge Mem through the bundled MCP server and the `nmem` CLI.
@@ -235,6 +239,16 @@ To minimize user interruption (via terminal permission popups), optimize latency
 4. **Diagnostics & Troubleshooting (Prefer CLI)**:
    - **Rule**: Use the `nmem` CLI for human workflows, debugging, and initial setup diagnostics (e.g. `nmem status` or `nmem config client set`).
 
+## Configuration Precedence Hierarchy
+
+Settings for endpoints (`apiUrl`), authentication (`apiKey`), and default project space (`space`) are resolved using the following precedence:
+
+1. **Environment Variables**: `NMEM_API_URL`, `NMEM_API_KEY`, `NMEM_SPACE` (or `NMEM_SPACE_ID`)
+2. **Local Plugin / Workspace Config (`.config.json`)**: Git-ignored `.config.json` at plugin root or workspace root.
+3. **Explicit Workspace Files**: `.nmemspace` or `.nowledge/config.json`.
+4. **Global Client Config**: `~/.nowledge-mem/config.json`.
+5. **Defaults**: `http://127.0.0.1:14242` and `default` space.
+
 ## Memory Health & Catchup (`trigger_memory_catchup`)
 
 Use `trigger_memory_catchup` strictly for memory health maintenance, decay re-scoring, and index compaction. Do **not** use it as a generic background-task runner or standard search replacement.
@@ -253,12 +267,15 @@ Use `trigger_memory_catchup` strictly for memory health maintenance, decay re-sc
 ### 3. WHEN NOT to Trigger
 - Do **NOT** trigger on routine conversation turns or standard tool calls.
 - Do **NOT** use for standard fact/thread retrieval (use `memory_search` or `mem_fs recall` instead).
+- Do **NOT** trigger in response to offline session queue warnings (`unsynced.json`) or routine status checks (queue syncing is handled automatically in the background by hooks).
+- Repeated calls within the same session or 1-hour cooldown window are debounced and auto-suppressed.
 
 ### 4. Horizon Parameter Selection
 - `horizon: "today"` (last 24 hours) - default for daily re-syncs.
 - `horizon: "3"` (last 3 days) - for resuming after a weekend or multi-day gap.
 - `horizon: "7"` (last 7 days) - for weekly maintenance or deep health audits.
 - `horizon: "off"` - to cancel or disable active catch-up passes.
+
 
 ## Status & Diagnostics
 

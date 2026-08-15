@@ -31,7 +31,7 @@ flowchart TD
     subgraph Transport Layer ["Transport & Resolution Layer"]
         H -->|1. Primary: Native HTTP| K[http_request urllib.request]
         H -->|2. Secondary: Multi-Path CLI| L[nmem Binary Subprocess]
-        H -->|3. Tertiary: Local Buffer| M[~/.nowledge-mem/antigravity_unsynced.json]
+        H -->|3. Tertiary: Local Buffer| M[~/.nowledge-mem/plugins/antigravity/unsynced.json]
     end
 
     subgraph Backend ["Nowledge Mem Backend"]
@@ -50,7 +50,7 @@ flowchart TD
   1. Queries the Nowledge Mem backend via `nmem_shared.http_request("/context?source_app=google-antigravity")`.
   2. If Context Bundle is unavailable, falls back to `/working-memory`.
   3. Emits `injectSteps` containing a `<nowledge_context_bundle>` block into Antigravity's active session.
-  4. Launches a background retry daemon (`python3 session-start.py --retry-only`) to flush any pending unsynced sessions from `~/.nowledge-mem/antigravity_unsynced.json`.
+  4. Launches a background retry daemon (`python3 session-start.py --retry-only`) to flush any pending unsynced sessions from `~/.nowledge-mem/plugins/antigravity/unsynced.json`.
 
 ### 2. PreToolUse Gate Hook (`hooks/nmem-gate.py`)
 - **Trigger**: Evaluated before executing `call_mcp_tool`, `mcp_nowledge-mem_*`, or `run_command`.
@@ -58,12 +58,14 @@ flowchart TD
   - **Auto-Allow**: Read-only tools (`mem_fs`, `memory_search`, `thread_search`, `query_library`, `explore_graph`, `get_memory_by_id`, etc.) return `{"decision": "allow"}` with permission overrides to prevent terminal prompt interruptions.
   - **Force Confirm**: Destructive operations (`memory_delete`, `thread_delete`, `memory_relation_delete`) return `{"decision": "force_ask"}`.
   - **Intent-Based Write Allow**: Write tools (`memory_add`, `memory_update`, etc.) check recent conversation steps for intent keywords (`save`, `remember`, `store`, `nmem`, `distill`, `handoff`). If found, returns `{"decision": "allow"}`.
+  - **Memory Health Catchup Debounce & Gating**: `trigger_memory_catchup` checks for prior execution in the current session directory (`<session_dir>/.nmem/catchup_history.json`) and a 1-hour global cooldown. Redundant calls are auto-suppressed with an explanation; new calls require explicit user maintenance intent (`catch up`, `rescore`, `decay`, `compaction`, `maintenance`) to auto-allow or prompt confirmation.
 
 ### 3. PostInvocation Hook (`hooks/post-invocation.py`)
 - **Trigger**: Runs after each model invocation completes.
 - **Execution Flow**:
-  1. Checks for pending unsynced offline sessions (`~/.nowledge-mem/antigravity_unsynced.json`) via `nmem_shared.get_unsynced_sessions()`.
-  2. If pending items exist, emits `injectSteps` with an `ephemeralMessage` warning informing the agent mid-session.
+  1. Checks for pending unsynced offline sessions (`~/.nowledge-mem/plugins/antigravity/unsynced.json`) via `nmem_shared.get_unsynced_sessions()`.
+  2. If pending items exist, automatically spawns an asynchronous background worker (`nmem_shared.retry_unsynced_sessions_async()`) to drain the queue.
+  3. Throttles warning notifications to at most once per conversation session (`should_emit_unsynced_warning`), emitting `injectSteps` with an informational message clarifying that background sync is in progress and `trigger_memory_catchup` is not required. Session warning state is tracked locally in `<session_dir>/.nmem/warning_history.json`.
 
 ### 4. Stop Hook (`hooks/session-end.py`)
 - **Trigger**: Runs when the Antigravity session terminates.
@@ -72,9 +74,14 @@ flowchart TD
   2. If `fullyIdle: false` (background tasks still running), skips thread capture and defers to the final idle stop.
   3. Extracts user prompts (`USER_EXPLICIT`) and model responses (`MODEL`).
   4. Checks thread existence via `HTTP GET /threads/<id>` or `nmem t show <id>`. If all transcript messages match server thread messages, returns success immediately.
-  5. If leading messages match, uses `POST /threads/<id>/reconcile-tail` to append only missing trailing messages incrementally.
-  6. If backend calls fail, saves the session to `~/.nowledge-mem/antigravity_unsynced.json` via file-locked append for automatic background retry.
+  5. If leading messages match, uses `POST /threads/<id>/reconcile-tail` to append only missing trailing messages incrementally. If `reconcile-tail` fails (e.g. 400 Bad Request due to divergent message prefixes), it falls back directly to `POST /threads/<id>/append`.
+  6. If backend calls fail, saves the session to `~/.nowledge-mem/plugins/antigravity/unsynced.json` via file-locked append for automatic background retry.
   7. Scans for approved `learning_proposal.md` artifacts and syncs them to rules (`nmem rules upsert`), skills (`nmem skills enroll`), or memories (`nmem memories add`).
+
+### 5. Session Directory State Isolation (`.nmem/`)
+- Rather than persisting session-level state into the global `~/.nowledge-mem/` configuration folder, hooks isolate session-scoped metadata within `<session_dir>/.nmem/` (resolved from `artifactDirectoryPath` or `transcriptPath`):
+  - `<session_dir>/.nmem/catchup_history.json`: Tracks per-horizon catchup executions within this session.
+  - `<session_dir>/.nmem/warning_history.json`: Tracks notification emissions for offline sync warnings to prevent repeating alerts in active conversations.
 
 ---
 
@@ -83,8 +90,10 @@ flowchart TD
 ### Config Resolution Order
 `hooks/nmem_shared.py` resolves connection settings using the following precedence:
 1. **Environment Variables**: `NMEM_API_URL` and `NMEM_API_KEY`.
-2. **Client Config File**: `~/.nowledge-mem/config.json` (`apiUrl` and `apiKey`).
-3. **Default Fallback**: `http://127.0.0.1:14242` (default local loopback).
+2. **Local Workspace Config (`.config.json`)**: Reads `.config.json` at workspace root (or plugin root) (`apiUrl` / `api_url` and `apiKey` / `api_key`).
+3. **Plugin Storage Config File**: `~/.nowledge-mem/plugins/antigravity/config.json` (persists plugin-specific configuration defaults across updates).
+4. **Global Client Config File**: `~/.nowledge-mem/config.json` (`apiUrl` and `apiKey`).
+5. **Default Fallback**: `http://127.0.0.1:14242` (default local loopback).
 
 ### Multi-Path System Binary Resolution
 To ensure subshells running inside sandboxed tool environments (`BypassSandbox: false`) can locate the `nmem` binary when user `$PATH` symlinks are hidden, `_nmem_command()` checks paths in order:
@@ -99,13 +108,17 @@ To ensure subshells running inside sandboxed tool environments (`BypassSandbox: 
 ### Space Resolution & Verification Pipeline
 `hooks/nmem_shared.py` resolves the active space using `resolve_space(cwd=None)` following this pipeline:
 1. **Explicit Environment Variables**: Returns `NMEM_SPACE` or `NMEM_SPACE_ID` if explicitly set by user.
-2. **Explicit Workspace Configuration**: Returns explicit `space` defined in `.nmemspace` or `.nowledge/config.json` at the workspace root.
-3. **Dynamic Space Auto-Detection with Existence Verification**:
+2. **Local Workspace Configuration (`.config.json`)**: Reads `space` or `space_id` from `<workspace_root>/.config.json`.
+3. **Explicit Workspace Configuration Files**: Returns explicit `space` defined in `.nmemspace` or `.nowledge/config.json` at the workspace root.
+4. **Plugin Root Configuration (`.config.json`)**: Reads `space` or `space_id` from `<plugin_root>/.config.json` if distinct from workspace.
+5. **Plugin Storage Configuration**: Returns `space` or `space_id` defined in `~/.nowledge-mem/plugins/antigravity/config.json`.
+6. **Global Client Configuration**: Returns `space` or `space_id` defined in `~/.nowledge-mem/config.json`.
+7. **Dynamic Space Auto-Detection with Existence Verification**:
    - Infer candidate space name from workspace directory basename (e.g. `Path(cwd).name`).
    - Query existing backend spaces (`get_existing_spaces()`) via `/spaces` HTTP GET or `nmem --json spaces list`.
    - Match candidate against `id`, `key`, `name`, or `aliases`.
    - If candidate space exists, use it.
-4. **Fallback to Default Space**: If the dynamically detected space does NOT exist on the backend and the user has not explicitly configured a project space, fall back to `"default"`.
+8. **Fallback to Default Space**: If the dynamically detected space does NOT exist on the backend and the user has not explicitly configured a project space, fall back to `"default"`.
 
 ---
 

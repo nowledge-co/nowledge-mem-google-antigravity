@@ -45,9 +45,13 @@ Example structure of the printed rich status output:
 - **Synced Thread**: Yes (Thread contains 12 messages)
 ### Memory Health & Maintenance
 
-If the user requests memory maintenance or if diagnostic checks reveal stale/contradictory context, trigger a memory health catchup pass using the MCP `trigger_memory_catchup` tool:
-- `trigger_memory_catchup(horizon="today")` for recent 24-hour maintenance.
-- `trigger_memory_catchup(horizon="3")` or `horizon="7"` when resuming after offline gaps or performing deep audits.
+Only when the user explicitly requests memory maintenance (or during deep offline gap audits), trigger a maintenance pass using the MCP `trigger_memory_catchup` tool:
+- `trigger_memory_catchup(horizon="today")` for explicit 24-hour maintenance.
+- `trigger_memory_catchup(horizon="3")` or `horizon="7"` when resuming after offline gaps (3+ days) or deep audits.
+
+> [!NOTE]
+> Offline session queue synchronization is handled automatically by background hooks (`session-start.py` / `session-end.py`) and does NOT require invoking `trigger_memory_catchup`.
+
 
 ---
 

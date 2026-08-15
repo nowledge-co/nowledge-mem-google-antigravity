@@ -3,6 +3,11 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
+
+# Add the hooks directory to sys.path to allow importing nmem_shared
+sys.path.insert(0, str(Path(__file__).parent.resolve()))
+import nmem_shared
 
 
 def read_hook_input():
@@ -50,7 +55,74 @@ def main():
         emit({"decision": "allow"})
         return
 
-    # 1. Read-only tools (auto-allow)
+    # 1. Memory Health Catchup (Debounced & Intent-Gated)
+    if sub_tool == "trigger_memory_catchup":
+        call_arguments = tool_args.get("Arguments") if isinstance(tool_args.get("Arguments"), dict) else tool_args
+        horizon = str(call_arguments.get("horizon") or "today").strip() or "today"
+        conv_id = data.get("conversationId")
+        artifact_dir = data.get("artifactDirectoryPath")
+        transcript_path = data.get("transcriptPath")
+
+        # Check session and global cooldown
+        should_proceed, debounce_reason = nmem_shared.should_allow_catchup(
+            horizon, conv_id, session_dir=artifact_dir, transcript_path=transcript_path
+        )
+        if not should_proceed:
+            emit(
+                {
+                    "decision": "deny",
+                    "reason": f"Auto-suppressing redundant memory catchup: {debounce_reason}",
+                }
+            )
+            return
+
+        # Check explicit user intent
+        if transcript_path and os.path.exists(transcript_path):
+            try:
+                user_authorized = False
+                with open(transcript_path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        step = json.loads(line)
+                        if step.get("source") == "USER_EXPLICIT":
+                            content = step.get("content") or ""
+                            if re.search(
+                                r"\b(catch\s*up|catchup|maintenance|rescore|re-score|compact|compaction|decay|health\s*check|memory\s*health)\b",
+                                content,
+                                re.IGNORECASE,
+                            ):
+                                user_authorized = True
+                                break
+                if user_authorized:
+                    nmem_shared.record_catchup_execution(
+                        horizon, conv_id, session_dir=artifact_dir, transcript_path=transcript_path
+                    )
+                    emit(
+                        {
+                            "decision": "allow",
+                            "reason": f"Explicit user intent detected for memory maintenance ({sub_tool}) with horizon '{horizon}'.",
+                            "permissionOverrides": [f"mcp(nowledge-mem/{sub_tool})"],
+                        }
+                    )
+                    return
+            except Exception:
+                pass
+
+        # Ask user confirmation if no explicit intent detected
+        nmem_shared.record_catchup_execution(
+            horizon, conv_id, session_dir=artifact_dir, transcript_path=transcript_path
+        )
+        emit(
+            {
+                "decision": "ask",
+                "reason": f"Confirmation required to run server-side memory maintenance/compaction ({sub_tool}, horizon: {horizon})",
+            }
+        )
+        return
+
+    # 2. Read-only tools (auto-allow)
     read_only = {
         "memory_search",
         "thread_search",
@@ -92,7 +164,6 @@ def main():
         "query_shortest_path",
         "check_claims",
         "list_timeline_reviews",
-        "trigger_memory_catchup",
     }
     if sub_tool in read_only:
         emit(

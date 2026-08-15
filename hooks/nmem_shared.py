@@ -167,11 +167,52 @@ def _windows_no_window_kwargs() -> dict[str, int]:
     return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
 
 
-def get_effective_config() -> tuple[str, str | None]:
+def get_local_config(cwd: str | Path | None = None) -> dict:
+    """Read local .config.json from the plugin root or workspace root if present."""
+    config = {}
+    plugin_root = Path(__file__).parent.parent.resolve()
+    target_dir = Path(cwd).resolve() if cwd else Path.cwd().resolve()
+
+    # Check plugin root .config.json first, then workspace root .config.json
+    for cfg_path in (plugin_root / ".config.json", target_dir / ".config.json"):
+        if cfg_path.is_file():
+            try:
+                data = json.loads(cfg_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    config.update(data)
+            except Exception:
+                pass
+    return config
+
+
+def get_plugin_storage_dir() -> Path:
+    """Return the dedicated storage directory for the Antigravity plugin.
+
+    Location: ~/.nowledge-mem/plugins/antigravity
+    """
+    return Path("~/.nowledge-mem/plugins/antigravity").expanduser()
+
+
+def get_plugin_config() -> dict:
+    """Read dedicated plugin configuration from ~/.nowledge-mem/plugins/antigravity/config.json if present."""
+    config_file = get_plugin_storage_dir() / "config.json"
+    if config_file.is_file():
+        try:
+            data = json.loads(config_file.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return {}
+
+
+def get_effective_config(cwd: str | Path | None = None) -> tuple[str, str | None]:
     """Resolve effective API URL and API key following the hierarchy:
     1. NMEM_API_URL / NMEM_API_KEY environment variables
-    2. NMEM_CONFIG_PATH if set, or ~/.nowledge-mem/config.json (unless NMEM_IGNORE_HOST_CONFIG is set)
-    3. Fallback default http://127.0.0.1:14242
+    2. Local workspace .config.json at workspace root or plugin root
+    3. Plugin storage configuration (~/.nowledge-mem/plugins/antigravity/config.json)
+    4. NMEM_CONFIG_PATH if set, or global ~/.nowledge-mem/config.json (unless NMEM_IGNORE_HOST_CONFIG is set)
+    5. Fallback default http://127.0.0.1:14242
 
     Guards against inadvertently picking up host ~/.nowledge-mem/config.json credentials
     when targeting custom server URLs or running isolated test environments.
@@ -183,14 +224,37 @@ def get_effective_config() -> tuple[str, str | None]:
     api_url = env_url
     api_key = env_key
 
-    if not ignore_host:
+    # 2. Check local workspace .config.json (workspace-local config is not ignored by NMEM_IGNORE_HOST_CONFIG)
+    if not api_url or not api_key:
+        local_cfg = get_local_config(cwd)
+        local_url = str(local_cfg.get("apiUrl") or local_cfg.get("api_url") or "").strip().rstrip("/")
+        local_key = str(local_cfg.get("apiKey") or local_cfg.get("api_key") or "").strip() or None
+        if not api_url and local_url:
+            api_url = local_url
+        if not api_key and local_key:
+            if not env_url or env_url.rstrip("/") == local_url:
+                api_key = local_key
+
+    # 3. Check plugin storage config file (~/.nowledge-mem/plugins/antigravity/config.json) if not ignored
+    if not ignore_host and (not api_url or not api_key):
+        plugin_cfg = get_plugin_config()
+        plugin_url = str(plugin_cfg.get("apiUrl") or plugin_cfg.get("api_url") or "").strip().rstrip("/")
+        plugin_key = str(plugin_cfg.get("apiKey") or plugin_cfg.get("api_key") or "").strip() or None
+        if not api_url and plugin_url:
+            api_url = plugin_url
+        if not api_key and plugin_key:
+            if not env_url or env_url.rstrip("/") == plugin_url:
+                api_key = plugin_key
+
+    # 4. Check global config file (~/.nowledge-mem/config.json)
+    if not ignore_host and (not api_url or not api_key):
         custom_cfg = os.environ.get("NMEM_CONFIG_PATH", "").strip()
         config_file = Path(custom_cfg).expanduser() if custom_cfg else Path("~/.nowledge-mem/config.json").expanduser()
         if config_file.is_file():
             try:
                 data = json.loads(config_file.read_text(encoding="utf-8"))
-                file_url = str(data.get("apiUrl", "")).strip().rstrip("/")
-                file_key = str(data.get("apiKey", "")).strip() or None
+                file_url = str(data.get("apiUrl") or data.get("api_url") or "").strip().rstrip("/")
+                file_key = str(data.get("apiKey") or data.get("api_key") or "").strip() or None
 
                 if not api_url and file_url:
                     api_url = file_url
@@ -203,6 +267,7 @@ def get_effective_config() -> tuple[str, str | None]:
             except Exception:
                 pass
 
+    # 5. Fallback default
     if not api_url:
         api_url = "http://127.0.0.1:14242"
 
@@ -240,8 +305,22 @@ def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
     if _SPACES_CACHE["spaces"] is not None and (now - _SPACES_CACHE["timestamp"]) < ttl:
         return _SPACES_CACHE["spaces"]
 
-    # 1. Try file cache first (~/.nowledge-mem/spaces_cache.json) if valid
-    cache_file = Path("~/.nowledge-mem/spaces_cache.json").expanduser()
+    plugin_dir = get_plugin_storage_dir()
+    cache_dir = plugin_dir / "cache"
+
+    # Clean up legacy root-level or top-level spaces_cache.json if present
+    for legacy_cache in (
+        Path("~/.nowledge-mem/spaces_cache.json").expanduser(),
+        Path("~/.nowledge-mem/cache/spaces_cache.json").expanduser(),
+    ):
+        if legacy_cache.is_file():
+            try:
+                legacy_cache.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    # 1. Try file cache (~/.nowledge-mem/plugins/antigravity/cache/spaces_cache.json) if valid
+    cache_file = cache_dir / "spaces_cache.json"
     if cache_file.is_file():
         try:
             mtime = cache_file.stat().st_mtime
@@ -283,7 +362,7 @@ def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
         _SPACES_CACHE["spaces"] = spaces_data
         _SPACES_CACHE["timestamp"] = now
         try:
-            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_dir.mkdir(parents=True, exist_ok=True)
             cache_file.write_text(json.dumps(spaces_data), encoding="utf-8")
         except Exception:
             pass
@@ -295,17 +374,35 @@ def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
 def resolve_space(cwd: str | Path | None = None) -> str:
     """Resolve active space following priority:
     1. Explicit environment variables (NMEM_SPACE or NMEM_SPACE_ID)
-    2. Explicit workspace configuration (.nmemspace or .nowledge/config.json)
-    3. Dynamically detected space from workspace directory IF it exists on backend
-    4. Fallback to 'default' space
+    2. Local workspace configuration (<workspace_root>/.config.json)
+    3. Explicit workspace configuration files (.nmemspace or .nowledge/config.json)
+    4. Plugin root configuration (<plugin_root>/.config.json)
+    5. Plugin storage configuration (~/.nowledge-mem/plugins/antigravity/config.json space)
+    6. Global configuration (~/.nowledge-mem/config.json space)
+    7. Dynamically detected space from workspace directory IF it exists on backend
+    8. Fallback to 'default' space
     """
     # 1. Check explicit environment override
     env_space = os.environ.get("NMEM_SPACE", "").strip() or os.environ.get("NMEM_SPACE_ID", "").strip()
     if env_space:
         return env_space
 
-    # 2. Check explicit workspace config file
     target_dir = Path(cwd).resolve() if cwd else Path.cwd().resolve()
+    plugin_root = Path(__file__).parent.parent.resolve()
+
+    # 2. Check local workspace .config.json (at workspace root)
+    ws_cfg_path = target_dir / ".config.json"
+    if ws_cfg_path.is_file():
+        try:
+            data = json.loads(ws_cfg_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                ws_space = data.get("space") or data.get("space_id")
+                if isinstance(ws_space, str) and ws_space.strip():
+                    return ws_space.strip()
+        except Exception:
+            pass
+
+    # 3. Check explicit workspace config files (.nmemspace or .nowledge/config.json)
     for cfg_path in (target_dir / ".nmemspace", target_dir / ".nowledge" / "config.json"):
         if cfg_path.is_file():
             try:
@@ -321,7 +418,37 @@ def resolve_space(cwd: str | Path | None = None) -> str:
             except Exception:
                 pass
 
-    # 3. Dynamic space auto-detection from workspace directory
+    # 4. Check plugin root .config.json if distinct from workspace root
+    if plugin_root != target_dir:
+        plugin_root_cfg = plugin_root / ".config.json"
+        if plugin_root_cfg.is_file():
+            try:
+                data = json.loads(plugin_root_cfg.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    p_space = data.get("space") or data.get("space_id")
+                    if isinstance(p_space, str) and p_space.strip():
+                        return p_space.strip()
+            except Exception:
+                pass
+
+    # 5. Check plugin storage config file (~/.nowledge-mem/plugins/antigravity/config.json)
+    plugin_cfg = get_plugin_config()
+    plugin_space = plugin_cfg.get("space") or plugin_cfg.get("space_id")
+    if isinstance(plugin_space, str) and plugin_space.strip():
+        return plugin_space.strip()
+
+    # 6. Check global config file (~/.nowledge-mem/config.json)
+    config_file = Path("~/.nowledge-mem/config.json").expanduser()
+    if config_file.is_file():
+        try:
+            data = json.loads(config_file.read_text(encoding="utf-8"))
+            val = data.get("space") or data.get("space_id")
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        except Exception:
+            pass
+
+    # 7. Dynamic space auto-detection from workspace directory
     candidate = target_dir.name.strip()
     if not candidate or candidate.lower() == "default":
         return "default"
@@ -341,7 +468,7 @@ def resolve_space(cwd: str | Path | None = None) -> str:
             if cand_lower in (s_id.lower(), s_key.lower(), s_name.lower()) or cand_lower in aliases:
                 return s_id or s_key or candidate
 
-    # Dynamically detected space does not exist on backend and user has not explicitly set project space -> fall back to default
+    # 6. Dynamically detected space does not exist on backend and user has not explicitly set project space -> fall back to default
     return "default"
 
 
@@ -595,6 +722,14 @@ def run_nmem_command(
     cmd = _build_nmem_command(nmem, *processed_args)
 
     run_env = os.environ.copy()
+    try:
+        api_url, api_key = get_effective_config()
+        if api_url and "NMEM_API_URL" not in run_env:
+            run_env["NMEM_API_URL"] = api_url
+        if api_key and "NMEM_API_KEY" not in run_env:
+            run_env["NMEM_API_KEY"] = api_key
+    except Exception:
+        pass
     if env:
         run_env.update(env)
 
@@ -690,15 +825,74 @@ class FileLock:
                 pass
 
 
+def get_unsynced_queue_path() -> Path:
+    """Return the Path to the unsynced sessions queue file, migrating any legacy files if needed.
+
+    New path: ~/.nowledge-mem/plugins/antigravity/unsynced.json
+    Legacy paths:
+      1. ~/.nowledge-mem/cache/antigravity_unsynced.json
+      2. ~/.nowledge-mem/antigravity_unsynced.json
+
+    If the new path does not exist but legacy paths do, migrates legacy files
+    to the new path atomically so that existing backlogs are preserved.
+    If both exist, merges legacy sessions into the new queue file.
+    """
+    plugin_dir = get_plugin_storage_dir()
+    new_path = plugin_dir / "unsynced.json"
+
+    legacy_paths = [
+        Path("~/.nowledge-mem/cache/antigravity_unsynced.json").expanduser(),
+        Path("~/.nowledge-mem/antigravity_unsynced.json").expanduser(),
+    ]
+
+    for old_path in legacy_paths:
+        if old_path.exists():
+            try:
+                plugin_dir.mkdir(parents=True, exist_ok=True)
+                old_lock = old_path.with_suffix(".lock")
+                new_lock = new_path.with_suffix(".lock")
+                with FileLock(old_lock), FileLock(new_lock):
+                    if old_path.exists():
+                        try:
+                            old_data = json.loads(old_path.read_text(encoding="utf-8"))
+                        except Exception:
+                            old_data = None
+
+                        if isinstance(old_data, dict) and old_data:
+                            merged = {}
+                            if new_path.exists():
+                                try:
+                                    merged = json.loads(new_path.read_text(encoding="utf-8"))
+                                    if not isinstance(merged, dict):
+                                        merged = {}
+                                except Exception:
+                                    merged = {}
+                            for k, v in old_data.items():
+                                if k not in merged:
+                                    merged[k] = v
+                            new_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+
+                        try:
+                            old_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+            except Exception as e:
+                if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+                    sys.stderr.write(f"Warning: Failed to migrate unsynced sessions queue from {old_path}: {e}\n")
+                if not new_path.exists():
+                    return old_path
+
+    return new_path
+
+
 def save_unsynced_session(
     conv_id: str, messages: list, title: str, space: str | None, host_agent_id: str | None
 ) -> None:
     """Save a failed session to the unsynced queue file."""
     if not space:
         space = resolve_space()
-    config_dir = Path("~/.nowledge-mem").expanduser()
-    config_dir.mkdir(parents=True, exist_ok=True)
-    queue_path = config_dir / "antigravity_unsynced.json"
+    queue_path = get_unsynced_queue_path()
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = queue_path.with_suffix(".lock")
 
     try:
@@ -732,8 +926,7 @@ def save_unsynced_session(
 
 def get_unsynced_sessions() -> dict:
     """Return dict of pending unsynced sessions from the queue file."""
-    config_dir = Path("~/.nowledge-mem").expanduser()
-    queue_path = config_dir / "antigravity_unsynced.json"
+    queue_path = get_unsynced_queue_path()
     if not queue_path.exists():
         return {}
     try:
@@ -745,8 +938,7 @@ def get_unsynced_sessions() -> dict:
 
 def retry_unsynced_sessions() -> None:
     """Attempt to sync any unsynced sessions in the queue."""
-    config_dir = Path("~/.nowledge-mem").expanduser()
-    queue_path = config_dir / "antigravity_unsynced.json"
+    queue_path = get_unsynced_queue_path()
     lock_path = queue_path.with_suffix(".lock")
 
     if not queue_path.exists():
@@ -803,6 +995,16 @@ def retry_unsynced_sessions() -> None:
                             )
                             if isinstance(rec_res, dict) and not rec_res.get("error"):
                                 success = True
+                            else:
+                                # Fallback to append if reconcile-tail fails (e.g. prefix divergence)
+                                app_payload = {"messages": messages[matched_count:]}
+                                if space:
+                                    app_payload["space"] = space
+                                app_res = http_request(
+                                    f"/threads/{conv_id}/append", method="POST", payload=app_payload, timeout=2.5
+                                )
+                                if isinstance(app_res, dict) and not app_res.get("error"):
+                                    success = True
                         else:
                             app_payload = {"messages": messages}
                             if space:
@@ -1136,3 +1338,241 @@ def sync_learnings_if_any(
             synced_state_file.write_text(json.dumps(synced_hashes), encoding="utf-8")
         except Exception:
             pass
+
+
+def resolve_session_dir(
+    artifact_dir: str | Path | None = None,
+    transcript_path: str | Path | None = None,
+    conversation_id: str | None = None,
+) -> Path | None:
+    """Resolve the session/artifact directory for the active conversation."""
+    if artifact_dir:
+        p = Path(artifact_dir).expanduser()
+        if p.exists() or p.parent.exists():
+            return p
+
+    if transcript_path:
+        tp = Path(transcript_path).expanduser()
+        if ".system_generated" in tp.parts:
+            idx = tp.parts.index(".system_generated")
+            return Path(*tp.parts[:idx])
+        elif tp.parent.exists():
+            return tp.parent
+
+    if conversation_id:
+        brain_path = Path("~/.gemini/antigravity/brain").expanduser() / conversation_id
+        if brain_path.exists():
+            return brain_path
+
+    return None
+
+
+def retry_unsynced_sessions_async(cooldown_seconds: float = 15.0) -> None:
+    """Spawns an asynchronous background worker to retry unsynced sessions without blocking, guarded by a PID/cooldown lock."""
+    try:
+        plugin_dir = get_plugin_storage_dir()
+        cache_dir = plugin_dir / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        pid_file = cache_dir / "retry_worker.pid"
+
+        now = time.time()
+        if pid_file.exists():
+            try:
+                content = pid_file.read_text(encoding="utf-8").strip()
+                if content:
+                    parts = content.split(":")
+                    pid = int(parts[0]) if parts[0].isdigit() else 0
+                    spawn_time = float(parts[1]) if len(parts) > 1 and parts[1].replace(".", "", 1).isdigit() else 0.0
+                    # If process is still alive and was started recently, or was spawned less than cooldown_seconds ago
+                    if pid > 0 and _is_pid_alive(pid) and (now - spawn_time) < 120.0:
+                        return
+                    if (now - spawn_time) < cooldown_seconds:
+                        return
+            except Exception:
+                pass
+
+        session_start_script = Path(__file__).parent / "session-start.py"
+        proc = subprocess.Popen(
+            [sys.executable, str(session_start_script), "--retry-only"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            **_windows_no_window_kwargs(),
+        )
+        try:
+            pid_file.write_text(f"{proc.pid}:{now}", encoding="utf-8")
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def should_emit_unsynced_warning(
+    conversation_id: str | None = None,
+    cooldown_seconds: float = 1800.0,
+    session_dir: str | Path | None = None,
+    transcript_path: str | Path | None = None,
+) -> bool:
+    """Check if the unsynced session warning should be emitted, prioritizing session directory tracking."""
+    sdir = resolve_session_dir(session_dir, transcript_path, conversation_id)
+    if sdir:
+        warning_file = sdir / ".nmem" / "warning_history.json"
+        if warning_file.exists():
+            try:
+                data = json.loads(warning_file.read_text(encoding="utf-8"))
+                now = time.time()
+                last_emitted = data.get("last_unsynced_warning", 0.0)
+                return (now - last_emitted) >= cooldown_seconds
+            except Exception:
+                return True
+        return True
+
+    # Fallback to global cache if session dir cannot be resolved
+    config_dir = Path("~/.nowledge-mem").expanduser()
+    cache_file = config_dir / "cache" / "warning_history.json"
+    if not cache_file.exists():
+        return True
+    try:
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+        now = time.time()
+        if conversation_id and conversation_id in data.get("conversations", {}):
+            return False
+        last_emitted = data.get("last_unsynced_warning", 0.0)
+        return (now - last_emitted) >= cooldown_seconds
+    except Exception:
+        return True
+
+
+def record_unsynced_warning_emitted(
+    conversation_id: str | None = None, session_dir: str | Path | None = None, transcript_path: str | Path | None = None
+) -> None:
+    """Record that an unsynced session warning was emitted in the session directory."""
+    now = time.time()
+    sdir = resolve_session_dir(session_dir, transcript_path, conversation_id)
+    if sdir:
+        try:
+            nmem_dir = sdir / ".nmem"
+            nmem_dir.mkdir(parents=True, exist_ok=True)
+            warning_file = nmem_dir / "warning_history.json"
+            data = {"last_unsynced_warning": now}
+            warning_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    # Also record in global fallback
+    try:
+        cache_dir = Path("~/.nowledge-mem/cache").expanduser()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = cache_dir / "warning_history.json"
+        data = {}
+        if cache_file.exists():
+            try:
+                data = json.loads(cache_file.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        data["last_unsynced_warning"] = now
+        if conversation_id:
+            convs = data.get("conversations", {})
+            convs[conversation_id] = now
+            data["conversations"] = convs
+        cache_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def should_allow_catchup(
+    horizon: str = "today",
+    conversation_id: str | None = None,
+    cooldown_seconds: float = 3600.0,
+    session_dir: str | Path | None = None,
+    transcript_path: str | Path | None = None,
+) -> tuple[bool, str]:
+    """Check whether a memory catchup execution should proceed, checking session directory history first.
+
+    Returns (should_proceed, reason_if_suppressed).
+    """
+    now = time.time()
+    sdir = resolve_session_dir(session_dir, transcript_path, conversation_id)
+
+    # 1. Check session directory catchup history
+    if sdir:
+        session_catchup_file = sdir / ".nmem" / "catchup_history.json"
+        if session_catchup_file.exists():
+            try:
+                data = json.loads(session_catchup_file.read_text(encoding="utf-8"))
+                if horizon in data:
+                    last_time = data[horizon]
+                    if (now - last_time) < cooldown_seconds:
+                        return (
+                            False,
+                            f"Memory catch-up for horizon '{horizon}' has already been executed in this session.",
+                        )
+            except Exception:
+                pass
+
+    # 2. Check global horizon cooldown in cache
+    config_dir = Path("~/.nowledge-mem").expanduser()
+    cache_file = config_dir / "cache" / "catchup_history.json"
+    if cache_file.exists():
+        try:
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            global_runs = data.get("global", {})
+            if horizon in global_runs:
+                last_time = global_runs[horizon]
+                if (now - last_time) < cooldown_seconds:
+                    mins_ago = max(1, int((now - last_time) / 60))
+                    return (
+                        False,
+                        f"Memory catch-up for horizon '{horizon}' was already executed {mins_ago}m ago (cooldown is {int(cooldown_seconds/60)}m).",
+                    )
+        except Exception:
+            pass
+
+    return True, ""
+
+
+def record_catchup_execution(
+    horizon: str = "today",
+    conversation_id: str | None = None,
+    session_dir: str | Path | None = None,
+    transcript_path: str | Path | None = None,
+) -> None:
+    """Record execution of trigger_memory_catchup in the session directory and global cache."""
+    now = time.time()
+    sdir = resolve_session_dir(session_dir, transcript_path, conversation_id)
+
+    # 1. Record in session directory
+    if sdir:
+        try:
+            nmem_dir = sdir / ".nmem"
+            nmem_dir.mkdir(parents=True, exist_ok=True)
+            session_file = nmem_dir / "catchup_history.json"
+            data = {}
+            if session_file.exists():
+                try:
+                    data = json.loads(session_file.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
+            data[horizon] = now
+            session_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    # 2. Record in global cache
+    try:
+        config_dir = Path("~/.nowledge-mem").expanduser()
+        cache_dir = config_dir / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = cache_dir / "catchup_history.json"
+        data = {}
+        if cache_file.exists():
+            try:
+                data = json.loads(cache_file.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        global_runs = data.get("global", {})
+        global_runs[horizon] = now
+        data["global"] = global_runs
+        cache_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        pass

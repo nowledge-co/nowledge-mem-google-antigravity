@@ -41,9 +41,11 @@ async function main() {
   assertString(manifest.version, 'manifest.version');
   assertString(manifest.description, 'manifest.description');
 
-  if (manifest.name !== pluginDirName && pluginDirName !== 'nmem' && pluginDirName !== 'nowledge-mem' && !pluginDirName.startsWith('verify_') && !pluginDirName.includes('nowledge-mem')) {
-    fail(`manifest.name (${manifest.name}) must match directory name (or be "nmem", "nowledge-mem", start with "verify_", or contain "nowledge-mem"), but got "${pluginDirName}"`);
+  const isWorktree = pluginRoot.includes('/worktrees/') || pluginRoot.includes('\\worktrees\\');
+  if (manifest.name !== pluginDirName && pluginDirName !== 'nmem' && pluginDirName !== 'nowledge-mem' && !pluginDirName.startsWith('verify_') && !pluginDirName.includes('nowledge-mem') && !isWorktree) {
+    fail(`manifest.name (${manifest.name}) must match directory name (or be "nmem", "nowledge-mem", start with "verify_", contain "nowledge-mem", or be under a "worktrees/" path), but got "${pluginDirName}"`);
   }
+
 
   if (manifest.version !== packageJson.version) {
     fail(`manifest.version (${manifest.version}) must match package.json version (${packageJson.version})`);

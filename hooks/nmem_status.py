@@ -61,7 +61,7 @@ def main():
         thread_details = f"Error: {str(e)}"
 
     # 4. Check local offline queue
-    unsynced_path = Path("~/.nowledge-mem/antigravity_unsynced.json").expanduser()
+    unsynced_path = nmem_shared.get_unsynced_queue_path()
     unsynced_count = 0
     is_current_pending = False
     unsynced_sessions = []
