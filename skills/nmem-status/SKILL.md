@@ -43,6 +43,12 @@ Example structure of the printed rich status output:
 ### Conversation Sync Status
 
 - **Synced Thread**: Yes (Thread contains 12 messages)
+
+### In-Flight Background Tasks
+
+- 🏃 `[community_detection]` Community detection (started 2026-08-20T18:00:00Z)
+- 📅 `[scheduled_follow_up]` Migration check on staging (next: 2026-08-21T09:00:00Z)
+- 🔄 `[recurring_task]` Morning research digest `[active]` (next: 2026-08-21T07:00:00Z)
 ### Memory Health & Maintenance
 
 Only when the user explicitly requests memory maintenance (or during deep offline gap audits), trigger a maintenance pass using the MCP `trigger_memory_catchup` tool:

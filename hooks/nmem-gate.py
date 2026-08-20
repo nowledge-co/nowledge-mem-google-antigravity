@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -23,6 +24,70 @@ def emit(payload):
     sys.stdout.flush()
 
 
+def is_safe_status_command(cmd_str: str) -> bool:
+    """Validate that cmd_str is strictly a safe, standalone diagnostic or status command.
+    Rejects chained commands (&&, ;, ||, |), subshells, redirects, and dangerous flags.
+    """
+    if not isinstance(cmd_str, str) or not cmd_str.strip():
+        return False
+
+    # Disallow shell operators and chaining
+    dangerous_chars = {"&", ";", "|", "`", "$", "<", ">", "\n", "\r"}
+    if any(ch in cmd_str for ch in dangerous_chars):
+        return False
+
+    try:
+        tokens = shlex.split(cmd_str)
+    except Exception:
+        return False
+
+    if not tokens:
+        return False
+
+    prog = Path(tokens[0]).name.lower()
+
+    # Form 1: python / python3 invocation
+    if prog in ("python", "python3", "python.exe", "python3.exe"):
+        if len(tokens) < 2:
+            return False
+        script = Path(tokens[1]).name.lower()
+        args = tokens[2:]
+
+        if script == "nmem_status.py":
+            if not args:
+                return True
+            return len(args) == 2 and args[0] == "--conv-id" and not args[1].startswith("-")
+
+        if script == "nmem_entrypoint.py":
+            if not args or args[0] != "status":
+                return False
+            if len(args) == 1:
+                return True
+            return len(args) == 3 and args[1] == "--conv-id" and not args[2].startswith("-")
+
+        return False
+
+    # Form 2: direct nmem_status.py executable
+    if prog == "nmem_status.py":
+        args = tokens[1:]
+        if not args:
+            return True
+        return len(args) == 2 and args[0] == "--conv-id" and not args[1].startswith("-")
+
+    # Form 3: nmem status / nmem tasks CLI
+    if prog in ("nmem", "nmem.exe", "nmem.cmd"):
+        if len(tokens) < 2:
+            return False
+        subcmd = tokens[1].lower()
+        if subcmd not in ("status", "tasks"):
+            return False
+        args = tokens[2:]
+        allowed_flags = {"--json", "-j"}
+        return all(a in allowed_flags for a in args)
+
+    return False
+
+
 def main():
     data = read_hook_input()
     tool_call = data.get("toolCall") if isinstance(data, dict) else None
@@ -33,12 +98,8 @@ def main():
     if not isinstance(tool_args, dict):
         tool_args = {}
 
-    if (
-        tool_name == "run_command"
-        and isinstance(tool_args.get("CommandLine"), str)
-        and "nmem_status.py" in tool_args.get("CommandLine")
-    ):
-        emit({"decision": "allow", "reason": "Auto-allowing plugin status command"})
+    if tool_name == "run_command" and is_safe_status_command(tool_args.get("CommandLine")):
+        emit({"decision": "allow", "reason": "Auto-allowing validated plugin status and diagnostic command"})
         return
 
     # Detect if calling nowledge-mem
@@ -163,6 +224,8 @@ def main():
         "find_bridge_nodes",
         "query_shortest_path",
         "check_claims",
+        "ontology_read",
+        "entity_search",
         "list_timeline_reviews",
     }
     if sub_tool in read_only:

@@ -8,11 +8,31 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
+
+# Add hooks directory to sys.path to leverage unified config precedence
+for candidate in [
+    Path(__file__).resolve().parent.parent / "hooks",
+    Path(__file__).resolve().parent / "hooks",
+]:
+    if candidate.is_dir() and (candidate / "nmem_shared.py").exists():
+        sys.path.insert(0, str(candidate))
+        break
+
+try:
+    import nmem_shared
+except ImportError:
+    nmem_shared = None
 
 
 def load_config():
+    if nmem_shared is not None:
+        api_url, api_key = nmem_shared.get_effective_config()
+        space = nmem_shared.resolve_space()
+        return {"apiUrl": api_url, "apiKey": api_key or "", "space": space}
+
     config_path = os.path.expanduser("~/.nowledge-mem/config.json")
-    config = {"apiUrl": "http://127.0.0.1:14242", "apiKey": ""}
+    config = {"apiUrl": "http://127.0.0.1:14242", "apiKey": "", "space": "default"}
 
     if os.path.exists(config_path):
         try:
@@ -22,6 +42,8 @@ def load_config():
                     config["apiUrl"] = data["apiUrl"].rstrip("/")
                 if "apiKey" in data:
                     config["apiKey"] = data["apiKey"]
+                if "space" in data or "space_id" in data:
+                    config["space"] = data.get("space") or data.get("space_id")
         except Exception as e:
             sys.stderr.write(f"Warning: Failed to load config from {config_path}: {e}\n")
 
@@ -31,6 +53,9 @@ def load_config():
     env_key = os.environ.get("NMEM_API_KEY")
     if env_key:
         config["apiKey"] = env_key
+    env_space = os.environ.get("NMEM_SPACE") or os.environ.get("NMEM_SPACE_ID")
+    if env_space:
+        config["space"] = env_space
 
     return config
 
@@ -79,9 +104,10 @@ def main():
         sys.exit(1)
 
     config = load_config()
+    effective_space = args.space_id or config.get("space")
     print("Updating Working Memory in-place...")
     try:
-        data = update_working_memory(config, content, space_id=args.space_id)
+        data = update_working_memory(config, content, space_id=effective_space)
         size = data.get("size_bytes", len(content))
         focus = data.get("focus_areas", 0)
         print("\n" + "=" * 50)

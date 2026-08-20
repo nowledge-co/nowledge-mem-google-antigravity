@@ -8,11 +8,31 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+# Add hooks directory to sys.path to leverage unified config precedence
+for candidate in [
+    Path(__file__).resolve().parent.parent / "hooks",
+    Path(__file__).resolve().parent / "hooks",
+]:
+    if candidate.is_dir() and (candidate / "nmem_shared.py").exists():
+        sys.path.insert(0, str(candidate))
+        break
+
+try:
+    import nmem_shared
+except ImportError:
+    nmem_shared = None
 
 
 def load_config():
+    if nmem_shared is not None:
+        api_url, api_key = nmem_shared.get_effective_config()
+        space = nmem_shared.resolve_space()
+        return {"apiUrl": api_url, "apiKey": api_key or "", "space": space}
+
     config_path = os.path.expanduser("~/.nowledge-mem/config.json")
-    config = {"apiUrl": "http://127.0.0.1:14242", "apiKey": ""}
+    config = {"apiUrl": "http://127.0.0.1:14242", "apiKey": "", "space": "default"}
 
     if os.path.exists(config_path):
         try:
@@ -22,6 +42,8 @@ def load_config():
                     config["apiUrl"] = data["apiUrl"].rstrip("/")
                 if "apiKey" in data:
                     config["apiKey"] = data["apiKey"]
+                if "space" in data or "space_id" in data:
+                    config["space"] = data.get("space") or data.get("space_id")
         except Exception as e:
             sys.stderr.write(f"Warning: Failed to load config from {config_path}: {e}\n")
 
@@ -31,6 +53,9 @@ def load_config():
     env_key = os.environ.get("NMEM_API_KEY")
     if env_key:
         config["apiKey"] = env_key
+    env_space = os.environ.get("NMEM_SPACE") or os.environ.get("NMEM_SPACE_ID")
+    if env_space:
+        config["space"] = env_space
 
     return config
 
@@ -97,11 +122,13 @@ def update_artifact_reparse(config, artifact_id, space_id=None):
         return {}
 
 
-def search_existing_artifact(config, title):
+def search_existing_artifact(config, title, space_id=None):
     if not title:
         return None
     try:
         url = f"{config['apiUrl'].rstrip('/')}/sources/search?q={urllib.parse.quote(title)}"
+        if space_id:
+            url += f"&space_id={urllib.parse.quote(space_id)}"
         headers = {"Content-Type": "application/json", "APP": "Google Antigravity"}
         if config["apiKey"]:
             headers["Authorization"] = f"Bearer {config['apiKey']}"
@@ -146,9 +173,10 @@ def main():
     artifact_id = args.artifact_id or extract_frontmatter_field(content, ("id", "artifact_id", "source_id"))
     title = args.title or extract_frontmatter_field(content, ("title", "name"))
     config = load_config()
+    effective_space = args.space_id or config.get("space")
 
     if not artifact_id and title:
-        existing = search_existing_artifact(config, title)
+        existing = search_existing_artifact(config, title, space_id=effective_space)
         if existing:
             artifact_id = existing.get("id") or existing.get("source_id")
             print(
@@ -163,11 +191,11 @@ def main():
 
     print(f"Updating Library Artifact '{artifact_id}' in-place...")
     try:
-        res_content = update_artifact_content(config, artifact_id, content, space_id=args.space_id)
+        res_content = update_artifact_content(config, artifact_id, content, space_id=effective_space)
         print(f"Content updated for artifact '{artifact_id}'.")
 
         if args.reparse:
-            update_artifact_reparse(config, artifact_id, space_id=args.space_id)
+            update_artifact_reparse(config, artifact_id, space_id=effective_space)
             print(f"Reparse triggered for artifact '{artifact_id}'.")
 
         print("\n" + "=" * 50)

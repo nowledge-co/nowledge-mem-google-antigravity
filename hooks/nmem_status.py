@@ -77,7 +77,79 @@ def main():
         except Exception:
             pass
 
-    # 5. Format into beautiful Markdown
+    # 5. Check in-flight background tasks
+    tasks_info = None
+    tasks_res = None
+    if not nmem_shared.is_backend_unreachable():
+        try:
+            tasks_res = nmem_shared.http_request("/agent/tasks/overview", method="GET", timeout=2.0)
+        except Exception:
+            tasks_res = None
+
+    if isinstance(tasks_res, dict) and not tasks_res.get("error"):
+        agent_running = tasks_res.get("agent_running", True)
+        running = tasks_res.get("running")
+        queued = tasks_res.get("queued")
+        scheduled_once = tasks_res.get("scheduled_once")
+        recurring = tasks_res.get("recurring")
+
+        # Validate that all lanes are lists of mapping objects
+        lanes = [running, queued, scheduled_once, recurring]
+        if all(isinstance(lane, list) and all(isinstance(task, dict) for task in lane) for lane in lanes):
+            total_tasks = len(running) + len(queued) + len(scheduled_once) + len(recurring)
+            if total_tasks == 0:
+                if not agent_running:
+                    tasks_info = "*Background task scheduler is currently disabled on this server.*"
+                else:
+                    tasks_info = "*Nothing in flight.*"
+            else:
+                task_lines = []
+                if running:
+                    task_lines.append("**Running:**")
+                    for t in running:
+                        lane = t.get("lane") or t.get("kind") or "task"
+                        title = t.get("title") or t.get("id") or "Untitled"
+                        started = f" (started {t['started_at']})" if t.get("started_at") else ""
+                        task_lines.append(f"- 🏃 `[{lane}]` {title}{started}")
+                if queued:
+                    task_lines.append("**Queued:**")
+                    for t in queued:
+                        lane = t.get("lane") or t.get("kind") or "task"
+                        title = t.get("title") or t.get("id") or "Untitled"
+                        task_lines.append(f"- ⏳ `[{lane}]` {title}")
+                if scheduled_once:
+                    task_lines.append("**Scheduled Once:**")
+                    for t in scheduled_once:
+                        lane = t.get("lane") or t.get("kind") or "task"
+                        title = t.get("title") or t.get("id") or "Untitled"
+                        next_run = f" (next: {t['next_run_at']})" if t.get("next_run_at") else ""
+                        task_lines.append(f"- 📅 `[{lane}]` {title}{next_run}")
+                if recurring:
+                    task_lines.append("**Recurring:**")
+                    for t in recurring:
+                        lane = t.get("lane") or t.get("kind") or "task"
+                        title = t.get("title") or t.get("id") or "Untitled"
+                        status = f" `[{t['status']}]`" if t.get("status") else ""
+                        next_run = f" (next: {t['next_run_at']})" if t.get("next_run_at") else ""
+                        task_lines.append(f"- 🔄 `[{lane}]` {title}{status}{next_run}")
+                tasks_info = "\n".join(task_lines)
+
+    if tasks_info is None:
+        # CLI fallback for tasks
+        try:
+            cli_tasks = nmem_shared.run_nmem_command(["tasks"], timeout=5)
+            if cli_tasks.returncode == 0:
+                raw_tasks = cli_tasks.stdout.strip()
+                if raw_tasks and "Nothing in flight" not in raw_tasks:
+                    tasks_info = f"```\n{raw_tasks}\n```"
+                else:
+                    tasks_info = "*Nothing in flight.*"
+            else:
+                tasks_info = "*Background task status unavailable.*"
+        except Exception:
+            tasks_info = "*Background task status unavailable.*"
+
+    # 6. Format into beautiful Markdown
     conn_status = "🟢 Connected" if nmem_connected else "🔴 Disconnected"
 
     if thread_synced:
@@ -123,6 +195,9 @@ def main():
 - **Current Thread Sync Status**: {sync_status}
 
 {thread_info_block}
+
+#### ⏱️ In-Flight Background Tasks
+{tasks_info}
 
 #### 📦 Local Offline Queue
 {queue_info}

@@ -279,6 +279,11 @@ Use `trigger_memory_catchup` strictly for memory health maintenance, decay re-sc
 
 ## Status & Diagnostics
 
+To check integration status, workspace environment, session synchronizations, and in-flight background work:
+- Run the native status command: `python3 hooks/nmem_entrypoint.py status` (auto-allowed without permission prompts).
+- Inspect in-flight background automations, scheduled reminders, and background lanes with `nmem tasks` (or query `GET /agent/tasks/overview`).
+- For ontology types and entity inspection, use `ontology_read` or `entity_search` over MCP (or `nmem g` / `nmem fs ls /wiki/`).
+
 ## Dynamic Skill Discovery & On-Demand Loading (`/nmem-skill-load`)
 
 When the user runs `/nmem-skill-load <query>` or when Antigravity discovers an unhandled domain task (e.g., Makefile optimizations, Fedora RPM packaging, Flatpak setups, database migrations) where a relevant skill exists on Nowledge Mem:
