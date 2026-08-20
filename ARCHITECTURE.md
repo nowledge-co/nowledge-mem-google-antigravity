@@ -55,8 +55,8 @@ flowchart TD
 ### 2. PreToolUse Gate Hook (`hooks/nmem-gate.py`)
 - **Trigger**: Evaluated before executing `call_mcp_tool`, `mcp_nowledge-mem_*`, or `run_command`.
 - **Policy Enforcement**:
-  - **Auto-Allow**: Read-only tools (`mem_fs`, `memory_search`, `thread_search`, `query_library`, `explore_graph`, `get_memory_by_id`, etc.) return `{"decision": "allow"}` with permission overrides to prevent terminal prompt interruptions.
-  - **Force Confirm**: Destructive operations (`memory_delete`, `thread_delete`, `memory_relation_delete`) return `{"decision": "force_ask"}`.
+  - **Auto-Allow**: Read-only tools (`mem_fs`, `memory_search`, `thread_search`, `query_library`, `explore_graph`, `get_memory_by_id`, `ontology_read`, `entity_search`, `list_timeline_reviews`, etc.) return `{"decision": "allow"}` with permission overrides to prevent prompt interruptions; validated status commands (`python3 hooks/nmem_status.py`, `python3 hooks/nmem_entrypoint.py status`, `nmem status`, `nmem tasks`) return `{"decision": "allow", "reason": "..."}`.
+  - **Force Confirm**: Destructive operations (`memory_delete`, `thread_delete`, `memory_relation_delete`, `entity_delete`, `label_delete`) return `{"decision": "force_ask"}`.
   - **Intent-Based Write Allow**: Write tools (`memory_add`, `memory_update`, etc.) check recent conversation steps for intent keywords (`save`, `remember`, `store`, `nmem`, `distill`, `handoff`). If found, returns `{"decision": "allow"}`.
   - **Memory Health Catchup Debounce & Gating**: `trigger_memory_catchup` checks for prior execution in the current session directory (`<session_dir>/.nmem/catchup_history.json`) and a 1-hour global cooldown. Redundant calls are auto-suppressed with an explanation; new calls require explicit user maintenance intent (`catch up`, `rescore`, `decay`, `compaction`, `maintenance`) to auto-allow or prompt confirmation.
 

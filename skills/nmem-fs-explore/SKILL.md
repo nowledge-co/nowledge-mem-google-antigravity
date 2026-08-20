@@ -24,7 +24,7 @@ Nowledge FS projects data as a virtual file tree:
 
 ## Best Practices
 
-1. **Start with capabilities**: Run `capabilities` to see limits and supported features if you are unsure of the server version or endpoints.
+1. **Start with capabilities**: Run `capabilities --json` (or `mem_fs` caps) to see roots, limits, and supported verbs.
 2. **Orient with metadata (`stat` & `ls`)**:
    - Run `ls PATH` to explore directories and find files.
    - Run `stat PATH` to inspect metadata (type, size, update time) without loading file bodies. Always do this for large threads/documents.
@@ -32,25 +32,30 @@ Nowledge FS projects data as a virtual file tree:
    - For long threads or files, do not load the whole body. Use windowed reading: `cat PATH --line START --lines COUNT` to inspect only the required window.
 4. **Search and Locate**:
    - Use `recall QUERY --in /memories` for semantic searching of memories.
-   - Use `find [PATH] --unit-type TYPE --label LABEL` to search by structure/metadata.
-   - Use `grep QUERY [PATH]` for exact-string matching across memories, threads, and artifacts.
-5. **Write canonical files**: Write memories only to `/memories/by-id/<id>.memory.md` (or let the server assign one if writing a new memory). Use `memory_add` or standard CLI wrappers.
+   - Use `find PATH --unit-type TYPE --label LABEL --since YYYY-MM-DD --mentions ENTITY` to search by structure/metadata.
+   - Use `grep QUERY PATH` for exact-string matching across memories, threads, and artifacts (case-insensitive by default; add `-E` for regex or `--case-sensitive`).
+   - Use `grep QUERY PATH --jsonl` to stream matching objects with both `path` and `line` numbers for automated piping into `cat`.
+5. **Write canonical files**:
+   - Canonical writable paths (`/memories/by-id/<id>.memory.md`) can be written or deleted.
+   - Alias and derived paths (`/memories/by-label/`, `/memories/by-type/`, `/memories/by-date/`) stay read-only. Edit memories through their canonical `/memories/by-id/...` path.
 6. **Knowledge & Wiki Export**:
    - Inspect `/wiki/` entities, topics, and crystal pages to view compiled reference knowledge.
    - Use Open Knowledge Format (OKF) or Wiki exports (`/api/library/okf-export` or `/api/library/wiki-export`) to bundle synthesized knowledge graphs into portable Markdown sets for the local workspace.
 
 ## Commands Reference
 
-Run the MCP tool `mem_fs` with the `command` argument:
+Run the MCP tool `mem_fs` with the `command` argument (or `nmem fs <command>` in CLI):
 
-- `capabilities` or `caps`: Discover capabilities.
+- `capabilities` or `caps`: Discover roots, verbs, limits, and flags.
 - `ls /memories/by-type/procedure`: List directory contents.
 - `ls /wiki/`: List compiled wiki entities, topics, and crystals.
-- `stat /threads/by-id/<thread-id>.thread.jsonl`: Check metadata/line count.
+- `stat /threads/by-id/<thread-id>.thread.jsonl`: Check metadata/line count without reading body.
 - `cat /memories/by-id/<uuid>.memory.md`: Read file body and frontmatter.
-- `cat /threads/by-id/<thread-id>.thread.jsonl --line 50 --lines 20`: Read a window of a thread.
+- `cat /threads/by-id/<thread-id>.thread.jsonl --line 50 --lines 20`: Read a 20-line window of a thread.
 - `cat /wiki/<entity-or-topic>.md`: Inspect synthesized wiki article.
-- `find /memories --unit-type decision --label project-x`: Find specific memories.
-- `grep "regex-query" /threads --regex`: Perform regex search.
+- `find /memories --unit-type decision --label project-x --since 2026-01-01`: Find specific memories.
+- `grep "JWT rotation" /threads --jsonl`: Exact string search with path and line numbers.
+- `grep -E "JWT|token" /threads`: Regex search across thread conversations.
 - `recall "session state strategy" --in /memories`: Find relevant memories semantically.
-- `write /memories/by-id/<id>.memory.md --body "..."`: Write a memory.
+- `write /memories/by-id/<id>.memory.md --body "..."`: Write a canonical memory.
+- `rm /memories/by-id/<id>.memory.md`: Delete a canonical memory (always require explicit user confirmation before deletion).

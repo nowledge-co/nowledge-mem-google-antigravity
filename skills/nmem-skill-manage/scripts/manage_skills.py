@@ -9,13 +9,37 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# Add hooks directory to sys.path to leverage unified config precedence
+for candidate in [
+    Path(__file__).resolve().parent.parent.parent.parent / "hooks",
+    Path(__file__).resolve().parent.parent / "hooks",
+    Path(__file__).resolve().parent / "hooks",
+]:
+    if candidate.is_dir() and (candidate / "nmem_shared.py").exists():
+        sys.path.insert(0, str(candidate))
+        break
+
+try:
+    import nmem_shared
+except ImportError:
+    nmem_shared = None
+
 
 def load_config():
+    if nmem_shared is not None:
+        api_url, api_key = nmem_shared.get_effective_config()
+        space = nmem_shared.resolve_space()
+        return {"apiUrl": api_url, "apiKey": api_key or "", "space": space}
+
     env_url = os.environ.get("NMEM_API_URL", "").strip()
     env_key = os.environ.get("NMEM_API_KEY", "").strip() or None
     ignore_host = os.environ.get("NMEM_IGNORE_HOST_CONFIG", "").strip().lower() in ("1", "true", "yes")
 
-    config = {"apiUrl": env_url.rstrip("/") if env_url else "http://127.0.0.1:14242", "apiKey": env_key or ""}
+    config = {
+        "apiUrl": env_url.rstrip("/") if env_url else "http://127.0.0.1:14242",
+        "apiKey": env_key or "",
+        "space": "default",
+    }
 
     if not ignore_host:
         custom_cfg = os.environ.get("NMEM_CONFIG_PATH", "").strip()
@@ -26,12 +50,15 @@ def load_config():
                     data = json.load(f)
                     file_url = str(data.get("apiUrl", "")).strip().rstrip("/")
                     file_key = str(data.get("apiKey", "")).strip() or ""
+                    file_space = str(data.get("space", "") or data.get("space_id", "")).strip()
 
                     if not env_url and file_url:
                         config["apiUrl"] = file_url
                     if not env_key and file_key:
                         if not env_url or env_url.rstrip("/") == file_url:
                             config["apiKey"] = file_key
+                    if file_space:
+                        config["space"] = file_space
             except Exception as e:
                 if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                     sys.stderr.write(f"Warning: Failed to load config from {config_file}: {e}\n")

@@ -19,15 +19,29 @@ The recommended setup is simple and stable: Google Antigravity on top, MCP for d
 - [Nowledge Mem](https://mem.nowledge.co) running locally, or a reachable remote Nowledge Mem server
 - `nmem` CLI in your `PATH` (or installed via standard Linux packages at `/usr/lib/nowledge-mem/nmem` / `/usr/lib64/nowledge-mem/nmem`)
 
+You can install the standalone `nmem` CLI via PyPI, Fedora COPR, or Arch AUR:
+```bash
+# PyPI
+pip install nmem-cli
+
+# Fedora / RPM-based Linux (COPR)
+sudo dnf copr enable abn/nowledge-mem
+sudo dnf install nowledge-mem-cli
+
+# Arch Linux (AUR)
+yay -S nmem-cli
+```
+
 If Nowledge Mem is already running on the same machine through the desktop app, install the bundled CLI from **Settings -> Preferences -> Developer Tools -> Install CLI**. That gives Antigravity direct access to the local Mem instance. The plugin automatically resolves system installation paths if sandboxed subshells restrict user `$PATH` symlinks.
 
-Verify connection:
+Verify connection and in-flight background tasks:
 
 ```bash
 nmem status
+nmem tasks
 ```
 
-For the default same-machine setup, `nmem status` should show `http://127.0.0.1:14242 (default)`.
+For the default same-machine setup, `nmem status` should show `http://127.0.0.1:14242 (default)`. Historical Antigravity conversation sessions can also be backfilled directly using `nmem t sync --from antigravity`.
 
 ## Install
 

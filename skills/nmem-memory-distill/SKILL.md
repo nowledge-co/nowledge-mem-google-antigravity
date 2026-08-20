@@ -24,9 +24,11 @@ Save proactively when the conversation produces a durable fact, preference, deci
    - Format drafted memories using standard markdown header structure and list blocks (instead of tables or Alerts) to preserve paragraphs, lists, and code blocks, ensuring compatibility with nested code blocks:
      ```markdown
      ### Card: [Title of Memory]
-     - **Unit Type**: `learning`
+     - **Unit Type**: `learning` (or `fact`, `preference`, `decision`, `plan`, `procedure`, `context`, `event`)
      - **Importance**: `0.8`
      - **Space**: `lemonade`
+     - **When / Event Time**: `past` / `2026-08` (bi-temporal context if applicable)
+     - **Provenance**: `thread: <thread-id>`, `msg: <msg-id>`, `range: 12:18` (if distilled from a thread)
 
      **Content**:
      [Rich markdown contents, paragraphs, lists, and fenced code blocks are written natively here]

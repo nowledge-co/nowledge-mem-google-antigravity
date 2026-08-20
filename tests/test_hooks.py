@@ -35,6 +35,13 @@ manage_skills = import_module_from_path(
     "manage_skills", str(HOOKS_DIR.parent / "skills" / "nmem-skill-manage" / "scripts" / "manage_skills.py")
 )
 update_artifact = import_module_from_path("update_artifact", str(HOOKS_DIR.parent / "scripts" / "update_artifact.py"))
+update_working_memory = import_module_from_path(
+    "update_working_memory", str(HOOKS_DIR.parent / "scripts" / "update_working_memory.py")
+)
+manage_rules = import_module_from_path("manage_rules", str(HOOKS_DIR.parent / "scripts" / "manage_rules.py"))
+propose_skill = import_module_from_path(
+    "propose_skill", str(HOOKS_DIR.parent / "skills" / "nmem-skill-propose" / "scripts" / "propose_skill.py")
+)
 
 
 @patch("os.access", return_value=True)
@@ -232,8 +239,9 @@ def test_save_unsynced_session(mock_read, mock_write, mock_mkdir, mock_exists, m
 
 @patch("subprocess.Popen")
 def test_retry_unsynced_sessions_async(mock_popen):
-    nmem_shared.retry_unsynced_sessions_async()
-    mock_popen.assert_called_once()
+    with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {"HOME": tmpdir}):
+        nmem_shared.retry_unsynced_sessions_async()
+        mock_popen.assert_called_once()
 
 
 def test_catchup_debounce():
@@ -649,32 +657,63 @@ def test_session_end_offline_fallback(
 @patch("sys.stdout.write")
 @patch("sys.stdout.flush")
 def test_nmem_gate_auto_allow_nmem_status(mock_flush, mock_write, mock_input):
-    mock_input.return_value = {
-        "toolCall": {"name": "run_command", "args": {"CommandLine": "python3 hooks/nmem_status.py"}},
-        "conversationId": "conv-123",
-    }
+    safe_commands = [
+        "python3 hooks/nmem_status.py",
+        "python hooks/nmem_status.py",
+        "python3 hooks/nmem_entrypoint.py status",
+        "nmem status",
+        "nmem status --json",
+        "nmem tasks",
+        "nmem tasks --json",
+        "nmem_status.py --conv-id test-conv",
+    ]
+    for cmd in safe_commands:
+        mock_write.reset_mock()
+        mock_input.return_value = {
+            "toolCall": {"name": "run_command", "args": {"CommandLine": cmd}},
+            "conversationId": "conv-123",
+        }
 
-    with patch.object(sys, "argv", ["nmem-gate.py"]):
-        nmem_gate.main()
-        mock_write.assert_called_once()
-        payload = json.loads(mock_write.call_args[0][0])
-        assert payload["decision"] == "allow"
+        with patch.object(sys, "argv", ["nmem-gate.py"]):
+            nmem_gate.main()
+            mock_write.assert_called_once()
+            payload = json.loads(mock_write.call_args[0][0])
+            assert payload["decision"] == "allow"
+            assert payload["reason"] == "Auto-allowing validated plugin status and diagnostic command"
+
+
+def test_is_safe_status_command_rejection():
+    dangerous_or_unrelated = [
+        "nmem status && rm -rf /",
+        "nmem tasks; whoami",
+        "python3 hooks/nmem_status.py | sh",
+        "nmem status > /tmp/out",
+        "nmem memories list",
+        "nmem tasks --unknown-flag",
+        "python3 hooks/nmem_entrypoint.py unknown",
+        "",
+        None,
+    ]
+    for cmd in dangerous_or_unrelated:
+        assert not nmem_gate.is_safe_status_command(cmd)
 
 
 @patch("nmem_gate.read_hook_input")
 @patch("sys.stdout.write")
 @patch("sys.stdout.flush")
 def test_nmem_gate_read_tool(mock_flush, mock_write, mock_input):
-    mock_input.return_value = {
-        "toolCall": {"name": "call_mcp_tool", "args": {"ServerName": "nowledge-mem", "ToolName": "memory_search"}},
-        "conversationId": "conv-123",
-    }
+    for tool in ["memory_search", "ontology_read", "entity_search"]:
+        mock_write.reset_mock()
+        mock_input.return_value = {
+            "toolCall": {"name": "call_mcp_tool", "args": {"ServerName": "nowledge-mem", "ToolName": tool}},
+            "conversationId": "conv-123",
+        }
 
-    with patch.object(sys, "argv", ["nmem-gate.py"]):
-        nmem_gate.main()
-        mock_write.assert_called_once()
-        payload = json.loads(mock_write.call_args[0][0])
-        assert payload["decision"] == "allow"
+        with patch.object(sys, "argv", ["nmem-gate.py"]):
+            nmem_gate.main()
+            mock_write.assert_called_once()
+            payload = json.loads(mock_write.call_args[0][0])
+            assert payload["decision"] == "allow"
 
 
 @patch("nmem_gate.read_hook_input")
@@ -883,12 +922,114 @@ def test_post_invocation_throttles_warning_when_already_emitted(
 def test_nmem_status_connected(mock_write, mock_run_cmd):
     mock_run_cmd.return_value = MagicMock(returncode=0, stdout="Connected to Nowledge Mem server", stderr="")
 
-    with patch("nmem_shared.resolve_space", return_value="default"), patch.object(sys, "argv", ["nmem_status.py"]):
+    with (
+        patch("nmem_shared.resolve_space", return_value="default"),
+        patch(
+            "nmem_shared.http_request",
+            return_value={"agent_running": True, "running": [], "queued": [], "scheduled_once": [], "recurring": []},
+        ),
+        patch.object(sys, "argv", ["nmem_status.py"]),
+    ):
         nmem_status.main()
         assert mock_write.call_count >= 1
         written = "".join([c[0][0] for c in mock_write.call_args_list])
         assert "🟢 Connected" in written
         assert "| **Active Space (Workspace)** | `default` |" in written
+        assert "#### ⏱️ In-Flight Background Tasks" in written
+        assert "*Nothing in flight.*" in written
+
+
+@patch("nmem_shared.run_nmem_command")
+@patch("sys.stdout.write")
+def test_nmem_status_with_in_flight_tasks(mock_write, mock_run_cmd):
+    mock_run_cmd.return_value = MagicMock(returncode=0, stdout="Connected to Nowledge Mem server", stderr="")
+    tasks_data = {
+        "agent_running": True,
+        "running": [
+            {
+                "kind": "scheduler",
+                "id": "t-1",
+                "title": "Community detection",
+                "lane": "community_detection",
+                "started_at": "2026-08-20T18:00:00Z",
+            }
+        ],
+        "queued": [{"kind": "scheduler", "id": "t-2", "title": "Graph compaction", "lane": "compaction"}],
+        "scheduled_once": [
+            {
+                "kind": "reminder",
+                "id": "r-1",
+                "title": "Staging check",
+                "lane": "scheduled_follow_up",
+                "next_run_at": "2026-08-21T09:00:00Z",
+            }
+        ],
+        "recurring": [
+            {
+                "kind": "recurring",
+                "id": "rec-1",
+                "title": "Daily briefing",
+                "lane": "recurring_task",
+                "status": "active",
+                "next_run_at": "2026-08-21T07:00:00Z",
+            }
+        ],
+    }
+
+    with (
+        patch("nmem_shared.resolve_space", return_value="default"),
+        patch("nmem_shared.http_request", return_value=tasks_data),
+        patch.object(sys, "argv", ["nmem_status.py"]),
+    ):
+        nmem_status.main()
+        assert mock_write.call_count >= 1
+        written = "".join([c[0][0] for c in mock_write.call_args_list])
+        assert "#### ⏱️ In-Flight Background Tasks" in written
+        assert "🏃 `[community_detection]` Community detection (started 2026-08-20T18:00:00Z)" in written
+        assert "⏳ `[compaction]` Graph compaction" in written
+        assert "📅 `[scheduled_follow_up]` Staging check (next: 2026-08-21T09:00:00Z)" in written
+        assert "🔄 `[recurring_task]` Daily briefing `[active]` (next: 2026-08-21T07:00:00Z)" in written
+
+
+@patch("nmem_shared.run_nmem_command")
+@patch("sys.stdout.write")
+def test_nmem_status_malformed_lanes(mock_write, mock_run_cmd):
+    mock_run_cmd.return_value = MagicMock(returncode=0, stdout="Nothing in flight.\n", stderr="")
+    malformed_tasks_data = {
+        "agent_running": True,
+        "running": "not-a-list",
+        "queued": [],
+        "scheduled_once": [],
+        "recurring": [],
+    }
+
+    with (
+        patch("nmem_shared.resolve_space", return_value="default"),
+        patch("nmem_shared.http_request", return_value=malformed_tasks_data),
+        patch.object(sys, "argv", ["nmem_status.py"]),
+    ):
+        nmem_status.main()
+        assert mock_write.call_count >= 1
+        written = "".join([c[0][0] for c in mock_write.call_args_list])
+        assert "#### ⏱️ In-Flight Background Tasks" in written
+        assert "*Nothing in flight.*" in written
+
+
+@patch("nmem_shared.run_nmem_command")
+@patch("sys.stdout.write")
+def test_nmem_status_fallback_unavailable(mock_write, mock_run_cmd):
+    mock_run_cmd.return_value = MagicMock(returncode=1, stdout="", stderr="daemon offline")
+
+    with (
+        patch("nmem_shared.resolve_space", return_value="default"),
+        patch("nmem_shared.http_request", return_value={"error": "offline"}),
+        patch.object(sys, "argv", ["nmem_status.py"]),
+    ):
+        nmem_status.main()
+        assert mock_write.call_count >= 1
+        written = "".join([c[0][0] for c in mock_write.call_args_list])
+        assert "#### ⏱️ In-Flight Background Tasks" in written
+        assert "*Background task status unavailable.*" in written
 
 
 def test_sync_learnings_rules():
@@ -1019,6 +1160,62 @@ def test_manage_skills_badges():
     assert manage_skills.compute_trust_badge({"passed_tests_count": 1}) == "Checked"
     assert manage_skills.compute_trust_badge({"stage": "active"}) == "Checked"
     assert manage_skills.compute_trust_badge({"stage": "candidate"}) == "Draft"
+
+
+def test_unified_script_config_resolution():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        local_cfg = tmp_path / ".config.json"
+        local_cfg.write_text(
+            json.dumps({"apiUrl": "http://127.0.0.1:19999", "apiKey": "local_key", "space": "local_space"}),
+            encoding="utf-8",
+        )
+
+        test_doc = tmp_path / "doc.md"
+        test_doc.write_text("---\nid: src_test\ntitle: Sample Doc\n---\nHello", encoding="utf-8")
+
+        with (
+            patch.dict(os.environ, {"HOME": tmpdir}, clear=True),
+            patch("pathlib.Path.cwd", return_value=tmp_path),
+            patch("os.getcwd", return_value=str(tmp_path)),
+            patch("urllib.request.urlopen") as mock_urlopen,
+        ):
+            modules = [
+                update_artifact,
+                update_working_memory,
+                manage_rules,
+                load_skill,
+                manage_skills,
+                propose_skill,
+            ]
+            for mod in modules:
+                cfg = mod.load_config()
+                assert cfg["apiUrl"] == "http://127.0.0.1:19999"
+                assert cfg["apiKey"] == "local_key"
+                assert cfg["space"] == "local_space"
+
+            # Verify update_artifact passes effective_space when no --space-id is provided on CLI
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = b'{"status": "success", "id": "src_test"}'
+            mock_resp.__enter__.return_value = mock_resp
+            mock_urlopen.return_value = mock_resp
+
+            with patch.object(sys, "argv", ["update_artifact.py", str(test_doc)]):
+                update_artifact.main()
+                assert mock_urlopen.call_count >= 1
+                req = mock_urlopen.call_args[0][0]
+                assert "space_id=local_space" in req.get_full_url()
+
+            # Verify update_working_memory passes effective_space when no --space-id is provided on CLI
+            mock_urlopen.reset_mock()
+            mock_resp.read.return_value = b'{"status": "ok", "size_bytes": 5}'
+            with patch.object(sys, "argv", ["update_working_memory.py", "--content", "Working memory test"]):
+                update_working_memory.main()
+                assert mock_urlopen.call_count >= 1
+                req = mock_urlopen.call_args[0][0]
+                assert "space_id=local_space" in req.get_full_url()
+                payload = json.loads(req.data.decode("utf-8"))
+                assert payload.get("space_id") == "local_space"
 
 
 def load_tests(loader, tests, pattern):
