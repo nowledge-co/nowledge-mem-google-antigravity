@@ -20,7 +20,7 @@ def read_nmem(args, keys):
         if "--space" in args:
             idx = args.index("--space")
             if idx + 1 < len(args):
-                endpoint += f"&space={args[idx+1]}"
+                endpoint += f"&space={args[idx + 1]}"
         res = nmem_shared.http_request(endpoint, method="GET", timeout=1.5)
         if isinstance(res, dict):
             for key in keys:
@@ -36,7 +36,7 @@ def read_nmem(args, keys):
         if "--space" in args:
             idx = args.index("--space")
             if idx + 1 < len(args):
-                endpoint += f"?space={args[idx+1]}"
+                endpoint += f"?space={args[idx + 1]}"
         res = nmem_shared.http_request(endpoint, method="GET", timeout=1.5)
         if isinstance(res, dict):
             for key in keys:
