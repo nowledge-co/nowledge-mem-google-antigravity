@@ -172,9 +172,6 @@ def main():
                 pass
 
         # Ask user confirmation if no explicit intent detected
-        nmem_shared.record_catchup_execution(
-            horizon, conv_id, session_dir=artifact_dir, transcript_path=transcript_path
-        )
         emit(
             {
                 "decision": "ask",
