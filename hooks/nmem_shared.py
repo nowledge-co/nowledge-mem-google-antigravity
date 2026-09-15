@@ -947,11 +947,24 @@ def retry_unsynced_sessions() -> None:
     try:
         with FileLock(lock_path):
             try:
-                queue = json.loads(queue_path.read_text(encoding="utf-8"))
+                raw_text = queue_path.read_text(encoding="utf-8").strip()
+                queue = json.loads(raw_text) if raw_text else {}
             except Exception:
+                try:
+                    quarantine_path = queue_path.with_name(
+                        f"{queue_path.stem}.corrupt-{time.time_ns()}{queue_path.suffix}"
+                    )
+                    queue_path.replace(quarantine_path)
+                except Exception as error:
+                    if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+                        sys.stderr.write(f"Warning: Failed to quarantine corrupt queue {queue_path}: {error}\n")
                 return
 
             if not queue:
+                try:
+                    queue_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
                 return
 
             updated_queue = dict(queue)
@@ -1383,8 +1396,10 @@ def retry_unsynced_sessions_async(cooldown_seconds: float = 15.0) -> None:
                     parts = content.split(":")
                     pid = int(parts[0]) if parts[0].isdigit() else 0
                     spawn_time = float(parts[1]) if len(parts) > 1 and parts[1].replace(".", "", 1).isdigit() else 0.0
-                    # If process is still alive and was started recently, or was spawned less than cooldown_seconds ago
-                    if pid > 0 and _is_pid_alive(pid) and (now - spawn_time) < 120.0:
+                    # A live worker owns the retry lane. Bound this trust window
+                    # so an OS-reused PID cannot suppress retries forever after
+                    # a worker crashes without cleaning up its marker.
+                    if pid > 0 and _is_pid_alive(pid) and (now - spawn_time) < 900.0:
                         return
                     if (now - spawn_time) < cooldown_seconds:
                         return
@@ -1523,7 +1538,7 @@ def should_allow_catchup(
                     mins_ago = max(1, int((now - last_time) / 60))
                     return (
                         False,
-                        f"Memory catch-up for horizon '{horizon}' was already executed {mins_ago}m ago (cooldown is {int(cooldown_seconds/60)}m).",
+                        f"Memory catch-up for horizon '{horizon}' was already executed {mins_ago}m ago (cooldown is {int(cooldown_seconds / 60)}m).",
                     )
         except Exception:
             pass

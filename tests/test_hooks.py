@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, mock_open, patch
 
@@ -244,6 +245,68 @@ def test_retry_unsynced_sessions_async(mock_popen):
         mock_popen.assert_called_once()
 
 
+def test_retry_unsynced_sessions_cleans_empty_file():
+    with (
+        tempfile.TemporaryDirectory() as tmpdir,
+        patch.dict(os.environ, {"HOME": tmpdir}),
+    ):
+        queue_file = nmem_shared.get_unsynced_queue_path()
+        queue_file.parent.mkdir(parents=True, exist_ok=True)
+        queue_file.write_text("{}", encoding="utf-8")
+        assert queue_file.exists()
+
+        nmem_shared.retry_unsynced_sessions()
+        assert not queue_file.exists()
+
+
+def test_retry_unsynced_sessions_quarantines_corrupt_file():
+    with (
+        tempfile.TemporaryDirectory() as tmpdir,
+        patch.dict(os.environ, {"HOME": tmpdir}),
+    ):
+        queue_file = nmem_shared.get_unsynced_queue_path()
+        queue_file.parent.mkdir(parents=True, exist_ok=True)
+        queue_file.write_text("NOT VALID JSON", encoding="utf-8")
+        assert queue_file.exists()
+
+        nmem_shared.retry_unsynced_sessions()
+        assert not queue_file.exists()
+        quarantine_files = list(queue_file.parent.glob("unsynced.corrupt-*.json"))
+        assert len(quarantine_files) == 1
+        assert quarantine_files[0].read_text(encoding="utf-8") == "NOT VALID JSON"
+
+
+@patch("nmem_shared.http_request")
+def test_retry_unsynced_sessions_success_unlinks_queue(mock_http):
+    with (
+        tempfile.TemporaryDirectory() as tmpdir,
+        patch.dict(os.environ, {"HOME": tmpdir}),
+    ):
+        queue_file = nmem_shared.get_unsynced_queue_path()
+        queue_file.parent.mkdir(parents=True, exist_ok=True)
+        queue_file.write_text(
+            json.dumps(
+                {
+                    "conv-1": {
+                        "conversation_id": "conv-1",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "title": "Title",
+                        "space": "default",
+                        "host_agent_id": "host",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        mock_http.side_effect = [
+            {"error": "not_found"},
+            {"id": "conv-1", "title": "Title"},
+        ]
+        assert queue_file.exists()
+        nmem_shared.retry_unsynced_sessions()
+        assert not queue_file.exists()
+
+
 def test_catchup_debounce():
     with tempfile.TemporaryDirectory() as tmpdir:
         session_dir = Path(tmpdir) / "session_1"
@@ -428,6 +491,7 @@ def test_retry_unsynced_sessions_async_spawn_guard():
         with (
             patch.dict(os.environ, {"HOME": tmpdir}),
             patch("subprocess.Popen") as mock_popen,
+            patch("nmem_shared._is_pid_alive", return_value=True),
         ):
             mock_proc = MagicMock()
             mock_proc.pid = 12345
@@ -437,9 +501,25 @@ def test_retry_unsynced_sessions_async_spawn_guard():
             nmem_shared.retry_unsynced_sessions_async(cooldown_seconds=10.0)
             assert mock_popen.call_count == 1
 
-            # Second immediate spawn is suppressed by cooldown
+            # Second spawn is suppressed because PID is alive
             nmem_shared.retry_unsynced_sessions_async(cooldown_seconds=10.0)
             assert mock_popen.call_count == 1
+
+
+def test_retry_unsynced_sessions_async_does_not_trust_reused_pid_forever():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache_dir = Path(tmpdir) / ".nowledge-mem" / "plugins" / "antigravity" / "cache"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "retry_worker.pid").write_text(f"12345:{time.time() - 901}", encoding="utf-8")
+        with (
+            patch.dict(os.environ, {"HOME": tmpdir}),
+            patch("subprocess.Popen") as mock_popen,
+            patch("nmem_shared._is_pid_alive", return_value=True),
+        ):
+            mock_popen.return_value = MagicMock(pid=54321)
+            nmem_shared.retry_unsynced_sessions_async(cooldown_seconds=10.0)
+
+        mock_popen.assert_called_once()
 
 
 @patch("pathlib.Path.is_file", return_value=True)
@@ -791,7 +871,7 @@ def test_nmem_gate_trigger_memory_catchup_without_intent(mock_flush, mock_write,
     ):
         nmem_gate.main()
         mock_should.assert_called_once_with("3", "conv-test-catchup", session_dir=None, transcript_path=None)
-        mock_record.assert_called_once_with("3", "conv-test-catchup", session_dir=None, transcript_path=None)
+        mock_record.assert_not_called()
         written = "".join(call.args[0] for call in mock_write.call_args_list)
         payload = json.loads(written)
         assert payload["decision"] == "ask"

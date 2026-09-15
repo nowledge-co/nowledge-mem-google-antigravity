@@ -366,7 +366,7 @@ def install_command(config, skill_id, workspace_root, ignore_git):
                         if check.get("stage") == "draft":
                             compiled = True
                             break
-                        print(f"Waiting for compilation (attempt {attempt+1}/{max_attempts})...")
+                        print(f"Waiting for compilation (attempt {attempt + 1}/{max_attempts})...")
 
                     if not compiled:
                         sys.stderr.write("Error: Skill compilation timed out.\n")

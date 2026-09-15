@@ -41,9 +41,17 @@ async function main() {
   assertString(manifest.version, 'manifest.version');
   assertString(manifest.description, 'manifest.description');
 
-  const isWorktree = pluginRoot.includes('/worktrees/') || pluginRoot.includes('\\worktrees\\');
-  if (manifest.name !== pluginDirName && pluginDirName !== 'nmem' && pluginDirName !== 'nowledge-mem' && !pluginDirName.startsWith('verify_') && !pluginDirName.includes('nowledge-mem') && !isWorktree) {
-    fail(`manifest.name (${manifest.name}) must match directory name (or be "nmem", "nowledge-mem", start with "verify_", contain "nowledge-mem", or be under a "worktrees/" path), but got "${pluginDirName}"`);
+  let isWorktree = pluginRoot.includes('/worktrees/') || pluginRoot.includes('\\worktrees\\');
+  if (!isWorktree) {
+    try {
+      const gitRev = spawnSync('git', ['rev-parse', '--git-dir'], { cwd: pluginRoot, encoding: 'utf8' });
+      if (gitRev.status === 0 && gitRev.stdout && (gitRev.stdout.includes('.git/worktrees/') || gitRev.stdout.includes('.git\\worktrees\\'))) {
+        isWorktree = true;
+      }
+    } catch (e) {}
+  }
+  if (manifest.name !== pluginDirName && pluginDirName !== 'nmem' && pluginDirName !== 'nowledge-mem' && !isWorktree) {
+    fail(`manifest.name (${manifest.name}) must match directory name (or be "nmem", "nowledge-mem", or a git worktree), but got "${pluginDirName}"`);
   }
 
 
