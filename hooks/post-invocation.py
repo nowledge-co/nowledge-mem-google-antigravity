@@ -14,6 +14,12 @@ def main():
         conversation_id = hook_input.get("conversationId")
         artifact_dir = hook_input.get("artifactDirectoryPath")
         transcript_path = hook_input.get("transcriptPath")
+        workspace_root = nmem_shared.activate_hook_workspace(hook_input)
+        try:
+            nmem_shared.validate_workspace_space_configuration(workspace_root)
+        except nmem_shared.SpaceResolutionError as error:
+            nmem_shared.emit({"injectSteps": [{"ephemeralMessage": nmem_shared.format_space_resolution_error(error)}]})
+            return
         # PostInvocation handler can return injectSteps or terminationBehavior.
         # Check if there are pending unsynced offline sessions or warning signals
         # that should be injected mid-turn.

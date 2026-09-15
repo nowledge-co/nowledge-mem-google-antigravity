@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Offline session retry now removes empty queue markers, preserves malformed queues as timestamped recovery files, and avoids overlapping workers without letting a recycled process ID block retries forever.
+- Project-specific Space settings now follow the workspace opened in Antigravity, including for globally installed plugins whose hooks run from the plugin directory. Invalid project settings are reported instead of silently sending memories to Default.
 
 ## [0.1.3] - 2026-07-30
 

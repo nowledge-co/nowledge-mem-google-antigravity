@@ -16,6 +16,7 @@ def main():
     conversation_id = hook_input.get("conversationId")
     transcript_path = hook_input.get("transcriptPath")
     artifact_directory_path = hook_input.get("artifactDirectoryPath")
+    workspace_root = nmem_shared.activate_hook_workspace(hook_input)
 
     fully_idle = hook_input.get("fullyIdle")
     if fully_idle is False:
@@ -30,7 +31,12 @@ def main():
         nmem_shared.emit({})
         return
 
-    space = nmem_shared.resolve_space()
+    try:
+        space = nmem_shared.resolve_space(workspace_root, validate_explicit=True)
+    except nmem_shared.SpaceResolutionError as error:
+        sys.stderr.write(nmem_shared.format_space_resolution_error(error) + "\n")
+        nmem_shared.emit({})
+        return
     host_agent_id = os.environ.get("NMEM_HOST_AGENT_ID", "").strip()
     if not host_agent_id:
         host_agent_id = nmem_shared.get_host_agent_fingerprint()

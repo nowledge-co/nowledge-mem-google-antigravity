@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, mock_open, patch
 
+import pytest
+
 # Add hooks directory to path to import nmem_shared and others
 HOOKS_DIR = Path(__file__).parent.parent / "hooks"
 sys.path.insert(0, str(HOOKS_DIR))
@@ -43,6 +45,13 @@ manage_rules = import_module_from_path("manage_rules", str(HOOKS_DIR.parent / "s
 propose_skill = import_module_from_path(
     "propose_skill", str(HOOKS_DIR.parent / "skills" / "nmem-skill-propose" / "scripts" / "propose_skill.py")
 )
+
+
+@pytest.fixture(autouse=True)
+def reset_active_workspace_root():
+    nmem_shared.activate_workspace_root(None)
+    yield
+    nmem_shared.activate_workspace_root(None)
 
 
 @patch("os.access", return_value=True)
@@ -614,6 +623,154 @@ def test_resolve_space_dynamic_unreachable_falls_back_to_default(mock_get_spaces
     mock_get_spaces.return_value = None
     with patch.dict(os.environ, {}, clear=True):
         assert nmem_shared.resolve_space("/home/user/workspace/random-project") == "default"
+
+
+def _write_workspace_space_config(workspace: Path, config_kind: str, space: str) -> None:
+    if config_kind == "config_json":
+        (workspace / ".config.json").write_text(json.dumps({"space": space}), encoding="utf-8")
+    elif config_kind == "nmemspace":
+        (workspace / ".nmemspace").write_text(space, encoding="utf-8")
+    else:
+        (workspace / ".nowledge").mkdir()
+        (workspace / ".nowledge" / "config.json").write_text(json.dumps({"space_id": space}), encoding="utf-8")
+
+
+def test_workspace_root_from_hook_input_prefers_transcript_owner(tmp_path):
+    outer = tmp_path / "outer"
+    nested = outer / "nested"
+    nested.mkdir(parents=True)
+
+    root = nmem_shared.workspace_root_from_hook_input(
+        {
+            "workspacePaths": [str(outer), str(nested)],
+            "transcriptPath": str(nested / ".gemini" / "antigravity" / "transcript.jsonl"),
+        }
+    )
+
+    assert root == nested.resolve()
+
+
+@patch("httpx.request")
+def test_hook_workspace_binds_http_transport_config(mock_request, tmp_path):
+    workspace = tmp_path / "customer-project"
+    workspace.mkdir()
+    (workspace / ".config.json").write_text(
+        json.dumps({"apiUrl": "https://workspace-mem.example.com", "apiKey": "workspace-key"}),
+        encoding="utf-8",
+    )
+    response = MagicMock(status_code=200, text='{"ok": true}')
+    response.json.return_value = {"ok": True}
+    mock_request.return_value = response
+
+    nmem_shared.activate_hook_workspace({"workspacePaths": [str(workspace)]})
+    assert nmem_shared.http_request("/status") == {"ok": True}
+
+    assert mock_request.call_args.args[1] == "https://workspace-mem.example.com/status"
+    assert mock_request.call_args.kwargs["headers"]["Authorization"] == "Bearer workspace-key"
+
+
+@pytest.mark.parametrize("config_kind", ["config_json", "nmemspace", "nowledge_config"])
+def test_session_start_uses_payload_workspace_when_process_cwd_differs(tmp_path, config_kind):
+    workspace = tmp_path / "customer-project"
+    workspace.mkdir()
+    _write_workspace_space_config(workspace, config_kind, "project-space")
+    hook_input = {
+        "conversationId": "conv-workspace",
+        "invocationNum": 0,
+        "workspacePaths": [str(workspace)],
+        "transcriptPath": str(workspace / ".gemini" / "antigravity" / "transcript.jsonl"),
+    }
+
+    def read_context(workspace_root):
+        space = nmem_shared.resolve_space(workspace_root, validate_explicit=True)
+        return {"tag": "test", "label": "test", "content": space}
+
+    with (
+        patch("nmem_shared.read_hook_input", return_value=hook_input),
+        patch("nmem_shared.get_existing_spaces", return_value=[{"id": "project-space"}]),
+        patch("nmem_shared.sync_mcp_config_file"),
+        patch("nmem_shared.sync_host_skills_async"),
+        patch("session_start.read_startup_context", side_effect=read_context),
+        patch("subprocess.Popen"),
+        patch("pathlib.Path.cwd", return_value=HOOKS_DIR),
+        patch("nmem_shared.emit") as mock_emit,
+        patch.object(sys, "argv", ["session-start.py"]),
+    ):
+        session_start.main()
+
+    payload = mock_emit.call_args.args[0]
+    assert "project-space" in payload["injectSteps"][0]["ephemeralMessage"]
+
+
+def test_post_invocation_surfaces_invalid_workspace_space(tmp_path):
+    workspace = tmp_path / "customer-project"
+    workspace.mkdir()
+    (workspace / ".nmemspace").write_text("missing-space", encoding="utf-8")
+
+    with (
+        patch(
+            "nmem_shared.read_hook_input",
+            return_value={"conversationId": "conv-workspace", "workspacePaths": [str(workspace)]},
+        ),
+        patch("nmem_shared.get_existing_spaces", return_value=[{"id": "default"}]),
+        patch("nmem_shared.emit") as mock_emit,
+        patch.object(sys, "argv", ["post-invocation.py"]),
+    ):
+        post_invocation.main()
+
+    message = mock_emit.call_args.args[0]["injectSteps"][0]["ephemeralMessage"]
+    assert "missing-space" in message
+    assert "not available" in message
+
+
+def test_session_end_writes_to_payload_workspace_space(tmp_path):
+    workspace = tmp_path / "customer-project"
+    workspace.mkdir()
+    _write_workspace_space_config(workspace, "nowledge_config", "project-space")
+    transcript = workspace / ".gemini" / "antigravity" / "transcript.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        '{"source":"USER_EXPLICIT","content":"Save this"}\n'
+        '{"source":"MODEL","type":"PLANNER_RESPONSE","content":"Saved"}\n',
+        encoding="utf-8",
+    )
+    hook_input = {
+        "conversationId": "conv-workspace",
+        "workspacePaths": [str(workspace)],
+        "transcriptPath": str(transcript),
+        "fullyIdle": True,
+    }
+
+    with (
+        patch("nmem_shared.read_hook_input", return_value=hook_input),
+        patch("nmem_shared.get_existing_spaces", return_value=[{"id": "project-space"}]),
+        patch("nmem_shared.http_request") as mock_http,
+        patch("nmem_shared.emit"),
+        patch.object(sys, "argv", ["session-end.py"]),
+    ):
+        mock_http.side_effect = [{"status": 404, "error": "not_found"}, {"status": "ok"}]
+        session_end.main()
+
+    import_call = next(call for call in mock_http.call_args_list if call.args[0] == "/threads/import")
+    assert import_call.kwargs["payload"]["space"] == "project-space"
+
+
+def test_status_workspace_argument_surfaces_malformed_project_config(tmp_path, capsys):
+    workspace = tmp_path / "customer-project"
+    workspace.mkdir()
+    (workspace / ".config.json").write_text("{not-json", encoding="utf-8")
+
+    with (
+        patch("nmem_shared.run_nmem_command", return_value=MagicMock(returncode=1, stdout="", stderr="offline")),
+        patch("nmem_shared.http_request", return_value={"error": "offline"}),
+        patch.object(sys, "argv", ["nmem_status.py", "--workspace-root", str(workspace)]),
+    ):
+        nmem_status.main()
+
+    output = capsys.readouterr().out
+    assert "Active Space (Workspace)** | `unresolved`" in output
+    assert "Project Space configuration error" in output
+    assert str(workspace / ".config.json") in output
 
 
 @patch("nmem_shared.http_request")

@@ -70,13 +70,13 @@ def read_nmem(args, keys):
     return ""
 
 
-def with_startup_args(args):
+def with_startup_args(args, workspace_root=None):
     next_args = list(args)
     agent_id = os.environ.get("NMEM_AGENT_ID", "").strip()
     host_agent_id = os.environ.get("NMEM_HOST_AGENT_ID", "").strip()
     if not host_agent_id:
         host_agent_id = nmem_shared.get_host_agent_fingerprint()
-    space = nmem_shared.resolve_space()
+    space = nmem_shared.resolve_space(workspace_root, validate_explicit=True)
 
     if agent_id and "--agent-id" not in next_args:
         next_args.extend(["--agent-id", agent_id])
@@ -87,23 +87,23 @@ def with_startup_args(args):
     return next_args
 
 
-def with_space_args(args):
+def with_space_args(args, workspace_root=None):
     next_args = list(args)
-    space = nmem_shared.resolve_space()
+    space = nmem_shared.resolve_space(workspace_root, validate_explicit=True)
     if space and "--space" not in next_args:
         next_args.extend(["--space", space])
     return next_args
 
 
-def read_startup_context():
+def read_startup_context(workspace_root=None):
     context_bundle = read_nmem(
-        with_startup_args(["context", "--source-app", "google-antigravity"]),
+        with_startup_args(["context", "--source-app", "google-antigravity"], workspace_root),
         ["rendered_markdown", "markdown", "content"],
     )
     if context_bundle:
         return {"tag": "nowledge_context_bundle", "label": "Context Bundle", "content": context_bundle}
 
-    working_memory = read_nmem(with_space_args(["wm", "read"]), ["content"])
+    working_memory = read_nmem(with_space_args(["wm", "read"], workspace_root), ["content"])
     if working_memory:
         return {"tag": "nowledge_working_memory", "label": "Working Memory", "content": working_memory}
 
@@ -126,12 +126,6 @@ def main():
         sys.exit(0)
 
     try:
-        # Synchronize plugin mcp_config.json with effective client configuration
-        try:
-            nmem_shared.sync_mcp_config_file()
-        except Exception:
-            pass
-
         # Asynchronously sync host skills connection (nmem skills connect antigravity / sync)
         try:
             nmem_shared.sync_host_skills_async()
@@ -144,6 +138,14 @@ def main():
         artifact_directory_path = hook_input.get("artifactDirectoryPath")
         invocation_num = hook_input.get("invocationNum")
         initial_num_steps = hook_input.get("initialNumSteps")
+        workspace_root = nmem_shared.activate_hook_workspace(hook_input)
+
+        # Synchronize the MCP transport from this workspace's configuration,
+        # rather than from the plugin directory used as the hook process cwd.
+        try:
+            nmem_shared.sync_mcp_config_file(cwd=workspace_root)
+        except Exception:
+            pass
 
         # Only run startup injection on the very first invocation.
         # Supports both 0-indexed and 1-indexed runtimes.
@@ -164,15 +166,20 @@ def main():
 
         if invocation_num is not None and not is_first:
             try:
-                space = nmem_shared.resolve_space()
+                space = nmem_shared.resolve_space(workspace_root, validate_explicit=True)
                 nmem_shared.sync_learnings_if_any(conversation_id, transcript_path, artifact_directory_path, space)
+            except nmem_shared.SpaceResolutionError as error:
+                nmem_shared.emit(
+                    {"injectSteps": [{"ephemeralMessage": nmem_shared.format_space_resolution_error(error)}]}
+                )
+                return
             except Exception as e:
                 if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                     sys.stderr.write(f"Learning sync failed in start hook: {e}\n")
             nmem_shared.emit({})
             return
 
-        startup_context = read_startup_context()
+        startup_context = read_startup_context(workspace_root)
         if not startup_context:
             nmem_shared.emit({})
         else:
@@ -184,6 +191,8 @@ def main():
                 f"</{startup_context['tag']}>"
             )
             nmem_shared.emit({"injectSteps": [{"ephemeralMessage": msg}]})
+    except nmem_shared.SpaceResolutionError as e:
+        nmem_shared.emit({"injectSteps": [{"ephemeralMessage": nmem_shared.format_space_resolution_error(e)}]})
     except Exception as e:
         if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
             sys.stderr.write(f"Startup hook failed: {e}\n")
