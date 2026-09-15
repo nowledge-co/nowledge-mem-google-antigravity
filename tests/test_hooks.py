@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, mock_open, patch
 
@@ -258,7 +259,7 @@ def test_retry_unsynced_sessions_cleans_empty_file():
         assert not queue_file.exists()
 
 
-def test_retry_unsynced_sessions_cleans_corrupt_file():
+def test_retry_unsynced_sessions_quarantines_corrupt_file():
     with (
         tempfile.TemporaryDirectory() as tmpdir,
         patch.dict(os.environ, {"HOME": tmpdir}),
@@ -270,6 +271,9 @@ def test_retry_unsynced_sessions_cleans_corrupt_file():
 
         nmem_shared.retry_unsynced_sessions()
         assert not queue_file.exists()
+        quarantine_files = list(queue_file.parent.glob("unsynced.corrupt-*.json"))
+        assert len(quarantine_files) == 1
+        assert quarantine_files[0].read_text(encoding="utf-8") == "NOT VALID JSON"
 
 
 @patch("nmem_shared.http_request")
@@ -500,6 +504,22 @@ def test_retry_unsynced_sessions_async_spawn_guard():
             # Second spawn is suppressed because PID is alive
             nmem_shared.retry_unsynced_sessions_async(cooldown_seconds=10.0)
             assert mock_popen.call_count == 1
+
+
+def test_retry_unsynced_sessions_async_does_not_trust_reused_pid_forever():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache_dir = Path(tmpdir) / ".nowledge-mem" / "plugins" / "antigravity" / "cache"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "retry_worker.pid").write_text(f"12345:{time.time() - 901}", encoding="utf-8")
+        with (
+            patch.dict(os.environ, {"HOME": tmpdir}),
+            patch("subprocess.Popen") as mock_popen,
+            patch("nmem_shared._is_pid_alive", return_value=True),
+        ):
+            mock_popen.return_value = MagicMock(pid=54321)
+            nmem_shared.retry_unsynced_sessions_async(cooldown_seconds=10.0)
+
+        mock_popen.assert_called_once()
 
 
 @patch("pathlib.Path.is_file", return_value=True)

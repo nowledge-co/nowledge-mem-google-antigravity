@@ -82,6 +82,7 @@ flowchart TD
 - Rather than persisting session-level state into the global `~/.nowledge-mem/` configuration folder, hooks isolate session-scoped metadata within `<session_dir>/.nmem/` (resolved from `artifactDirectoryPath` or `transcriptPath`):
   - `<session_dir>/.nmem/catchup_history.json`: Tracks per-horizon catchup executions within this session.
   - `<session_dir>/.nmem/warning_history.json`: Tracks notification emissions for offline sync warnings to prevent repeating alerts in active conversations.
+  - Empty `unsynced.json` markers are removed after retry. Malformed queue files are moved beside the queue as `unsynced.corrupt-<timestamp>.json` so user sessions remain recoverable rather than being discarded.
 
 ---
 
