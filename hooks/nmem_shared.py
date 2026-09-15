@@ -26,6 +26,68 @@ def emit(payload: dict) -> None:
     sys.stdout.flush()
 
 
+class SpaceResolutionError(ValueError):
+    """Raised when an explicit workspace Space configuration is unsafe to use."""
+
+
+_ACTIVE_WORKSPACE_ROOT: Path | None = None
+
+
+def workspace_root_from_hook_input(hook_input: dict) -> Path | None:
+    """Return the workspace root supplied by Antigravity's hook payload.
+
+    Hook commands run from the directory containing hooks.json, not from the
+    user's project. Antigravity provides workspacePaths for this purpose. For a
+    multi-root payload, prefer the root containing the session transcript and
+    otherwise preserve the host-provided order.
+    """
+    raw_paths = hook_input.get("workspacePaths")
+    if not isinstance(raw_paths, list):
+        return None
+
+    workspace_paths = []
+    for raw_path in raw_paths:
+        if isinstance(raw_path, str) and raw_path.strip():
+            try:
+                workspace_paths.append(Path(raw_path).expanduser().resolve())
+            except (OSError, RuntimeError):
+                continue
+    if not workspace_paths:
+        return None
+
+    transcript_path = hook_input.get("transcriptPath")
+    if isinstance(transcript_path, str) and transcript_path.strip():
+        try:
+            transcript = Path(transcript_path).expanduser().resolve()
+            containing_roots = [root for root in workspace_paths if transcript.is_relative_to(root)]
+            if containing_roots:
+                return max(containing_roots, key=lambda root: len(root.parts))
+        except (OSError, RuntimeError):
+            pass
+
+    return workspace_paths[0]
+
+
+def activate_hook_workspace(hook_input: dict) -> Path | None:
+    """Bind shared config/transport helpers to this hook process's workspace."""
+    return activate_workspace_root(workspace_root_from_hook_input(hook_input))
+
+
+def activate_workspace_root(workspace_root: str | Path | None) -> Path | None:
+    """Bind shared helpers to an explicitly supplied workspace root."""
+    global _ACTIVE_WORKSPACE_ROOT
+    _ACTIVE_WORKSPACE_ROOT = Path(workspace_root).expanduser().resolve() if workspace_root is not None else None
+    return _ACTIVE_WORKSPACE_ROOT
+
+
+def _effective_cwd(cwd: str | Path | None) -> str | Path | None:
+    return cwd if cwd is not None else _ACTIVE_WORKSPACE_ROOT
+
+
+def format_space_resolution_error(error: Exception) -> str:
+    return f"[Nowledge Mem] Project Space configuration error: {error}"
+
+
 def get_host_agent_fingerprint(prefix: str = "antigravity") -> str:
     """Derive a stable agent-identity fingerprint from system sources.
 
@@ -171,6 +233,7 @@ def get_local_config(cwd: str | Path | None = None) -> dict:
     """Read local .config.json from the plugin root or workspace root if present."""
     config = {}
     plugin_root = Path(__file__).parent.parent.resolve()
+    cwd = _effective_cwd(cwd)
     target_dir = Path(cwd).resolve() if cwd else Path.cwd().resolve()
 
     # Check plugin root .config.json first, then workspace root .config.json
@@ -217,6 +280,7 @@ def get_effective_config(cwd: str | Path | None = None) -> tuple[str, str | None
     Guards against inadvertently picking up host ~/.nowledge-mem/config.json credentials
     when targeting custom server URLs or running isolated test environments.
     """
+    cwd = _effective_cwd(cwd)
     env_url = os.environ.get("NMEM_API_URL", "").strip()
     env_key = os.environ.get("NMEM_API_KEY", "").strip() or None
     ignore_host = os.environ.get("NMEM_IGNORE_HOST_CONFIG", "").strip().lower() in ("1", "true", "yes")
@@ -371,7 +435,69 @@ def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
     return None
 
 
-def resolve_space(cwd: str | Path | None = None) -> str:
+def _read_explicit_workspace_space(target_dir: Path) -> str | None:
+    """Read the first documented workspace-level Space declaration."""
+    config_paths = (
+        target_dir / ".config.json",
+        target_dir / ".nmemspace",
+        target_dir / ".nowledge" / "config.json",
+    )
+    for cfg_path in config_paths:
+        if not cfg_path.is_file():
+            continue
+        try:
+            if cfg_path.name == ".nmemspace":
+                value = cfg_path.read_text(encoding="utf-8").strip()
+            else:
+                data = json.loads(cfg_path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("expected a JSON object")
+                raw_value = data.get("space") or data.get("space_id")
+                value = raw_value.strip() if isinstance(raw_value, str) else ""
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+            raise SpaceResolutionError(f"cannot read {cfg_path}: {error}") from error
+
+        if value:
+            return value
+        if cfg_path.name != ".config.json":
+            raise SpaceResolutionError(f"{cfg_path} does not name a Space")
+    return None
+
+
+def _validate_explicit_workspace_space(space: str, target_dir: Path) -> None:
+    existing_spaces = get_existing_spaces()
+    if existing_spaces is None:
+        # Preserve the explicit destination while offline so session-end can
+        # queue it and retry when the backend is reachable.
+        return
+
+    expected = space.lower()
+    for space_obj in existing_spaces:
+        if not isinstance(space_obj, dict):
+            continue
+        identifiers = [space_obj.get("id"), space_obj.get("key"), space_obj.get("name")]
+        aliases = space_obj.get("aliases")
+        if isinstance(aliases, list):
+            identifiers.extend(aliases)
+        if any(isinstance(value, str) and value.strip().lower() == expected for value in identifiers):
+            return
+    raise SpaceResolutionError(f"Space '{space}' from {target_dir} is not available on the connected server")
+
+
+def validate_workspace_space_configuration(cwd: str | Path | None) -> None:
+    """Validate a workspace declaration without triggering dynamic inference."""
+    env_space = os.environ.get("NMEM_SPACE", "").strip() or os.environ.get("NMEM_SPACE_ID", "").strip()
+    if env_space:
+        return
+    if cwd is None:
+        return
+    target_dir = Path(cwd).resolve()
+    workspace_space = _read_explicit_workspace_space(target_dir)
+    if workspace_space:
+        _validate_explicit_workspace_space(workspace_space, target_dir)
+
+
+def resolve_space(cwd: str | Path | None = None, *, validate_explicit: bool = False) -> str:
     """Resolve active space following priority:
     1. Explicit environment variables (NMEM_SPACE or NMEM_SPACE_ID)
     2. Local workspace configuration (<workspace_root>/.config.json)
@@ -382,6 +508,8 @@ def resolve_space(cwd: str | Path | None = None) -> str:
     7. Dynamically detected space from workspace directory IF it exists on backend
     8. Fallback to 'default' space
     """
+    cwd = _effective_cwd(cwd)
+
     # 1. Check explicit environment override
     env_space = os.environ.get("NMEM_SPACE", "").strip() or os.environ.get("NMEM_SPACE_ID", "").strip()
     if env_space:
@@ -390,33 +518,12 @@ def resolve_space(cwd: str | Path | None = None) -> str:
     target_dir = Path(cwd).resolve() if cwd else Path.cwd().resolve()
     plugin_root = Path(__file__).parent.parent.resolve()
 
-    # 2. Check local workspace .config.json (at workspace root)
-    ws_cfg_path = target_dir / ".config.json"
-    if ws_cfg_path.is_file():
-        try:
-            data = json.loads(ws_cfg_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                ws_space = data.get("space") or data.get("space_id")
-                if isinstance(ws_space, str) and ws_space.strip():
-                    return ws_space.strip()
-        except Exception:
-            pass
-
-    # 3. Check explicit workspace config files (.nmemspace or .nowledge/config.json)
-    for cfg_path in (target_dir / ".nmemspace", target_dir / ".nowledge" / "config.json"):
-        if cfg_path.is_file():
-            try:
-                if cfg_path.name == ".nmemspace":
-                    val = cfg_path.read_text(encoding="utf-8").strip()
-                    if val:
-                        return val
-                else:
-                    data = json.loads(cfg_path.read_text(encoding="utf-8"))
-                    val = data.get("space") or data.get("space_id")
-                    if isinstance(val, str) and val.strip():
-                        return val.strip()
-            except Exception:
-                pass
+    # 2-3. Check documented explicit workspace config files.
+    workspace_space = _read_explicit_workspace_space(target_dir)
+    if workspace_space:
+        if validate_explicit:
+            _validate_explicit_workspace_space(workspace_space, target_dir)
+        return workspace_space
 
     # 4. Check plugin root .config.json if distinct from workspace root
     if plugin_root != target_dir:
@@ -472,7 +579,7 @@ def resolve_space(cwd: str | Path | None = None) -> str:
     return "default"
 
 
-def sync_mcp_config_file(mcp_config_path: str = None) -> bool:
+def sync_mcp_config_file(mcp_config_path: str = None, cwd: str | Path | None = None) -> bool:
     """Synchronize plugin mcp_config.json with effective client configuration
     (~/.nowledge-mem/config.json or NMEM_API_URL/NMEM_API_KEY env vars).
     Returns True if mcp_config.json was updated, False if already up to date.
@@ -480,7 +587,7 @@ def sync_mcp_config_file(mcp_config_path: str = None) -> bool:
     if mcp_config_path is None:
         mcp_config_path = str(Path(__file__).parent.parent / "mcp_config.json")
 
-    api_url, api_key = get_effective_config()
+    api_url, api_key = get_effective_config(cwd)
     clean_url = api_url.rstrip("/")
     server_url = f"{clean_url}/mcp/"
 

@@ -13,13 +13,20 @@ import nmem_shared
 def main():
     parser = argparse.ArgumentParser(description="Nowledge Mem Status Plugin")
     parser.add_argument("--conv-id", required=False, default=None, help="Conversation ID to check status for")
+    parser.add_argument("--workspace-root", required=False, default=None, help="Active Antigravity workspace root")
     args = parser.parse_args()
     conv_id = (
         args.conv_id or os.environ.get("NMEM_CONVERSATION_ID") or os.environ.get("CONVERSATION_ID") or "active-session"
     )
+    nmem_shared.activate_workspace_root(args.workspace_root)
 
     # 1. Read environment variables / resolve active space
-    space = nmem_shared.resolve_space()
+    try:
+        space = nmem_shared.resolve_space(args.workspace_root, validate_explicit=True)
+        space_warning = ""
+    except nmem_shared.SpaceResolutionError as error:
+        space = "unresolved"
+        space_warning = f"> [!WARNING]\n> {nmem_shared.format_space_resolution_error(error)}"
     host_agent_id = os.environ.get("NMEM_HOST_AGENT_ID")
     if not host_agent_id:
         try:
@@ -45,20 +52,23 @@ def main():
     # 3. Check thread sync status
     thread_synced = False
     thread_details = ""
-    try:
-        t_args = ["t", "show", conv_id]
-        if space and space != "default":
-            t_args.extend(["--space", space])
-        t_res = nmem_shared.run_nmem_command(t_args, timeout=10)
-        if t_res.returncode == 0:
-            thread_synced = True
-            thread_details = t_res.stdout.strip()
-        else:
-            thread_details = t_res.stderr.strip()
-    except FileNotFoundError:
-        thread_details = "nmem command not found"
-    except Exception as e:
-        thread_details = f"Error: {str(e)}"
+    if space_warning:
+        thread_details = "Thread lookup skipped until the project Space configuration is fixed."
+    else:
+        try:
+            t_args = ["t", "show", conv_id]
+            if space and space != "default":
+                t_args.extend(["--space", space])
+            t_res = nmem_shared.run_nmem_command(t_args, timeout=10)
+            if t_res.returncode == 0:
+                thread_synced = True
+                thread_details = t_res.stdout.strip()
+            else:
+                thread_details = t_res.stderr.strip()
+        except FileNotFoundError:
+            thread_details = "nmem command not found"
+        except Exception as e:
+            thread_details = f"Error: {str(e)}"
 
     # 4. Check local offline queue
     unsynced_path = nmem_shared.get_unsynced_queue_path()
@@ -160,7 +170,9 @@ def main():
         sync_status = "⚪ Unsynced / Not Found"
 
     # Format the thread details block
-    if thread_synced:
+    if space_warning:
+        thread_info_block = f"> [!WARNING]\n> {thread_details}"
+    elif thread_synced:
         thread_info_block = f"```\n{thread_details}\n```"
     elif is_current_pending:
         thread_info_block = "> [!IMPORTANT]\n> This conversation has not been pushed to the remote Nowledge Mem server yet. It is queued locally in the unsynced buffer."
@@ -189,6 +201,8 @@ def main():
 | **Current Conversation ID** | `{conv_id}` |
 | **Active Space (Workspace)** | `{space}` |
 | **Host Agent ID** | `{host_agent_id}` |
+
+{space_warning}
 
 #### 🔄 Synchronization Status
 - **Connection to Nowledge Mem Service**: {conn_status}

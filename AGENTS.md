@@ -32,6 +32,8 @@ When modifying or adding hook scripts under `hooks/` and configuring them in `ho
 * **Local Plugin Configuration (`.config.json`)**: Support a git-ignored `.config.json` file at the root of the plugin or workspace root.
   - Used for configuring server endpoints (`apiUrl`), credentials (`apiKey`), and default project space (`space`).
   - Precedence hierarchy: `env vars > workspace config (.config.json) > plugin storage config (~/.nowledge-mem/plugins/antigravity/config.json) > global config (~/.nowledge-mem/config.json) > defaults`.
+  - Lifecycle hooks MUST derive the project root from Antigravity's `workspacePaths` payload via `activate_hook_workspace()`; hook command cwd points at the customization/plugin directory and is not project identity.
+  - Malformed explicit workspace Space files or Spaces missing from a reachable backend must surface a diagnostic and must never fall through to Default. Preserve the explicit Space when offline so queued writes keep their destination.
 * **Space Auto-Detection Heuristics**: Automatically map workspace directories to Nowledge Mem spaces.
   - Respect explicit override environment variables (`NMEM_SPACE` or `NMEM_SPACE_ID`), local config (`.config.json`), or workspace config files (`.nmemspace` / `.nowledge/config.json`) if set by the user.
   - Dynamically detected candidate spaces from workspace directory names must be verified against existing backend spaces (`get_existing_spaces()`).

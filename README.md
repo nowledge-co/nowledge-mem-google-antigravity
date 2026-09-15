@@ -128,6 +128,16 @@ Nowledge Mem resolves connection and space settings in the following strict orde
 6. **Global Client Config**: `~/.nowledge-mem/config.json` (managed via `nmem config client set ...`).
 7. **Local Defaults**: `http://127.0.0.1:14242` and `default` space.
 
+Antigravity's passive hooks read the active project from the hook payload's
+`workspacePaths`; they do not depend on the plugin process's working directory.
+This routing is specific to the Antigravity integration. Set `NMEM_AGENT_ID` for
+an explicit agent identity, and use one of the workspace files above for a
+project-specific Space. If a workspace file is malformed or names a Space that
+the connected server does not expose, startup and status show the configuration
+error instead of quietly reading from or writing to Default. When the server is
+offline, the explicit Space remains attached to queued session data for a safe
+retry later.
+
 For global remote Mem setup via CLI, run:
 
 ```bash

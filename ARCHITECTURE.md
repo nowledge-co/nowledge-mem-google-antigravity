@@ -107,7 +107,16 @@ To ensure subshells running inside sandboxed tool environments (`BypassSandbox: 
    - `~/.local/share/nowledge-mem/bin/nmem-wrapper`
 
 ### Space Resolution & Verification Pipeline
-`hooks/nmem_shared.py` resolves the active space using `resolve_space(cwd=None)` following this pipeline:
+Antigravity runs hook commands from the directory containing `hooks.json` and
+provides the opened project roots as `workspacePaths` in every hook payload.
+Each lifecycle entrypoint binds the shared resolver and HTTP transport to that
+payload root before reading configuration. In a multi-root payload, the resolver
+uses the root containing `transcriptPath`; otherwise it preserves the host's
+first-root ordering. The interactive `nmem-status` skill passes its command cwd
+explicitly with `--workspace-root .`.
+
+`hooks/nmem_shared.py` then resolves the active space using
+`resolve_space(cwd=None)` following this pipeline:
 1. **Explicit Environment Variables**: Returns `NMEM_SPACE` or `NMEM_SPACE_ID` if explicitly set by user.
 2. **Local Workspace Configuration (`.config.json`)**: Reads `space` or `space_id` from `<workspace_root>/.config.json`.
 3. **Explicit Workspace Configuration Files**: Returns explicit `space` defined in `.nmemspace` or `.nowledge/config.json` at the workspace root.
@@ -120,6 +129,12 @@ To ensure subshells running inside sandboxed tool environments (`BypassSandbox: 
    - Match candidate against `id`, `key`, `name`, or `aliases`.
    - If candidate space exists, use it.
 8. **Fallback to Default Space**: If the dynamically detected space does NOT exist on the backend and the user has not explicitly configured a project space, fall back to `"default"`.
+
+Workspace declarations are strict at lifecycle boundaries. Malformed explicit
+files and explicit Spaces absent from a reachable server raise a visible
+configuration diagnostic and prevent Default-space writes. Backend outages are
+different: the declared Space is retained so Stop can queue the session with its
+intended destination. Environment Space overrides still take precedence.
 
 ---
 

@@ -14,8 +14,9 @@ def main():
         conversation_id = hook_input.get("conversationId")
         transcript_path = hook_input.get("transcriptPath")
         artifact_directory_path = hook_input.get("artifactDirectoryPath")
+        workspace_root = nmem_shared.activate_hook_workspace(hook_input)
 
-        space = nmem_shared.resolve_space()
+        space = nmem_shared.resolve_space(workspace_root, validate_explicit=True)
 
         # Check for learning proposals after file modifications
         if conversation_id and transcript_path and artifact_directory_path:
@@ -24,6 +25,9 @@ def main():
             except Exception:
                 pass
 
+        nmem_shared.emit({})
+    except nmem_shared.SpaceResolutionError as error:
+        sys.stderr.write(nmem_shared.format_space_resolution_error(error) + "\n")
         nmem_shared.emit({})
     except Exception:
         nmem_shared.emit({})
