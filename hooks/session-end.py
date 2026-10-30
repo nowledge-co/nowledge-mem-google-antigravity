@@ -110,7 +110,7 @@ def main():
                 ):
                     existing_msgs = check_res.get("messages") or []
                     if isinstance(existing_msgs, list):
-                        for old_m, new_m in zip(existing_msgs, messages, strict=False):
+                        for old_m, new_m in zip(existing_msgs, messages):
                             old_role = old_m.get("role") or old_m.get("sender")
                             new_role = new_m.get("role") or new_m.get("sender")
                             old_text = old_m.get("content") or old_m.get("text")
