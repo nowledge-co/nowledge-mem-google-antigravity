@@ -86,8 +86,11 @@ flowchart TD
 
 ### 6. Interpreter Floor & Failure Fallbacks
 - Hooks run on whatever `python3` (then `python`) the host provides. On macOS that is the Command Line Tools Python 3.9, so hook and skill code stays compatible with Python 3.9: modules that use `X | None` annotations start with `from __future__ import annotations` (enforced by ruff `FA`), and 3.10+ APIs such as `zip(strict=)` are not used. CI runs `tests/test_hooks.py` on Python 3.9.
-- `hooks/nmem_entrypoint.py` answers for any lifecycle hook that cannot run. If the interpreter is older than 3.9, or the hook raises before writing output, it prints the hook's fallback (`{"decision": "ask"}` for PreToolUse, `{}` otherwise), reports the cause on stderr, and exits 0. The entrypoint itself avoids syntax newer than Python 3.6 so that it can.
-- If no Python can start the entrypoint, the final `echo` in each `hooks.json` chain answers. Antigravity aborts the tool call when it cannot parse a PreToolUse reply, so that fallback is single-quoted (`echo '{"decision":"ask"}'`) to keep its double quotes through POSIX shell quote removal.
+- `hooks/nmem_entrypoint.py` decides who answers when a hook cannot run:
+  - **Before the hook starts** (interpreter older than 3.9, or the hook module fails to import), nothing has read stdin yet. The entrypoint reports the cause on stderr and exits 1, so `hooks.json` tries `python` next and then its `echo` fallback.
+  - **Once the hook is running**, it may already have consumed stdin, so re-running it under `python` would see an empty payload. A failure there is answered with the hook's fallback (`{"decision": "ask", "reason": "..."}` for PreToolUse, `{}` otherwise) and exit 0, unless the hook already wrote its reply.
+- The final `echo` in each `hooks.json` chain answers when no interpreter can run the hook. Antigravity aborts the tool call when it cannot parse a PreToolUse reply, so that fallback is single-quoted (`echo '{"decision":"ask"}'`) to keep its double quotes through POSIX shell quote removal.
+- The PreToolUse fallback asks rather than allows because the gate guards destructive memory actions. It is still weaker than the gate's own `force_ask` for deletes: `ask` honors Always Allow. It is also stricter than the gate for unrelated tools, which the gate normally passes with `allow`, so a broken hook shows up as approval prompts on terminal commands and MCP calls.
 
 ---
 
