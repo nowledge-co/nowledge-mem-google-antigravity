@@ -84,6 +84,11 @@ flowchart TD
   - `<session_dir>/.nmem/warning_history.json`: Tracks notification emissions for offline sync warnings to prevent repeating alerts in active conversations.
   - Empty `unsynced.json` markers are removed after retry. Malformed queue files are moved beside the queue as `unsynced.corrupt-<timestamp>.json` so user sessions remain recoverable rather than being discarded.
 
+### 6. Interpreter Floor & Failure Fallbacks
+- Hooks run on whatever `python3` (then `python`) the host provides. On macOS that is the Command Line Tools Python 3.9, so hook and skill code stays compatible with Python 3.9: modules that use `X | None` annotations start with `from __future__ import annotations` (enforced by ruff `FA`), and 3.10+ APIs such as `zip(strict=)` are not used. CI runs `tests/test_hooks.py` on Python 3.9.
+- `hooks/nmem_entrypoint.py` answers for any lifecycle hook that cannot run. If the interpreter is older than 3.9, or the hook raises before writing output, it prints the hook's fallback (`{"decision": "ask"}` for PreToolUse, `{}` otherwise), reports the cause on stderr, and exits 0. The entrypoint itself avoids syntax newer than Python 3.6 so that it can.
+- If no Python can start the entrypoint, the final `echo` in each `hooks.json` chain answers. Antigravity aborts the tool call when it cannot parse a PreToolUse reply, so that fallback is single-quoted (`echo '{"decision":"ask"}'`) to keep its double quotes through POSIX shell quote removal.
+
 ---
 
 ## ⚙️ Configuration & Path Resolution Hierarchy

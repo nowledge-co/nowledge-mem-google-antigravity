@@ -18,6 +18,7 @@ The recommended setup is simple and stable: Google Antigravity on top, MCP for d
 - [Google Antigravity 2.0](https://antigravity.google)
 - [Nowledge Mem](https://mem.nowledge.co) running locally, or a reachable remote Nowledge Mem server
 - `nmem` CLI in your `PATH` (or installed via standard Linux packages at `/usr/lib/nowledge-mem/nmem` / `/usr/lib64/nowledge-mem/nmem`)
+- Python 3.9 or newer as `python3` (or `python`) for the lifecycle hooks. The macOS system Python (`/usr/bin/python3`) is enough, and the hooks need no extra packages.
 
 You can install the standalone `nmem` CLI via PyPI, Fedora COPR, or Arch AUR:
 ```bash
