@@ -326,7 +326,7 @@ def test_retry_unsynced_sessions_reconciles_existing_thread_prefix(mock_http, mo
     # Only the unsent tail goes to an existing thread; the whole transcript must not be appended again.
     with (
         tempfile.TemporaryDirectory() as tmpdir,
-        patch.dict(os.environ, {"HOME": tmpdir}),
+        patch.dict(os.environ, {"HOME": tmpdir, "USERPROFILE": tmpdir}),
     ):
         queue_file = nmem_shared.get_unsynced_queue_path()
         queue_file.parent.mkdir(parents=True, exist_ok=True)
@@ -353,6 +353,7 @@ def test_retry_unsynced_sessions_reconciles_existing_thread_prefix(mock_http, mo
         ]
         nmem_shared.retry_unsynced_sessions()
 
+        assert mock_http.call_count == 2
         assert mock_http.call_args_list[1].args[0] == "/threads/conv-1/reconcile-tail"
         payload = mock_http.call_args_list[1].kwargs["payload"]
         assert payload["matched_count"] == 1
@@ -935,13 +936,14 @@ def test_session_end_offline_fallback(
         mock_save.assert_called_once()
 
 
+@patch("nmem_shared.save_unsynced_session")
 @patch("nmem_shared.sync_learnings_if_any")
 @patch("nmem_shared.is_backend_unreachable", return_value=False)
 @patch("nmem_shared.run_nmem_command")
 @patch("nmem_shared.http_request")
 @patch("nmem_shared.resolve_space", return_value="default")
 def test_session_end_reconciles_existing_thread_prefix(
-    mock_space, mock_http, mock_run, mock_unreachable, mock_learnings, tmp_path
+    mock_space, mock_http, mock_run, mock_unreachable, mock_learnings, mock_save, tmp_path
 ):
     # Only the unsent tail goes to an existing thread; the whole transcript must not be appended again.
     transcript = tmp_path / "transcript.jsonl"
@@ -962,11 +964,13 @@ def test_session_end_reconciles_existing_thread_prefix(
     ):
         session_end.main()
 
+    assert mock_http.call_count == 2
     assert mock_http.call_args_list[1].args[0] == "/threads/conv-prefix/reconcile-tail"
     payload = mock_http.call_args_list[1].kwargs["payload"]
     assert payload["matched_count"] == 1
     assert payload["messages"] == [{"role": "assistant", "content": "Saved."}]
     mock_run.assert_not_called()
+    mock_save.assert_not_called()
 
 
 @patch("nmem_gate.read_hook_input")
@@ -1466,18 +1470,38 @@ HOOK_FALLBACKS = [
 
 
 @pytest.mark.parametrize(("subcommand", "fallback"), HOOK_FALLBACKS)
-def test_entrypoint_prints_safe_fallback_when_hook_fails(subcommand, fallback, capsys):
+def test_entrypoint_prints_safe_fallback_when_running_hook_fails(subcommand, fallback, capsys):
     # Antigravity blocks the tool call on a missing or malformed PreToolUse decision,
-    # so a hook that cannot load must still answer with JSON.
+    # and a running hook may already have consumed stdin, so it must still answer.
+    hook = MagicMock()
+    hook.main.side_effect = TypeError("unsupported operand type(s) for |")
     with (
         patch.object(sys, "argv", ["nmem_entrypoint.py", subcommand]),
-        patch("importlib.import_module", side_effect=TypeError("unsupported operand type(s) for |")),
+        patch("importlib.import_module", return_value=hook),
     ):
         nmem_entrypoint.main()
 
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == fallback
+    reply = json.loads(captured.out)
+    if "decision" in fallback:
+        assert reply["decision"] == fallback["decision"]
+        assert "unsupported operand" in reply["reason"]
+    else:
+        assert reply == fallback
     assert "unsupported operand" in captured.err
+
+
+@pytest.mark.parametrize(("subcommand", "fallback"), HOOK_FALLBACKS)
+def test_entrypoint_exits_nonzero_when_hook_cannot_load(subcommand, fallback, capsys):
+    # Nothing has read stdin yet, so the hooks.json chain must be free to try `python` next.
+    with (
+        patch.object(sys, "argv", ["nmem_entrypoint.py", subcommand]),
+        patch("importlib.import_module", side_effect=TypeError("unsupported operand type(s) for |")),
+        pytest.raises(TypeError),
+    ):
+        nmem_entrypoint.main()
+
+    assert capsys.readouterr().out == ""
 
 
 def test_entrypoint_keeps_hook_output_when_hook_fails_after_writing(capsys):
@@ -1497,18 +1521,33 @@ def test_entrypoint_keeps_hook_output_when_hook_fails_after_writing(capsys):
 
 
 @pytest.mark.parametrize(("subcommand", "fallback"), HOOK_FALLBACKS)
-def test_entrypoint_answers_with_fallback_on_unsupported_python(subcommand, fallback, capsys):
+def test_entrypoint_exits_nonzero_on_unsupported_python(subcommand, fallback, capsys):
     with (
         patch.object(sys, "argv", ["nmem_entrypoint.py", subcommand]),
         patch.object(sys, "version_info", (3, 8, 18, "final", 0)),
         patch("importlib.import_module") as mock_import,
+        pytest.raises(SystemExit) as exit_info,
     ):
         nmem_entrypoint.main()
 
+    assert exit_info.value.code == 1
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == fallback
+    assert captured.out == ""
     assert "Python 3.9" in captured.err
     mock_import.assert_not_called()
+
+
+@patch("nmem_status.main")
+def test_entrypoint_status_reports_unsupported_python(mock_status_main, capsys):
+    with (
+        patch.object(sys, "argv", ["nmem_entrypoint.py", "status"]),
+        patch.object(sys, "version_info", (3, 8, 18, "final", 0)),
+        pytest.raises(SystemExit),
+    ):
+        nmem_entrypoint.main()
+
+    assert "Python 3.9" in capsys.readouterr().err
+    mock_status_main.assert_not_called()
 
 
 def _hook_command(event):
@@ -1516,30 +1555,65 @@ def _hook_command(event):
     return entry["hooks"][0]["command"] if "hooks" in entry else entry["command"]
 
 
+FAILING_INTERPRETER = "exit 1"
+# This interpreter, or the same one reporting Python 3.8 before it runs the entrypoint.
+CURRENT_INTERPRETER = f'exec "{Path(sys.executable).as_posix()}" "$@"'
+REPORT_PYTHON_38 = (
+    "import runpy, sys; sys.version_info = (3, 8, 18, 'final', 0); "
+    "sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')"
+)
+TOO_OLD_INTERPRETER = f'exec "{Path(sys.executable).as_posix()}" -c "{REPORT_PYTHON_38}" "$@"'
+RUN_COMMAND_PAYLOAD = json.dumps({"toolCall": {"name": "run_command", "args": {"CommandLine": "ls -la"}}})
+
+
+def _run_hook_command(event, tmp_path, python3, python, payload="{}"):
+    # Run the exact hooks.json command the way a POSIX host does, with these two interpreters on PATH.
+    for name, body in (("python3", python3), ("python", python)):
+        interpreter = tmp_path / name
+        interpreter.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        interpreter.chmod(0o755)
+
+    return subprocess.run(
+        [shutil.which("sh"), "-c", _hook_command(event)],
+        cwd=PLUGIN_ROOT,
+        env={**os.environ, "PATH": str(tmp_path)},
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
 @pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
 @pytest.mark.parametrize("event", ["PreInvocation", "PostInvocation", "PreToolUse", "PostToolUse", "Stop"])
 def test_hooks_json_shell_fallback_prints_valid_json(event, tmp_path):
     # With neither python3 nor python runnable, the echo at the end of the chain answers alone.
-    for name in ("python3", "python"):
-        interpreter = tmp_path / name
-        interpreter.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-        interpreter.chmod(0o755)
+    result = _run_hook_command(event, tmp_path, FAILING_INTERPRETER, FAILING_INTERPRETER)
 
-    result = subprocess.run(
-        [shutil.which("sh"), "-c", _hook_command(event)],
-        cwd=PLUGIN_ROOT,
-        env={**os.environ, "PATH": str(tmp_path)},
-        input="{}",
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-
+    assert result.returncode == 0
     payload = json.loads(result.stdout)
     if event == "PreToolUse":
         assert payload == {"decision": "ask"}
     else:
         assert payload == {}
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
+def test_hooks_json_gate_decides_on_this_python(tmp_path):
+    # On the Python 3.9 CI job this is the reported host: the real gate answers, not a fallback.
+    result = _run_hook_command("PreToolUse", tmp_path, CURRENT_INTERPRETER, FAILING_INTERPRETER, RUN_COMMAND_PAYLOAD)
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {"decision": "allow"}
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
+def test_hooks_json_falls_through_to_python_when_python3_is_too_old(tmp_path):
+    result = _run_hook_command("PreToolUse", tmp_path, TOO_OLD_INTERPRETER, CURRENT_INTERPRETER, RUN_COMMAND_PAYLOAD)
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {"decision": "allow"}
+    assert "Python 3.9" in result.stderr
 
 
 @patch("load_skill.make_request")
