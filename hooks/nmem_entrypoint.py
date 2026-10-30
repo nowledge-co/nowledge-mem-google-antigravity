@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unified entrypoint router for Nowledge Mem Google Antigravity plugin."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -9,17 +10,17 @@ sys.path.insert(0, str(HOOKS_DIR))
 
 MIN_PYTHON = (3, 9)
 
-# Lifecycle hook subcommands: the module each one runs and the JSON it answers
-# with when that module cannot run. PreToolUse must always carry a decision,
+# Lifecycle hook subcommands: the module each one runs and the reply it gives
+# when that module fails while running. PreToolUse must always carry a decision,
 # because Antigravity blocks the tool call on a missing or malformed one.
 HOOKS = {
-    "session-start": ("session-start", "{}"),
-    "session-end": ("session-end", "{}"),
-    "gate": ("nmem-gate", '{"decision": "ask"}'),
-    "post-invocation": ("post-invocation", "{}"),
-    "post_invocation": ("post-invocation", "{}"),
-    "post-tool-use": ("post-tool-use", "{}"),
-    "post_tool_use": ("post-tool-use", "{}"),
+    "session-start": ("session-start", {}),
+    "session-end": ("session-end", {}),
+    "gate": ("nmem-gate", {"decision": "ask"}),
+    "post-invocation": ("post-invocation", {}),
+    "post_invocation": ("post-invocation", {}),
+    "post-tool-use": ("post-tool-use", {}),
+    "post_tool_use": ("post-tool-use", {}),
 }
 
 
@@ -42,35 +43,42 @@ class _StdoutRecorder:
 def run_hook(cmd, args):
     """Run a lifecycle hook so that Antigravity always receives valid JSON.
 
-    hooks.json starts this file with whatever python3 the host provides. If the
-    interpreter is too old, or the hook fails before writing anything, answer
-    with the hook's fallback and exit 0 rather than leaving the reply to the
-    shell. Keep this file free of syntax newer than Python 3.6 so it can.
+    A hook module that fails to import has not read stdin yet, so the error is
+    left to exit non-zero and hooks.json tries its next interpreter, then its
+    echo fallback. Once the hook is running it may have consumed stdin, so a
+    failure is answered here with the hook's fallback and exit 0, unless the
+    hook already wrote its reply.
     """
+    import importlib
+
     module_name, fallback = HOOKS[cmd]
+    hook = importlib.import_module(module_name)
+    sys.argv = [sys.argv[0]] + args
     recorder = _StdoutRecorder(sys.stdout)
     sys.stdout = recorder
     try:
-        if sys.version_info < MIN_PYTHON:
-            raise RuntimeError(
-                f"Nowledge Mem hooks need Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer, "
-                f"found {sys.version_info[0]}.{sys.version_info[1]}"
-            )
-        import importlib
-
-        hook = importlib.import_module(module_name)
-        sys.argv = [sys.argv[0]] + args
         hook.main()
     except Exception as error:
         sys.stderr.write(f"nowledge-mem {cmd} hook failed: {error}\n")
         if not recorder.written:
-            recorder.write(fallback)
+            reply = dict(fallback)
+            if "decision" in reply:
+                reply["reason"] = f"Nowledge Mem hook failed: {error}"
+            recorder.write(json.dumps(reply))
             recorder.flush()
     finally:
         sys.stdout = recorder._stream
 
 
 def main():
+    if sys.version_info < MIN_PYTHON:
+        # Exit before reading stdin so hooks.json can try `python`, then its echo fallback.
+        sys.stderr.write(
+            f"Nowledge Mem needs Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer, found "
+            f"{sys.version_info[0]}.{sys.version_info[1]}; install Python 3.9+ as python3 or python.\n"
+        )
+        sys.exit(1)
+
     if len(sys.argv) < 2:
         sys.stderr.write("Usage: python3 hooks/nmem_entrypoint.py <subcommand> [args...]\n")
         sys.stderr.write(
