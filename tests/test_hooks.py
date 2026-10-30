@@ -2,6 +2,8 @@ import importlib.util
 import io
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -12,6 +14,7 @@ import pytest
 
 # Add hooks directory to path to import nmem_shared and others
 HOOKS_DIR = Path(__file__).parent.parent / "hooks"
+PLUGIN_ROOT = HOOKS_DIR.parent
 sys.path.insert(0, str(HOOKS_DIR))
 
 import nmem_shared  # noqa: E402
@@ -313,6 +316,48 @@ def test_retry_unsynced_sessions_success_unlinks_queue(mock_http):
         ]
         assert queue_file.exists()
         nmem_shared.retry_unsynced_sessions()
+        assert not queue_file.exists()
+
+
+@patch("nmem_shared.is_backend_unreachable", return_value=False)
+@patch("nmem_shared.run_nmem_command")
+@patch("nmem_shared.http_request")
+def test_retry_unsynced_sessions_reconciles_existing_thread_prefix(mock_http, mock_run, mock_unreachable):
+    # Only the unsent tail goes to an existing thread; the whole transcript must not be appended again.
+    with (
+        tempfile.TemporaryDirectory() as tmpdir,
+        patch.dict(os.environ, {"HOME": tmpdir}),
+    ):
+        queue_file = nmem_shared.get_unsynced_queue_path()
+        queue_file.parent.mkdir(parents=True, exist_ok=True)
+        queue_file.write_text(
+            json.dumps(
+                {
+                    "conv-1": {
+                        "conversation_id": "conv-1",
+                        "messages": [
+                            {"role": "user", "content": "Save this"},
+                            {"role": "assistant", "content": "Saved."},
+                        ],
+                        "title": "Title",
+                        "space": "default",
+                        "host_agent_id": "host",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        mock_http.side_effect = [
+            {"id": "conv-1", "messages": [{"role": "user", "content": "Save this"}]},
+            {"status": "ok"},
+        ]
+        nmem_shared.retry_unsynced_sessions()
+
+        assert mock_http.call_args_list[1].args[0] == "/threads/conv-1/reconcile-tail"
+        payload = mock_http.call_args_list[1].kwargs["payload"]
+        assert payload["matched_count"] == 1
+        assert payload["messages"] == [{"role": "assistant", "content": "Saved."}]
+        mock_run.assert_not_called()
         assert not queue_file.exists()
 
 
@@ -890,6 +935,40 @@ def test_session_end_offline_fallback(
         mock_save.assert_called_once()
 
 
+@patch("nmem_shared.sync_learnings_if_any")
+@patch("nmem_shared.is_backend_unreachable", return_value=False)
+@patch("nmem_shared.run_nmem_command")
+@patch("nmem_shared.http_request")
+@patch("nmem_shared.resolve_space", return_value="default")
+def test_session_end_reconciles_existing_thread_prefix(
+    mock_space, mock_http, mock_run, mock_unreachable, mock_learnings, tmp_path
+):
+    # Only the unsent tail goes to an existing thread; the whole transcript must not be appended again.
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(
+        '{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Save this"}\n'
+        '{"source":"MODEL","type":"PLANNER_RESPONSE","content":"Saved."}\n',
+        encoding="utf-8",
+    )
+    mock_http.side_effect = [
+        {"id": "conv-prefix", "messages": [{"role": "user", "content": "Save this"}]},
+        {"status": "ok"},
+    ]
+    hook_input = {"conversationId": "conv-prefix", "transcriptPath": str(transcript), "fullyIdle": True}
+    with (
+        patch("nmem_shared.read_hook_input", return_value=hook_input),
+        patch("sys.stdout.write"),
+        patch.object(sys, "argv", ["session-end.py"]),
+    ):
+        session_end.main()
+
+    assert mock_http.call_args_list[1].args[0] == "/threads/conv-prefix/reconcile-tail"
+    payload = mock_http.call_args_list[1].kwargs["payload"]
+    assert payload["matched_count"] == 1
+    assert payload["messages"] == [{"role": "assistant", "content": "Saved."}]
+    mock_run.assert_not_called()
+
+
 @patch("nmem_gate.read_hook_input")
 @patch("sys.stdout.write")
 @patch("sys.stdout.flush")
@@ -1375,6 +1454,92 @@ def test_nmem_entrypoint_status(mock_status_main):
     with patch.object(sys, "argv", ["nmem_entrypoint.py", "status"]):
         nmem_entrypoint.main()
         mock_status_main.assert_called_once()
+
+
+HOOK_FALLBACKS = [
+    ("session-start", {}),
+    ("session-end", {}),
+    ("gate", {"decision": "ask"}),
+    ("post-invocation", {}),
+    ("post-tool-use", {}),
+]
+
+
+@pytest.mark.parametrize(("subcommand", "fallback"), HOOK_FALLBACKS)
+def test_entrypoint_prints_safe_fallback_when_hook_fails(subcommand, fallback, capsys):
+    # Antigravity blocks the tool call on a missing or malformed PreToolUse decision,
+    # so a hook that cannot load must still answer with JSON.
+    with (
+        patch.object(sys, "argv", ["nmem_entrypoint.py", subcommand]),
+        patch("importlib.import_module", side_effect=TypeError("unsupported operand type(s) for |")),
+    ):
+        nmem_entrypoint.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == fallback
+    assert "unsupported operand" in captured.err
+
+
+def test_entrypoint_keeps_hook_output_when_hook_fails_after_writing(capsys):
+    def gate_main():
+        sys.stdout.write(json.dumps({"decision": "force_ask"}))
+        raise RuntimeError("late failure")
+
+    gate = MagicMock()
+    gate.main.side_effect = gate_main
+    with (
+        patch.object(sys, "argv", ["nmem_entrypoint.py", "gate"]),
+        patch("importlib.import_module", return_value=gate),
+    ):
+        nmem_entrypoint.main()
+
+    assert json.loads(capsys.readouterr().out) == {"decision": "force_ask"}
+
+
+@pytest.mark.parametrize(("subcommand", "fallback"), HOOK_FALLBACKS)
+def test_entrypoint_answers_with_fallback_on_unsupported_python(subcommand, fallback, capsys):
+    with (
+        patch.object(sys, "argv", ["nmem_entrypoint.py", subcommand]),
+        patch.object(sys, "version_info", (3, 8, 18, "final", 0)),
+        patch("importlib.import_module") as mock_import,
+    ):
+        nmem_entrypoint.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == fallback
+    assert "Python 3.9" in captured.err
+    mock_import.assert_not_called()
+
+
+def _hook_command(event):
+    entry = json.loads((PLUGIN_ROOT / "hooks.json").read_text(encoding="utf-8"))["nowledge-mem-hooks"][event][0]
+    return entry["hooks"][0]["command"] if "hooks" in entry else entry["command"]
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
+@pytest.mark.parametrize("event", ["PreInvocation", "PostInvocation", "PreToolUse", "PostToolUse", "Stop"])
+def test_hooks_json_shell_fallback_prints_valid_json(event, tmp_path):
+    # With neither python3 nor python runnable, the echo at the end of the chain answers alone.
+    for name in ("python3", "python"):
+        interpreter = tmp_path / name
+        interpreter.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        interpreter.chmod(0o755)
+
+    result = subprocess.run(
+        [shutil.which("sh"), "-c", _hook_command(event)],
+        cwd=PLUGIN_ROOT,
+        env={**os.environ, "PATH": str(tmp_path)},
+        input="{}",
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    payload = json.loads(result.stdout)
+    if event == "PreToolUse":
+        assert payload == {"decision": "ask"}
+    else:
+        assert payload == {}
 
 
 @patch("load_skill.make_request")
