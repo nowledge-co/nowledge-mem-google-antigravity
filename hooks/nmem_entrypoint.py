@@ -7,6 +7,68 @@ from pathlib import Path
 HOOKS_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(HOOKS_DIR))
 
+MIN_PYTHON = (3, 9)
+
+# Lifecycle hook subcommands: the module each one runs and the JSON it answers
+# with when that module cannot run. PreToolUse must always carry a decision,
+# because Antigravity blocks the tool call on a missing or malformed one.
+HOOKS = {
+    "session-start": ("session-start", "{}"),
+    "session-end": ("session-end", "{}"),
+    "gate": ("nmem-gate", '{"decision": "ask"}'),
+    "post-invocation": ("post-invocation", "{}"),
+    "post_invocation": ("post-invocation", "{}"),
+    "post-tool-use": ("post-tool-use", "{}"),
+    "post_tool_use": ("post-tool-use", "{}"),
+}
+
+
+class _StdoutRecorder:
+    """Pass writes through to stdout and remember whether any happened."""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.written = False
+
+    def write(self, data):
+        if data:
+            self.written = True
+        return self._stream.write(data)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def run_hook(cmd, args):
+    """Run a lifecycle hook so that Antigravity always receives valid JSON.
+
+    hooks.json starts this file with whatever python3 the host provides. If the
+    interpreter is too old, or the hook fails before writing anything, answer
+    with the hook's fallback and exit 0 rather than leaving the reply to the
+    shell. Keep this file free of syntax newer than Python 3.6 so it can.
+    """
+    module_name, fallback = HOOKS[cmd]
+    recorder = _StdoutRecorder(sys.stdout)
+    sys.stdout = recorder
+    try:
+        if sys.version_info < MIN_PYTHON:
+            raise RuntimeError(
+                f"Nowledge Mem hooks need Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer, "
+                f"found {sys.version_info[0]}.{sys.version_info[1]}"
+            )
+        import importlib
+
+        hook = importlib.import_module(module_name)
+        sys.argv = [sys.argv[0]] + args
+        hook.main()
+    except Exception as error:
+        sys.stderr.write(f"nowledge-mem {cmd} hook failed: {error}\n")
+        if not recorder.written:
+            recorder.write(fallback)
+            recorder.flush()
+    finally:
+        sys.stdout = recorder._stream
+
 
 def main():
     if len(sys.argv) < 2:
@@ -19,46 +81,14 @@ def main():
     cmd = sys.argv[1]
     args = sys.argv[2:]
 
-    if cmd == "status":
+    if cmd in HOOKS:
+        run_hook(cmd, args)
+
+    elif cmd == "status":
         import nmem_status
 
         sys.argv = [sys.argv[0]] + args
         nmem_status.main()
-
-    elif cmd == "session-start":
-        import importlib
-
-        session_start = importlib.import_module("session-start")
-        sys.argv = [sys.argv[0]] + args
-        session_start.main()
-
-    elif cmd == "session-end":
-        import importlib
-
-        session_end = importlib.import_module("session-end")
-        sys.argv = [sys.argv[0]] + args
-        session_end.main()
-
-    elif cmd == "gate":
-        import importlib
-
-        nmem_gate = importlib.import_module("nmem-gate")
-        sys.argv = [sys.argv[0]] + args
-        nmem_gate.main()
-
-    elif cmd in ("post-invocation", "post_invocation"):
-        import importlib
-
-        post_inv = importlib.import_module("post-invocation")
-        sys.argv = [sys.argv[0]] + args
-        post_inv.main()
-
-    elif cmd in ("post-tool-use", "post_tool_use"):
-        import importlib
-
-        post_tu = importlib.import_module("post-tool-use")
-        sys.argv = [sys.argv[0]] + args
-        post_tu.main()
 
     elif cmd in ("skill-load", "load-skill"):
         load_skill_script = HOOKS_DIR.parent / "skills" / "nmem-skill-load" / "scripts" / "load_skill.py"
