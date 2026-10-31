@@ -973,6 +973,61 @@ def test_session_end_reconciles_existing_thread_prefix(
     mock_save.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [b"", b"{", b"\xff{}", b"[]"],
+    ids=["empty", "invalid-json", "not-utf8", "not-an-object"],
+)
+def test_read_hook_input_gives_lifecycle_hooks_an_empty_payload_it_cannot_read(raw):
+    with patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8")):
+        assert nmem_shared.read_hook_input() == {}
+
+
+def test_read_hook_input_decodes_utf8_whatever_the_stdin_encoding():
+    # On Windows a piped stdin decodes with the locale code page, such as GBK, but the payload is UTF-8.
+    payload = {"conversationId": "conv-utf8", "transcriptPath": "C:/Users/\u5f20/t.jsonl"}
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    with patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(raw), encoding="gbk")):
+        assert nmem_shared.read_hook_input() == payload
+
+
+@patch("nmem_shared.save_unsynced_session")
+@patch("nmem_shared.sync_learnings_if_any")
+@patch("nmem_shared.is_backend_unreachable", return_value=False)
+@patch("nmem_shared.run_nmem_command")
+@patch("nmem_shared.http_request")
+@patch("nmem_shared.resolve_space", return_value="default")
+def test_session_end_captures_a_utf8_payload_whatever_the_stdin_encoding(
+    mock_space, mock_http, mock_run, mock_unreachable, mock_learnings, mock_save, tmp_path
+):
+    # Stop reads a GBK-decoded stdin through the real shared reader and must still capture the session.
+    transcript = tmp_path / "\u5f20-project" / "transcript.jsonl"
+    transcript.parent.mkdir()
+    transcript.write_text(
+        '{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Save this"}\n'
+        '{"source":"MODEL","type":"PLANNER_RESPONSE","content":"Saved."}\n',
+        encoding="utf-8",
+    )
+    hook_input = {"conversationId": "conv-utf8", "transcriptPath": str(transcript), "fullyIdle": True}
+    raw = json.dumps(hook_input, ensure_ascii=False).encode("utf-8")
+    mock_http.side_effect = [{"status": 404, "error": "not_found"}, {"status": "ok"}]
+    with (
+        patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(raw), encoding="gbk")),
+        patch("sys.stdout.write"),
+        patch.object(sys, "argv", ["session-end.py"]),
+    ):
+        session_end.main()
+
+    imports = [call for call in mock_http.call_args_list if call.args[0] == "/threads/import"]
+    assert len(imports) == 1
+    assert imports[0].kwargs["payload"]["id"] == "conv-utf8"
+    assert imports[0].kwargs["payload"]["messages"] == [
+        {"role": "user", "content": "Save this"},
+        {"role": "assistant", "content": "Saved."},
+    ]
+    mock_save.assert_not_called()
+
+
 @patch("nmem_gate.read_hook_input")
 @patch("sys.stdout.write")
 @patch("sys.stdout.flush")
