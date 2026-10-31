@@ -1052,6 +1052,84 @@ def test_nmem_gate_delete_destructive(mock_flush, mock_write, mock_input):
         assert payload["decision"] == "force_ask"
 
 
+MEM_FS_ENVELOPES = ["direct", "call_mcp_tool"]
+
+
+def _mem_fs_call(envelope, arguments):
+    if envelope == "direct":
+        return {"toolCall": {"name": "mcp_nowledge-mem_mem_fs", "args": arguments}}
+    return {
+        "toolCall": {
+            "name": "call_mcp_tool",
+            "args": {"ServerName": "nowledge-mem", "ToolName": "mem_fs", "Arguments": arguments},
+        }
+    }
+
+
+def _gate_reply(payload, capsys):
+    with patch("nmem_gate.read_hook_input", return_value=payload), patch.object(sys, "argv", ["nmem-gate.py"]):
+        nmem_gate.main()
+    return json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("envelope", MEM_FS_ENVELOPES)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls /memories",
+        "cat /memories/by-id/x.memory.md --line 1 --lines 20",
+        "stat /memories/by-id/x.memory.md",
+        "find /memories --label work",
+        "grep deploy /memories",
+        'recall "release plan"',
+        "capabilities",
+        "caps",
+    ],
+)
+def test_nmem_gate_allows_mem_fs_reads(envelope, command, capsys):
+    reply = _gate_reply(_mem_fs_call(envelope, {"command": command}), capsys)
+
+    assert reply["decision"] == "allow"
+    # A tool-wide override would also let later mem_fs writes past an ask.
+    assert "permissionOverrides" not in reply
+
+
+@pytest.mark.parametrize("envelope", MEM_FS_ENVELOPES)
+@pytest.mark.parametrize(
+    "command",
+    ["rm /memories/by-id/x.memory.md", "delete /memories/by-id/x.memory.md", "RM /memories/by-id/x.memory.md"],
+)
+def test_nmem_gate_confirms_mem_fs_deletes(envelope, command, capsys):
+    assert _gate_reply(_mem_fs_call(envelope, {"command": command}), capsys)["decision"] == "force_ask"
+
+
+@pytest.mark.parametrize("envelope", MEM_FS_ENVELOPES)
+@pytest.mark.parametrize(
+    "arguments",
+    [{}, {"command": None}, {"command": ""}, {"command": 'rm "/memories/by-id/x.memory.md'}, {"command": "mount /x"}],
+    ids=["missing", "not-a-string", "empty", "unbalanced-quote", "unknown-verb"],
+)
+def test_nmem_gate_confirms_mem_fs_commands_it_cannot_classify(envelope, arguments, capsys):
+    # The server parses commands itself and may still read one of these as a delete.
+    assert _gate_reply(_mem_fs_call(envelope, arguments), capsys)["decision"] == "force_ask"
+
+
+@pytest.mark.parametrize("envelope", MEM_FS_ENVELOPES)
+def test_nmem_gate_asks_before_mem_fs_write_without_intent(envelope, capsys):
+    reply = _gate_reply(_mem_fs_call(envelope, {"command": "write /memories/by-id/x.memory.md --body hi"}), capsys)
+
+    assert reply["decision"] == "ask"
+
+
+def test_nmem_gate_allows_mem_fs_write_with_intent(tmp_path, capsys):
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text('{"source":"USER_EXPLICIT","content":"Please save this"}\n', encoding="utf-8")
+    payload = _mem_fs_call("direct", {"command": "write /memories/by-id/x.memory.md --body hi"})
+    payload["transcriptPath"] = str(transcript)
+
+    assert _gate_reply(payload, capsys)["decision"] == "allow"
+
+
 @patch("nmem_gate.read_hook_input")
 @patch("sys.stdout.write")
 @patch("sys.stdout.flush")
@@ -1463,7 +1541,7 @@ def test_nmem_entrypoint_status(mock_status_main):
 HOOK_FALLBACKS = [
     ("session-start", {}),
     ("session-end", {}),
-    ("gate", {"decision": "ask"}),
+    ("gate", {"decision": "force_ask"}),
     ("post-invocation", {}),
     ("post-tool-use", {}),
 ]
@@ -1594,9 +1672,18 @@ def test_hooks_json_shell_fallback_prints_valid_json(event, tmp_path):
     assert result.returncode == 0
     payload = json.loads(result.stdout)
     if event == "PreToolUse":
-        assert payload == {"decision": "ask"}
+        assert payload == {"decision": "force_ask"}
     else:
         assert payload == {}
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
+def test_hooks_json_shell_fallback_confirms_a_delete(tmp_path):
+    # The echo cannot see the payload, so a delete must still get the confirmation the gate gives it.
+    result = _run_hook_command("PreToolUse", tmp_path, FAILING_INTERPRETER, FAILING_INTERPRETER, DELETE_MEMORY_PAYLOAD)
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {"decision": "force_ask"}
 
 
 @pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
