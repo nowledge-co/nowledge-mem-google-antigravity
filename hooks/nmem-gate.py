@@ -88,6 +88,21 @@ def is_safe_status_command(cmd_str: str) -> bool:
     return False
 
 
+MEM_FS_READ_VERBS = {"ls", "cat", "stat", "find", "grep", "recall", "capabilities", "caps"}
+
+
+def mem_fs_verb(arguments) -> str:
+    """Return the lowercased verb of a mem_fs command, or "" when it cannot be parsed."""
+    command = arguments.get("command") if isinstance(arguments, dict) else None
+    if not isinstance(command, str):
+        return ""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return ""
+    return tokens[0].lower() if tokens else ""
+
+
 def main():
     data = read_hook_input()
     tool_call = data.get("toolCall") if isinstance(data, dict) else None
@@ -180,6 +195,28 @@ def main():
         )
         return
 
+    # mem_fs reads, writes and deletes, so classify each call by its command's verb.
+    if sub_tool == "mem_fs":
+        call_arguments = tool_args.get("Arguments") if isinstance(tool_args.get("Arguments"), dict) else tool_args
+        verb = mem_fs_verb(call_arguments)
+        if verb in MEM_FS_READ_VERBS:
+            # No permission override: it would cover the tool's writes as well.
+            emit({"decision": "allow", "reason": f"Auto-allowing read-only mem_fs {verb}"})
+            return
+        if verb in {"rm", "delete"}:
+            emit(
+                {
+                    "decision": "force_ask",
+                    "reason": f"Confirmation required to delete knowledge graph data (mem_fs {verb})",
+                }
+            )
+            return
+        if verb != "write":
+            # The server parses the command itself and may still read it as a delete.
+            emit({"decision": "force_ask", "reason": "Confirmation required for an unrecognized mem_fs command"})
+            return
+        # A write falls through to the intent check for memory writes below.
+
     # 2. Read-only tools (auto-allow)
     read_only = {
         "memory_search",
@@ -203,7 +240,6 @@ def main():
         "search_artifact_chunks",
         "analyze_source_data",
         "analyze_artifact_data",
-        "mem_fs",
         "get_memory_by_id",
         "memory_neighbors",
         "report_skill_outcome",
@@ -255,6 +291,7 @@ def main():
         "label_merge",
         "schedule_follow_up",
         "resolve_timeline_review",
+        "mem_fs",
     }:
         transcript_path = data.get("transcriptPath")
         if transcript_path and os.path.exists(transcript_path):
