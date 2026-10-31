@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 hooks/nmem_entrypoint.py gate || python hooks/nmem_entrypoint.py gate || echo '{\"decision\":\"ask\"}'",
+            "command": "python3 hooks/nmem_entrypoint.py gate || python hooks/nmem_entrypoint.py gate || echo '{\"decision\":\"force_ask\"}'",
             "timeout": 10
           }
         ]

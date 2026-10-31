@@ -12,11 +12,13 @@ MIN_PYTHON = (3, 9)
 
 # Lifecycle hook subcommands: the module each one runs and the reply it gives
 # when that module fails while running. PreToolUse must always carry a decision,
-# because Antigravity blocks the tool call on a missing or malformed one.
+# because Antigravity blocks the tool call on a missing or malformed one. The
+# gate's is force_ask: it cannot tell a delete from a read, and only force_ask
+# still prompts when the user chose Always Allow.
 HOOKS = {
     "session-start": ("session-start", {}),
     "session-end": ("session-end", {}),
-    "gate": ("nmem-gate", {"decision": "ask"}),
+    "gate": ("nmem-gate", {"decision": "force_ask"}),
     "post-invocation": ("post-invocation", {}),
     "post_invocation": ("post-invocation", {}),
     "post-tool-use": ("post-tool-use", {}),
