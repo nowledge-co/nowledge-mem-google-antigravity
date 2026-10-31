@@ -55,10 +55,11 @@ flowchart TD
 ### 2. PreToolUse Gate Hook (`hooks/nmem-gate.py`)
 - **Trigger**: Evaluated before executing `call_mcp_tool`, `mcp_nowledge-mem_*`, or `run_command`.
 - **Policy Enforcement**:
+  - **Unreadable Call**: a payload the gate cannot read as a named tool call (empty stdin, invalid JSON, no tool name, bytes that are not UTF-8) returns `{"decision": "force_ask"}`, because the gate cannot tell a delete from a read. The gate reads stdin as bytes and decodes UTF-8 itself: Windows decodes a piped stdin with the locale code page.
   - **Auto-Allow**: Read-only tools (`memory_search`, `thread_search`, `query_library`, `explore_graph`, `get_memory_by_id`, `ontology_read`, `entity_search`, `list_timeline_reviews`, etc.) return `{"decision": "allow"}` with permission overrides to prevent prompt interruptions; validated status commands (`python3 hooks/nmem_status.py`, `python3 hooks/nmem_entrypoint.py status`, `nmem status`, `nmem tasks`) return `{"decision": "allow", "reason": "..."}`.
   - **Force Confirm**: Destructive operations (`memory_delete`, `thread_delete`, `memory_relation_delete`, `entity_delete`, `label_delete`) return `{"decision": "force_ask"}`.
   - **Intent-Based Write Allow**: Write tools (`memory_add`, `memory_update`, etc.) check recent conversation steps for intent keywords (`save`, `remember`, `store`, `nmem`, `distill`, `handoff`). If found, returns `{"decision": "allow"}`.
-  - **Nowledge FS (`mem_fs`)**: one tool that reads, writes and deletes, so the gate classifies each call by the first word of its `command`, whether it arrives as `mcp_nowledge-mem_mem_fs` or through `call_mcp_tool`.
+  - **Nowledge FS (`mem_fs`)**: one tool that reads, writes and deletes, so the gate classifies each call by the first word of the `command` the server will run: the top-level `command` of `mcp_nowledge-mem_mem_fs`, or `Arguments.command` of a `call_mcp_tool`, which forwards only `Arguments`.
     - `ls`, `cat`, `stat`, `find`, `grep`, `recall`, `capabilities` and `caps` return `{"decision": "allow"}` without a permission override, because an override would cover the tool's writes as well.
     - `rm` and `delete` return `{"decision": "force_ask"}`, like the other deletes.
     - `write` follows the intent check for write tools.
