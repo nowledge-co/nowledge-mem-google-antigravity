@@ -1564,6 +1564,7 @@ REPORT_PYTHON_38 = (
 )
 TOO_OLD_INTERPRETER = f'exec "{Path(sys.executable).as_posix()}" -c "{REPORT_PYTHON_38}" "$@"'
 RUN_COMMAND_PAYLOAD = json.dumps({"toolCall": {"name": "run_command", "args": {"CommandLine": "ls -la"}}})
+DELETE_MEMORY_PAYLOAD = json.dumps({"toolCall": {"name": "mcp_nowledge-mem_memory_delete", "args": {"memory_id": "x"}}})
 
 
 def _run_hook_command(event, tmp_path, python3, python, payload="{}"):
@@ -1609,10 +1610,11 @@ def test_hooks_json_gate_decides_on_this_python(tmp_path):
 
 @pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
 def test_hooks_json_falls_through_to_python_when_python3_is_too_old(tmp_path):
-    result = _run_hook_command("PreToolUse", tmp_path, TOO_OLD_INTERPRETER, CURRENT_INTERPRETER, RUN_COMMAND_PAYLOAD)
+    # A delete must reach python intact: the gate would allow an empty payload left by python3.
+    result = _run_hook_command("PreToolUse", tmp_path, TOO_OLD_INTERPRETER, CURRENT_INTERPRETER, DELETE_MEMORY_PAYLOAD)
 
     assert result.returncode == 0
-    assert json.loads(result.stdout) == {"decision": "allow"}
+    assert json.loads(result.stdout)["decision"] == "force_ask"
     assert "Python 3.9" in result.stderr
 
 
