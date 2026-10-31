@@ -12,11 +12,16 @@ import nmem_shared
 
 
 def read_hook_input():
+    """Return the hook payload as a dict, or None when it cannot be read.
+
+    Read bytes and decode UTF-8 ourselves: on Windows a piped stdin decodes with
+    the locale code page, which fails on non-ASCII payloads.
+    """
     try:
-        content = sys.stdin.read().strip()
-        return json.loads(content) if content else {}
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     except Exception:
-        return {}
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def emit(payload):
@@ -105,10 +110,12 @@ def mem_fs_verb(arguments) -> str:
 
 def main():
     data = read_hook_input()
-    tool_call = data.get("toolCall") if isinstance(data, dict) else None
-    if not isinstance(tool_call, dict):
-        tool_call = {}
-    tool_name = tool_call.get("name")
+    tool_call = data.get("toolCall") if data is not None else None
+    if not isinstance(tool_call, dict) or not isinstance(tool_call.get("name"), str):
+        # Without the tool call the gate cannot tell a delete from a read.
+        emit({"decision": "force_ask", "reason": "Confirmation required: Nowledge Mem could not read this tool call"})
+        return
+    tool_name = tool_call["name"]
     tool_args = tool_call.get("args")
     if not isinstance(tool_args, dict):
         tool_args = {}
