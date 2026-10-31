@@ -197,10 +197,10 @@ def main():
 
     # mem_fs reads, writes and deletes, so classify each call by its command's verb.
     if sub_tool == "mem_fs":
-        call_arguments = tool_args.get("Arguments") if isinstance(tool_args.get("Arguments"), dict) else tool_args
-        verb = mem_fs_verb(call_arguments)
+        # Read the command the server will run: call_mcp_tool forwards only Arguments.
+        verb = mem_fs_verb(tool_args.get("Arguments") if tool_name == "call_mcp_tool" else tool_args)
         if verb in MEM_FS_READ_VERBS:
-            # No permission override: it would cover the tool's writes as well.
+            # No permission override: a read must not pre-approve this tool's writes.
             emit({"decision": "allow", "reason": f"Auto-allowing read-only mem_fs {verb}"})
             return
         if verb in {"rm", "delete"}:
