@@ -12,16 +12,8 @@ import nmem_shared
 
 
 def read_hook_input():
-    """Return the hook payload as a dict, or None when it cannot be read.
-
-    Read bytes and decode UTF-8 ourselves: on Windows a piped stdin decodes with
-    the locale code page, which fails on non-ASCII payloads.
-    """
-    try:
-        data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
-    except Exception:
-        return None
-    return data if isinstance(data, dict) else None
+    """Return the hook payload as a dict, or None when it cannot be read."""
+    return nmem_shared.read_hook_payload()
 
 
 def emit(payload):

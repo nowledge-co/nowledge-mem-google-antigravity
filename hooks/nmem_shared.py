@@ -13,13 +13,23 @@ import uuid
 from pathlib import Path
 
 
-def read_hook_input() -> dict:
-    """Read and parse JSON from stdin."""
+def read_hook_payload() -> dict | None:
+    """Return the hook payload from stdin as a dict, or None when it cannot be read.
+
+    Read bytes and decode UTF-8 here: on Windows a piped stdin decodes with the
+    locale code page, which fails on non-ASCII payloads.
+    """
     try:
-        content = sys.stdin.read().strip()
-        return json.loads(content) if content else {}
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     except Exception:
-        return {}
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def read_hook_input() -> dict:
+    """Return the hook payload from stdin, or {} when it cannot be read."""
+    payload = read_hook_payload()
+    return payload if payload is not None else {}
 
 
 def emit(payload: dict) -> None:
