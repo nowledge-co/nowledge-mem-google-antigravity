@@ -1061,8 +1061,8 @@ def _gate_reply_from_stdin(raw, capsys, encoding="utf-8"):
 
 @pytest.mark.parametrize(
     "raw",
-    [b"", b"{", b"[]", b'{"conversationId": "conv-123"}', b'{"toolCall": {"args": {}}}'],
-    ids=["empty", "invalid-json", "not-an-object", "no-tool-call", "no-tool-name"],
+    [b"", b"{", b"[]", b'{"conversationId": "conv-123"}', b'{"toolCall": {"args": {}}}', b"\xff{}"],
+    ids=["empty", "invalid-json", "not-an-object", "no-tool-call", "no-tool-name", "not-utf8"],
 )
 def test_nmem_gate_confirms_a_tool_call_it_cannot_read(raw, capsys):
     assert _gate_reply_from_stdin(raw, capsys)["decision"] == "force_ask"
@@ -1647,7 +1647,9 @@ def test_entrypoint_confirms_a_delete_when_the_running_gate_fails(capsys):
     ):
         nmem_entrypoint.main()
 
+    # The gate classified the delete itself, not an unreadable payload.
     assert emit.call_args.args[0]["decision"] == "force_ask"
+    assert "memory_delete" in emit.call_args.args[0]["reason"]
     reply = json.loads(capsys.readouterr().out)
     assert reply["decision"] == "force_ask"
     assert "emit failed" in reply["reason"]
