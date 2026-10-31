@@ -1052,6 +1052,34 @@ def test_nmem_gate_delete_destructive(mock_flush, mock_write, mock_input):
         assert payload["decision"] == "force_ask"
 
 
+def _gate_reply_from_stdin(raw, capsys, encoding="utf-8"):
+    stdin = io.TextIOWrapper(io.BytesIO(raw), encoding=encoding)
+    with patch.object(sys, "stdin", stdin), patch.object(sys, "argv", ["nmem-gate.py"]):
+        nmem_gate.main()
+    return json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"", b"{", b"[]", b'{"conversationId": "conv-123"}', b'{"toolCall": {"args": {}}}'],
+    ids=["empty", "invalid-json", "not-an-object", "no-tool-call", "no-tool-name"],
+)
+def test_nmem_gate_confirms_a_tool_call_it_cannot_read(raw, capsys):
+    assert _gate_reply_from_stdin(raw, capsys)["decision"] == "force_ask"
+
+
+def test_nmem_gate_reads_a_utf8_payload_whatever_the_stdin_encoding(capsys):
+    # On Windows a piped stdin decodes with the locale code page, such as GBK, but the payload is UTF-8.
+    payload = {
+        "toolCall": {"name": "mcp_nowledge-mem_memory_delete", "args": {"memory_id": "x"}},
+        "transcriptPath": "C:/Users/\u5f20/t.jsonl",
+    }
+    reply = _gate_reply_from_stdin(json.dumps(payload, ensure_ascii=False).encode("utf-8"), capsys, encoding="gbk")
+
+    assert reply["decision"] == "force_ask"
+    assert "memory_delete" in reply["reason"]
+
+
 MEM_FS_ENVELOPES = ["direct", "call_mcp_tool"]
 
 
@@ -1613,7 +1641,7 @@ def test_entrypoint_confirms_a_delete_when_the_running_gate_fails(capsys):
     # The real gate reads a delete and fails before its answer is written; the fallback must still confirm it.
     with (
         patch.object(sys, "argv", ["nmem_entrypoint.py", "gate"]),
-        patch.object(sys, "stdin", io.StringIO(DELETE_MEMORY_PAYLOAD)),
+        patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(DELETE_MEMORY_PAYLOAD.encode()), encoding="utf-8")),
         patch("importlib.import_module", return_value=nmem_gate),
         patch.object(nmem_gate, "emit", side_effect=RuntimeError("emit failed")) as emit,
     ):
@@ -1753,11 +1781,13 @@ def test_hooks_json_gate_decides_on_this_python(tmp_path):
 
 @pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
 def test_hooks_json_falls_through_to_python_when_python3_is_too_old(tmp_path):
-    # A delete must reach python intact: the gate would allow an empty payload left by python3.
+    # A delete must reach python intact, not as an empty stdin left by python3, which the gate cannot read.
     result = _run_hook_command("PreToolUse", tmp_path, TOO_OLD_INTERPRETER, CURRENT_INTERPRETER, DELETE_MEMORY_PAYLOAD)
 
     assert result.returncode == 0
-    assert json.loads(result.stdout)["decision"] == "force_ask"
+    reply = json.loads(result.stdout)
+    assert reply["decision"] == "force_ask"
+    assert "memory_delete" in reply["reason"]
     assert "Python 3.9" in result.stderr
 
 
