@@ -2,6 +2,8 @@ import importlib.util
 import io
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -12,6 +14,7 @@ import pytest
 
 # Add hooks directory to path to import nmem_shared and others
 HOOKS_DIR = Path(__file__).parent.parent / "hooks"
+PLUGIN_ROOT = HOOKS_DIR.parent
 sys.path.insert(0, str(HOOKS_DIR))
 
 import nmem_shared  # noqa: E402
@@ -313,6 +316,49 @@ def test_retry_unsynced_sessions_success_unlinks_queue(mock_http):
         ]
         assert queue_file.exists()
         nmem_shared.retry_unsynced_sessions()
+        assert not queue_file.exists()
+
+
+@patch("nmem_shared.is_backend_unreachable", return_value=False)
+@patch("nmem_shared.run_nmem_command")
+@patch("nmem_shared.http_request")
+def test_retry_unsynced_sessions_reconciles_existing_thread_prefix(mock_http, mock_run, mock_unreachable):
+    # Only the unsent tail goes to an existing thread; the whole transcript must not be appended again.
+    with (
+        tempfile.TemporaryDirectory() as tmpdir,
+        patch.dict(os.environ, {"HOME": tmpdir, "USERPROFILE": tmpdir}),
+    ):
+        queue_file = nmem_shared.get_unsynced_queue_path()
+        queue_file.parent.mkdir(parents=True, exist_ok=True)
+        queue_file.write_text(
+            json.dumps(
+                {
+                    "conv-1": {
+                        "conversation_id": "conv-1",
+                        "messages": [
+                            {"role": "user", "content": "Save this"},
+                            {"role": "assistant", "content": "Saved."},
+                        ],
+                        "title": "Title",
+                        "space": "default",
+                        "host_agent_id": "host",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        mock_http.side_effect = [
+            {"id": "conv-1", "messages": [{"role": "user", "content": "Save this"}]},
+            {"status": "ok"},
+        ]
+        nmem_shared.retry_unsynced_sessions()
+
+        assert mock_http.call_count == 2
+        assert mock_http.call_args_list[1].args[0] == "/threads/conv-1/reconcile-tail"
+        payload = mock_http.call_args_list[1].kwargs["payload"]
+        assert payload["matched_count"] == 1
+        assert payload["messages"] == [{"role": "assistant", "content": "Saved."}]
+        mock_run.assert_not_called()
         assert not queue_file.exists()
 
 
@@ -890,6 +936,98 @@ def test_session_end_offline_fallback(
         mock_save.assert_called_once()
 
 
+@patch("nmem_shared.save_unsynced_session")
+@patch("nmem_shared.sync_learnings_if_any")
+@patch("nmem_shared.is_backend_unreachable", return_value=False)
+@patch("nmem_shared.run_nmem_command")
+@patch("nmem_shared.http_request")
+@patch("nmem_shared.resolve_space", return_value="default")
+def test_session_end_reconciles_existing_thread_prefix(
+    mock_space, mock_http, mock_run, mock_unreachable, mock_learnings, mock_save, tmp_path
+):
+    # Only the unsent tail goes to an existing thread; the whole transcript must not be appended again.
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(
+        '{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Save this"}\n'
+        '{"source":"MODEL","type":"PLANNER_RESPONSE","content":"Saved."}\n',
+        encoding="utf-8",
+    )
+    mock_http.side_effect = [
+        {"id": "conv-prefix", "messages": [{"role": "user", "content": "Save this"}]},
+        {"status": "ok"},
+    ]
+    hook_input = {"conversationId": "conv-prefix", "transcriptPath": str(transcript), "fullyIdle": True}
+    with (
+        patch("nmem_shared.read_hook_input", return_value=hook_input),
+        patch("sys.stdout.write"),
+        patch.object(sys, "argv", ["session-end.py"]),
+    ):
+        session_end.main()
+
+    assert mock_http.call_count == 2
+    assert mock_http.call_args_list[1].args[0] == "/threads/conv-prefix/reconcile-tail"
+    payload = mock_http.call_args_list[1].kwargs["payload"]
+    assert payload["matched_count"] == 1
+    assert payload["messages"] == [{"role": "assistant", "content": "Saved."}]
+    mock_run.assert_not_called()
+    mock_save.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"", b"{", b"\xff{}", b"[]"],
+    ids=["empty", "invalid-json", "not-utf8", "not-an-object"],
+)
+def test_read_hook_input_gives_lifecycle_hooks_an_empty_payload_it_cannot_read(raw):
+    with patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8")):
+        assert nmem_shared.read_hook_input() == {}
+
+
+def test_read_hook_input_decodes_utf8_whatever_the_stdin_encoding():
+    # On Windows a piped stdin decodes with the locale code page, such as GBK, but the payload is UTF-8.
+    payload = {"conversationId": "conv-utf8", "transcriptPath": "C:/Users/\u5f20/t.jsonl"}
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    with patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(raw), encoding="gbk")):
+        assert nmem_shared.read_hook_input() == payload
+
+
+@patch("nmem_shared.save_unsynced_session")
+@patch("nmem_shared.sync_learnings_if_any")
+@patch("nmem_shared.is_backend_unreachable", return_value=False)
+@patch("nmem_shared.run_nmem_command")
+@patch("nmem_shared.http_request")
+@patch("nmem_shared.resolve_space", return_value="default")
+def test_session_end_captures_a_utf8_payload_whatever_the_stdin_encoding(
+    mock_space, mock_http, mock_run, mock_unreachable, mock_learnings, mock_save, tmp_path
+):
+    # Stop reads a GBK-decoded stdin through the real shared reader and must still capture the session.
+    transcript = tmp_path / "\u5f20-project" / "transcript.jsonl"
+    transcript.parent.mkdir()
+    transcript.write_text(
+        '{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Save this"}\n'
+        '{"source":"MODEL","type":"PLANNER_RESPONSE","content":"Saved."}\n',
+        encoding="utf-8",
+    )
+    hook_input = {"conversationId": "conv-utf8", "transcriptPath": str(transcript), "fullyIdle": True}
+    raw = json.dumps(hook_input, ensure_ascii=False).encode("utf-8")
+    mock_http.side_effect = [{"status": 404, "error": "not_found"}, {"status": "ok"}]
+    with (
+        patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(raw), encoding="gbk")),
+        patch("sys.stdout.write"),
+        patch.object(sys, "argv", ["session-end.py"]),
+    ):
+        session_end.main()
+
+    imports = [call for call in mock_http.call_args_list if call.args[0] == "/threads/import"]
+    assert len(imports) == 1
+    assert imports[0].kwargs["payload"]["id"] == "conv-utf8"
+    assert imports[0].kwargs["payload"]["messages"] == [
+        {"role": "user", "content": "Save this"},
+        {"role": "assistant", "content": "Saved."},
+    ]
+    mock_save.assert_not_called()
+
+
 @patch("nmem_gate.read_hook_input")
 @patch("sys.stdout.write")
 @patch("sys.stdout.flush")
@@ -967,6 +1105,152 @@ def test_nmem_gate_delete_destructive(mock_flush, mock_write, mock_input):
         written = "".join(call.args[0] for call in mock_write.call_args_list)
         payload = json.loads(written)
         assert payload["decision"] == "force_ask"
+
+
+def _gate_reply_from_stdin(raw, capsys, encoding="utf-8"):
+    stdin = io.TextIOWrapper(io.BytesIO(raw), encoding=encoding)
+    with patch.object(sys, "stdin", stdin), patch.object(sys, "argv", ["nmem-gate.py"]):
+        nmem_gate.main()
+    return json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"", b"{", b"[]", b'{"conversationId": "conv-123"}', b'{"toolCall": {"args": {}}}', b"\xff{}"],
+    ids=["empty", "invalid-json", "not-an-object", "no-tool-call", "no-tool-name", "not-utf8"],
+)
+def test_nmem_gate_confirms_a_tool_call_it_cannot_read(raw, capsys):
+    assert _gate_reply_from_stdin(raw, capsys)["decision"] == "force_ask"
+
+
+def test_nmem_gate_reads_a_utf8_payload_whatever_the_stdin_encoding(capsys):
+    # On Windows a piped stdin decodes with the locale code page, such as GBK, but the payload is UTF-8.
+    payload = {
+        "toolCall": {"name": "mcp_nowledge-mem_memory_delete", "args": {"memory_id": "x"}},
+        "transcriptPath": "C:/Users/\u5f20/t.jsonl",
+    }
+    reply = _gate_reply_from_stdin(json.dumps(payload, ensure_ascii=False).encode("utf-8"), capsys, encoding="gbk")
+
+    assert reply["decision"] == "force_ask"
+    assert "memory_delete" in reply["reason"]
+
+
+MEM_FS_ENVELOPES = ["direct", "call_mcp_tool"]
+
+
+def _mem_fs_call(envelope, arguments):
+    if envelope == "direct":
+        return {"toolCall": {"name": "mcp_nowledge-mem_mem_fs", "args": arguments}}
+    return {
+        "toolCall": {
+            "name": "call_mcp_tool",
+            "args": {"ServerName": "nowledge-mem", "ToolName": "mem_fs", "Arguments": arguments},
+        }
+    }
+
+
+def _gate_reply(payload, capsys):
+    with patch("nmem_gate.read_hook_input", return_value=payload), patch.object(sys, "argv", ["nmem-gate.py"]):
+        nmem_gate.main()
+    return json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("envelope", MEM_FS_ENVELOPES)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls /memories",
+        "cat /memories/by-id/x.memory.md --line 1 --lines 20",
+        "stat /memories/by-id/x.memory.md",
+        "find /memories --label work",
+        "grep deploy /memories",
+        'recall "release plan"',
+        "capabilities",
+        "caps",
+    ],
+)
+def test_nmem_gate_allows_mem_fs_reads(envelope, command, capsys):
+    reply = _gate_reply(_mem_fs_call(envelope, {"command": command}), capsys)
+
+    assert reply["decision"] == "allow"
+    # A tool-wide override from a read would pre-approve later mem_fs writes.
+    assert "permissionOverrides" not in reply
+
+
+@pytest.mark.parametrize("envelope", MEM_FS_ENVELOPES)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm /memories/by-id/x.memory.md",
+        "delete /memories/by-id/x.memory.md",
+        "RM /memories/by-id/x.memory.md",
+        "Delete /memories/by-id/x.memory.md",
+        '"rm" /memories/by-id/x.memory.md',
+        "  rm /memories/by-id/x.memory.md",
+        "rm	/memories/by-id/x.memory.md",
+    ],
+)
+def test_nmem_gate_confirms_mem_fs_deletes(envelope, command, capsys):
+    assert _gate_reply(_mem_fs_call(envelope, {"command": command}), capsys)["decision"] == "force_ask"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "toolCall": {
+                "name": "mcp_nowledge-mem_mem_fs",
+                "args": {"command": "rm /memories/by-id/x.memory.md", "Arguments": {"command": "ls"}},
+            }
+        },
+        {
+            "toolCall": {
+                "name": "call_mcp_tool",
+                "args": {
+                    "ServerName": "nowledge-mem",
+                    "ToolName": "mem_fs",
+                    "command": "ls",
+                    "Arguments": '{"command": "rm /memories/by-id/x.memory.md"}',
+                },
+            }
+        },
+    ],
+    ids=["direct-with-nested-arguments", "call_mcp_tool-with-string-arguments"],
+)
+def test_nmem_gate_reads_the_mem_fs_command_the_server_runs(payload, capsys):
+    # The server runs a direct call's own command, and call_mcp_tool forwards only Arguments.
+    assert _gate_reply(payload, capsys)["decision"] == "force_ask"
+
+
+@pytest.mark.parametrize("envelope", MEM_FS_ENVELOPES)
+@pytest.mark.parametrize(
+    "arguments",
+    [{}, {"command": None}, {"command": ""}, {"command": 'rm "/memories/by-id/x.memory.md'}, {"command": "mount /x"}],
+    ids=["missing", "not-a-string", "empty", "unbalanced-quote", "unknown-verb"],
+)
+def test_nmem_gate_confirms_mem_fs_commands_it_cannot_classify(envelope, arguments, capsys):
+    # The server parses commands itself and may still read one of these as a delete.
+    assert _gate_reply(_mem_fs_call(envelope, arguments), capsys)["decision"] == "force_ask"
+
+
+@pytest.mark.parametrize("envelope", MEM_FS_ENVELOPES)
+@pytest.mark.parametrize("verb", ["write", "WRITE"])
+def test_nmem_gate_asks_before_mem_fs_write_without_intent(envelope, verb, capsys):
+    reply = _gate_reply(_mem_fs_call(envelope, {"command": f"{verb} /memories/by-id/x.memory.md --body hi"}), capsys)
+
+    assert reply["decision"] == "ask"
+
+
+def test_nmem_gate_allows_mem_fs_write_with_intent(tmp_path, capsys):
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text('{"source":"USER_EXPLICIT","content":"Please save this"}\n', encoding="utf-8")
+    payload = _mem_fs_call("direct", {"command": "write /memories/by-id/x.memory.md --body hi"})
+    payload["transcriptPath"] = str(transcript)
+
+    reply = _gate_reply(payload, capsys)
+    assert reply["decision"] == "allow"
+    # Like other memory writes, an approved write pre-approves later ones; deletes still get force_ask.
+    assert reply["permissionOverrides"] == ["mcp(nowledge-mem/mem_fs)"]
 
 
 @patch("nmem_gate.read_hook_input")
@@ -1375,6 +1659,193 @@ def test_nmem_entrypoint_status(mock_status_main):
     with patch.object(sys, "argv", ["nmem_entrypoint.py", "status"]):
         nmem_entrypoint.main()
         mock_status_main.assert_called_once()
+
+
+HOOK_FALLBACKS = [
+    ("session-start", {}),
+    ("session-end", {}),
+    ("gate", {"decision": "force_ask"}),
+    ("post-invocation", {}),
+    ("post-tool-use", {}),
+]
+
+
+@pytest.mark.parametrize(("subcommand", "fallback"), HOOK_FALLBACKS)
+def test_entrypoint_prints_safe_fallback_when_running_hook_fails(subcommand, fallback, capsys):
+    # Antigravity blocks the tool call on a missing or malformed PreToolUse decision,
+    # and a running hook may already have consumed stdin, so it must still answer.
+    hook = MagicMock()
+    hook.main.side_effect = TypeError("unsupported operand type(s) for |")
+    with (
+        patch.object(sys, "argv", ["nmem_entrypoint.py", subcommand]),
+        patch("importlib.import_module", return_value=hook),
+    ):
+        nmem_entrypoint.main()
+
+    captured = capsys.readouterr()
+    reply = json.loads(captured.out)
+    if "decision" in fallback:
+        assert reply["decision"] == fallback["decision"]
+        assert "unsupported operand" in reply["reason"]
+    else:
+        assert reply == fallback
+    assert "unsupported operand" in captured.err
+
+
+def test_entrypoint_confirms_a_delete_when_the_running_gate_fails(capsys):
+    # The real gate reads a delete and fails before its answer is written; the fallback must still confirm it.
+    with (
+        patch.object(sys, "argv", ["nmem_entrypoint.py", "gate"]),
+        patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(DELETE_MEMORY_PAYLOAD.encode()), encoding="utf-8")),
+        patch("importlib.import_module", return_value=nmem_gate),
+        patch.object(nmem_gate, "emit", side_effect=RuntimeError("emit failed")) as emit,
+    ):
+        nmem_entrypoint.main()
+
+    # The gate classified the delete itself, not an unreadable payload.
+    assert emit.call_args.args[0]["decision"] == "force_ask"
+    assert "memory_delete" in emit.call_args.args[0]["reason"]
+    reply = json.loads(capsys.readouterr().out)
+    assert reply["decision"] == "force_ask"
+    assert "emit failed" in reply["reason"]
+
+
+@pytest.mark.parametrize(("subcommand", "fallback"), HOOK_FALLBACKS)
+def test_entrypoint_exits_nonzero_when_hook_cannot_load(subcommand, fallback, capsys):
+    # Nothing has read stdin yet, so the hooks.json chain must be free to try `python` next.
+    with (
+        patch.object(sys, "argv", ["nmem_entrypoint.py", subcommand]),
+        patch("importlib.import_module", side_effect=TypeError("unsupported operand type(s) for |")),
+        pytest.raises(TypeError),
+    ):
+        nmem_entrypoint.main()
+
+    assert capsys.readouterr().out == ""
+
+
+def test_entrypoint_keeps_hook_output_when_hook_fails_after_writing(capsys):
+    def gate_main():
+        sys.stdout.write(json.dumps({"decision": "force_ask"}))
+        raise RuntimeError("late failure")
+
+    gate = MagicMock()
+    gate.main.side_effect = gate_main
+    with (
+        patch.object(sys, "argv", ["nmem_entrypoint.py", "gate"]),
+        patch("importlib.import_module", return_value=gate),
+    ):
+        nmem_entrypoint.main()
+
+    assert json.loads(capsys.readouterr().out) == {"decision": "force_ask"}
+
+
+@pytest.mark.parametrize(("subcommand", "fallback"), HOOK_FALLBACKS)
+def test_entrypoint_exits_nonzero_on_unsupported_python(subcommand, fallback, capsys):
+    with (
+        patch.object(sys, "argv", ["nmem_entrypoint.py", subcommand]),
+        patch.object(sys, "version_info", (3, 8, 18, "final", 0)),
+        patch("importlib.import_module") as mock_import,
+        pytest.raises(SystemExit) as exit_info,
+    ):
+        nmem_entrypoint.main()
+
+    assert exit_info.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Python 3.9" in captured.err
+    mock_import.assert_not_called()
+
+
+@patch("nmem_status.main")
+def test_entrypoint_status_reports_unsupported_python(mock_status_main, capsys):
+    with (
+        patch.object(sys, "argv", ["nmem_entrypoint.py", "status"]),
+        patch.object(sys, "version_info", (3, 8, 18, "final", 0)),
+        pytest.raises(SystemExit),
+    ):
+        nmem_entrypoint.main()
+
+    assert "Python 3.9" in capsys.readouterr().err
+    mock_status_main.assert_not_called()
+
+
+def _hook_command(event):
+    entry = json.loads((PLUGIN_ROOT / "hooks.json").read_text(encoding="utf-8"))["nowledge-mem-hooks"][event][0]
+    return entry["hooks"][0]["command"] if "hooks" in entry else entry["command"]
+
+
+FAILING_INTERPRETER = "exit 1"
+# This interpreter, or the same one reporting Python 3.8 before it runs the entrypoint.
+CURRENT_INTERPRETER = f'exec "{Path(sys.executable).as_posix()}" "$@"'
+REPORT_PYTHON_38 = (
+    "import runpy, sys; sys.version_info = (3, 8, 18, 'final', 0); "
+    "sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')"
+)
+TOO_OLD_INTERPRETER = f'exec "{Path(sys.executable).as_posix()}" -c "{REPORT_PYTHON_38}" "$@"'
+RUN_COMMAND_PAYLOAD = json.dumps({"toolCall": {"name": "run_command", "args": {"CommandLine": "ls -la"}}})
+DELETE_MEMORY_PAYLOAD = json.dumps({"toolCall": {"name": "mcp_nowledge-mem_memory_delete", "args": {"memory_id": "x"}}})
+
+
+def _run_hook_command(event, tmp_path, python3, python, payload="{}"):
+    # Run the exact hooks.json command the way a POSIX host does, with these two interpreters on PATH.
+    for name, body in (("python3", python3), ("python", python)):
+        interpreter = tmp_path / name
+        interpreter.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        interpreter.chmod(0o755)
+
+    return subprocess.run(
+        [shutil.which("sh"), "-c", _hook_command(event)],
+        cwd=PLUGIN_ROOT,
+        env={**os.environ, "PATH": str(tmp_path)},
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
+@pytest.mark.parametrize("event", ["PreInvocation", "PostInvocation", "PreToolUse", "PostToolUse", "Stop"])
+def test_hooks_json_shell_fallback_prints_valid_json(event, tmp_path):
+    # With neither python3 nor python runnable, the echo at the end of the chain answers alone.
+    result = _run_hook_command(event, tmp_path, FAILING_INTERPRETER, FAILING_INTERPRETER)
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    if event == "PreToolUse":
+        assert payload == {"decision": "force_ask"}
+    else:
+        assert payload == {}
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
+def test_hooks_json_shell_fallback_confirms_a_delete(tmp_path):
+    # The echo cannot see the payload, so a delete must still get the confirmation the gate gives it.
+    result = _run_hook_command("PreToolUse", tmp_path, FAILING_INTERPRETER, FAILING_INTERPRETER, DELETE_MEMORY_PAYLOAD)
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {"decision": "force_ask"}
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
+def test_hooks_json_gate_decides_on_this_python(tmp_path):
+    # On the Python 3.9 CI job this is the reported host: the real gate answers, not a fallback.
+    result = _run_hook_command("PreToolUse", tmp_path, CURRENT_INTERPRETER, FAILING_INTERPRETER, RUN_COMMAND_PAYLOAD)
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {"decision": "allow"}
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
+def test_hooks_json_falls_through_to_python_when_python3_is_too_old(tmp_path):
+    # A delete must reach python intact, not as an empty stdin left by python3, which the gate cannot read.
+    result = _run_hook_command("PreToolUse", tmp_path, TOO_OLD_INTERPRETER, CURRENT_INTERPRETER, DELETE_MEMORY_PAYLOAD)
+
+    assert result.returncode == 0
+    reply = json.loads(result.stdout)
+    assert reply["decision"] == "force_ask"
+    assert "memory_delete" in reply["reason"]
+    assert "Python 3.9" in result.stderr
 
 
 @patch("load_skill.make_request")

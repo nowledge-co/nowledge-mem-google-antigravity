@@ -1,14 +1,86 @@
 #!/usr/bin/env python3
 """Unified entrypoint router for Nowledge Mem Google Antigravity plugin."""
 
+import json
 import sys
 from pathlib import Path
 
 HOOKS_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(HOOKS_DIR))
 
+MIN_PYTHON = (3, 9)
+
+# Lifecycle hook subcommands: the module each one runs and the reply it gives
+# when that module fails while running. PreToolUse must always carry a decision,
+# because Antigravity blocks the tool call on a missing or malformed one. The
+# gate's is force_ask: it cannot tell a delete from a read, and only force_ask
+# still prompts when the user chose Always Allow.
+HOOKS = {
+    "session-start": ("session-start", {}),
+    "session-end": ("session-end", {}),
+    "gate": ("nmem-gate", {"decision": "force_ask"}),
+    "post-invocation": ("post-invocation", {}),
+    "post_invocation": ("post-invocation", {}),
+    "post-tool-use": ("post-tool-use", {}),
+    "post_tool_use": ("post-tool-use", {}),
+}
+
+
+class _StdoutRecorder:
+    """Pass writes through to stdout and remember whether any happened."""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.written = False
+
+    def write(self, data):
+        if data:
+            self.written = True
+        return self._stream.write(data)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def run_hook(cmd, args):
+    """Run a lifecycle hook so that Antigravity always receives valid JSON.
+
+    A hook module that fails to import has not read stdin yet, so the error is
+    left to exit non-zero and hooks.json tries its next interpreter, then its
+    echo fallback. Once the hook is running it may have consumed stdin, so a
+    failure is answered here with the hook's fallback and exit 0, unless the
+    hook already wrote its reply.
+    """
+    import importlib
+
+    module_name, fallback = HOOKS[cmd]
+    hook = importlib.import_module(module_name)
+    sys.argv = [sys.argv[0]] + args
+    recorder = _StdoutRecorder(sys.stdout)
+    sys.stdout = recorder
+    try:
+        hook.main()
+    except Exception as error:
+        sys.stderr.write(f"nowledge-mem {cmd} hook failed: {error}\n")
+        if not recorder.written:
+            reply = dict(fallback)
+            if "decision" in reply:
+                reply["reason"] = f"Nowledge Mem hook failed: {error}"
+            recorder.write(json.dumps(reply))
+            recorder.flush()
+    finally:
+        sys.stdout = recorder._stream
+
 
 def main():
+    if sys.version_info < MIN_PYTHON:
+        # Exit before reading stdin so hooks.json can try `python`, then its echo fallback.
+        sys.stderr.write(
+            f"Nowledge Mem needs Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer, found "
+            f"{sys.version_info[0]}.{sys.version_info[1]}; install Python 3.9+ as python3 or python.\n"
+        )
+        sys.exit(1)
+
     if len(sys.argv) < 2:
         sys.stderr.write("Usage: python3 hooks/nmem_entrypoint.py <subcommand> [args...]\n")
         sys.stderr.write(
@@ -19,46 +91,14 @@ def main():
     cmd = sys.argv[1]
     args = sys.argv[2:]
 
-    if cmd == "status":
+    if cmd in HOOKS:
+        run_hook(cmd, args)
+
+    elif cmd == "status":
         import nmem_status
 
         sys.argv = [sys.argv[0]] + args
         nmem_status.main()
-
-    elif cmd == "session-start":
-        import importlib
-
-        session_start = importlib.import_module("session-start")
-        sys.argv = [sys.argv[0]] + args
-        session_start.main()
-
-    elif cmd == "session-end":
-        import importlib
-
-        session_end = importlib.import_module("session-end")
-        sys.argv = [sys.argv[0]] + args
-        session_end.main()
-
-    elif cmd == "gate":
-        import importlib
-
-        nmem_gate = importlib.import_module("nmem-gate")
-        sys.argv = [sys.argv[0]] + args
-        nmem_gate.main()
-
-    elif cmd in ("post-invocation", "post_invocation"):
-        import importlib
-
-        post_inv = importlib.import_module("post-invocation")
-        sys.argv = [sys.argv[0]] + args
-        post_inv.main()
-
-    elif cmd in ("post-tool-use", "post_tool_use"):
-        import importlib
-
-        post_tu = importlib.import_module("post-tool-use")
-        sys.argv = [sys.argv[0]] + args
-        post_tu.main()
 
     elif cmd in ("skill-load", "load-skill"):
         load_skill_script = HOOKS_DIR.parent / "skills" / "nmem-skill-load" / "scripts" / "load_skill.py"

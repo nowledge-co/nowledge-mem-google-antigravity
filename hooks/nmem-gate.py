@@ -12,11 +12,8 @@ import nmem_shared
 
 
 def read_hook_input():
-    try:
-        content = sys.stdin.read().strip()
-        return json.loads(content) if content else {}
-    except Exception:
-        return {}
+    """Return the hook payload as a dict, or None when it cannot be read."""
+    return nmem_shared.read_hook_payload()
 
 
 def emit(payload):
@@ -88,12 +85,29 @@ def is_safe_status_command(cmd_str: str) -> bool:
     return False
 
 
+MEM_FS_READ_VERBS = {"ls", "cat", "stat", "find", "grep", "recall", "capabilities", "caps"}
+
+
+def mem_fs_verb(arguments) -> str:
+    """Return the lowercased verb of a mem_fs command, or "" when it cannot be parsed."""
+    command = arguments.get("command") if isinstance(arguments, dict) else None
+    if not isinstance(command, str):
+        return ""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return ""
+    return tokens[0].lower() if tokens else ""
+
+
 def main():
     data = read_hook_input()
-    tool_call = data.get("toolCall") if isinstance(data, dict) else None
-    if not isinstance(tool_call, dict):
-        tool_call = {}
-    tool_name = tool_call.get("name")
+    tool_call = data.get("toolCall") if data is not None else None
+    if not isinstance(tool_call, dict) or not isinstance(tool_call.get("name"), str):
+        # Without the tool call the gate cannot tell a delete from a read.
+        emit({"decision": "force_ask", "reason": "Confirmation required: Nowledge Mem could not read this tool call"})
+        return
+    tool_name = tool_call["name"]
     tool_args = tool_call.get("args")
     if not isinstance(tool_args, dict):
         tool_args = {}
@@ -180,6 +194,28 @@ def main():
         )
         return
 
+    # mem_fs reads, writes and deletes, so classify each call by its command's verb.
+    if sub_tool == "mem_fs":
+        # Read the command the server will run: call_mcp_tool forwards only Arguments.
+        verb = mem_fs_verb(tool_args.get("Arguments") if tool_name == "call_mcp_tool" else tool_args)
+        if verb in MEM_FS_READ_VERBS:
+            # No permission override: a read must not pre-approve this tool's writes.
+            emit({"decision": "allow", "reason": f"Auto-allowing read-only mem_fs {verb}"})
+            return
+        if verb in {"rm", "delete"}:
+            emit(
+                {
+                    "decision": "force_ask",
+                    "reason": f"Confirmation required to delete knowledge graph data (mem_fs {verb})",
+                }
+            )
+            return
+        if verb != "write":
+            # The server parses the command itself and may still read it as a delete.
+            emit({"decision": "force_ask", "reason": "Confirmation required for an unrecognized mem_fs command"})
+            return
+        # A write falls through to the intent check for memory writes below.
+
     # 2. Read-only tools (auto-allow)
     read_only = {
         "memory_search",
@@ -203,7 +239,6 @@ def main():
         "search_artifact_chunks",
         "analyze_source_data",
         "analyze_artifact_data",
-        "mem_fs",
         "get_memory_by_id",
         "memory_neighbors",
         "report_skill_outcome",
@@ -255,6 +290,7 @@ def main():
         "label_merge",
         "schedule_follow_up",
         "resolve_timeline_review",
+        "mem_fs",
     }:
         transcript_path = data.get("transcriptPath")
         if transcript_path and os.path.exists(transcript_path):

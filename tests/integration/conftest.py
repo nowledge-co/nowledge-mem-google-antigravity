@@ -1,5 +1,7 @@
 """pytest fixtures for launching and managing the nowledgelabs/mem integration test container on a random port."""
 
+from __future__ import annotations
+
 import json
 import os
 import re

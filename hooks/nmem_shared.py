@@ -1,4 +1,6 @@
 # Shared Nowledge Mem plugin hook utilities
+from __future__ import annotations
+
 import hashlib
 import json
 import os
@@ -11,13 +13,23 @@ import uuid
 from pathlib import Path
 
 
-def read_hook_input() -> dict:
-    """Read and parse JSON from stdin."""
+def read_hook_payload() -> dict | None:
+    """Return the hook payload from stdin as a dict, or None when it cannot be read.
+
+    Read bytes and decode UTF-8 here: on Windows a piped stdin decodes with the
+    locale code page, which fails on non-ASCII payloads.
+    """
     try:
-        content = sys.stdin.read().strip()
-        return json.loads(content) if content else {}
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     except Exception:
-        return {}
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def read_hook_input() -> dict:
+    """Return the hook payload from stdin, or {} when it cannot be read."""
+    payload = read_hook_payload()
+    return payload if payload is not None else {}
 
 
 def emit(payload: dict) -> None:
@@ -1095,7 +1107,7 @@ def retry_unsynced_sessions() -> None:
                     ):
                         existing_msgs = check_res.get("messages") or []
                         if isinstance(existing_msgs, list):
-                            for old_m, new_m in zip(existing_msgs, messages, strict=False):
+                            for old_m, new_m in zip(existing_msgs, messages):
                                 old_role = old_m.get("role") or old_m.get("sender")
                                 new_role = new_m.get("role") or new_m.get("sender")
                                 old_text = old_m.get("content") or old_m.get("text")

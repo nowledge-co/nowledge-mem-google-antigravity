@@ -38,15 +38,17 @@ def test_random_port_isolation(mem_server: MemServerContext) -> None:
     assert mem_server.base_url == f"http://127.0.0.1:{mem_server.host_port}"
 
 
-def test_cors_and_server_headers(mem_server: MemServerContext) -> None:
-    """Verify server responses include required CORS and content-type headers."""
+def test_server_headers(mem_server: MemServerContext) -> None:
+    """Verify server responses include a content-type header.
+
+    CORS headers are not checked: the hooks call Mem from Python, not a browser,
+    and Mem only answers trusted browser origins with CORS headers.
+    """
     status, _, headers = mem_server.get("/livez")
     assert status == 200
     header_map = {k.lower(): v for k, v in headers.items()}
     assert "content-type" in header_map
-    assert "access-control-allow-origin" in header_map
     assert len(header_map["content-type"]) > 0
-    assert len(header_map["access-control-allow-origin"]) > 0
 
 
 def test_mcp_protocol_initialize(mem_server: MemServerContext) -> None:
