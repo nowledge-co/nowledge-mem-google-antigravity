@@ -1090,17 +1090,53 @@ def test_nmem_gate_allows_mem_fs_reads(envelope, command, capsys):
     reply = _gate_reply(_mem_fs_call(envelope, {"command": command}), capsys)
 
     assert reply["decision"] == "allow"
-    # A tool-wide override would also let later mem_fs writes past an ask.
+    # A tool-wide override from a read would pre-approve later mem_fs writes.
     assert "permissionOverrides" not in reply
 
 
 @pytest.mark.parametrize("envelope", MEM_FS_ENVELOPES)
 @pytest.mark.parametrize(
     "command",
-    ["rm /memories/by-id/x.memory.md", "delete /memories/by-id/x.memory.md", "RM /memories/by-id/x.memory.md"],
+    [
+        "rm /memories/by-id/x.memory.md",
+        "delete /memories/by-id/x.memory.md",
+        "RM /memories/by-id/x.memory.md",
+        "Delete /memories/by-id/x.memory.md",
+        '"rm" /memories/by-id/x.memory.md',
+        "  rm /memories/by-id/x.memory.md",
+        "rm	/memories/by-id/x.memory.md",
+    ],
 )
 def test_nmem_gate_confirms_mem_fs_deletes(envelope, command, capsys):
     assert _gate_reply(_mem_fs_call(envelope, {"command": command}), capsys)["decision"] == "force_ask"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "toolCall": {
+                "name": "mcp_nowledge-mem_mem_fs",
+                "args": {"command": "rm /memories/by-id/x.memory.md", "Arguments": {"command": "ls"}},
+            }
+        },
+        {
+            "toolCall": {
+                "name": "call_mcp_tool",
+                "args": {
+                    "ServerName": "nowledge-mem",
+                    "ToolName": "mem_fs",
+                    "command": "ls",
+                    "Arguments": '{"command": "rm /memories/by-id/x.memory.md"}',
+                },
+            }
+        },
+    ],
+    ids=["direct-with-nested-arguments", "call_mcp_tool-with-string-arguments"],
+)
+def test_nmem_gate_reads_the_mem_fs_command_the_server_runs(payload, capsys):
+    # The server runs a direct call's own command, and call_mcp_tool forwards only Arguments.
+    assert _gate_reply(payload, capsys)["decision"] == "force_ask"
 
 
 @pytest.mark.parametrize("envelope", MEM_FS_ENVELOPES)
@@ -1115,8 +1151,9 @@ def test_nmem_gate_confirms_mem_fs_commands_it_cannot_classify(envelope, argumen
 
 
 @pytest.mark.parametrize("envelope", MEM_FS_ENVELOPES)
-def test_nmem_gate_asks_before_mem_fs_write_without_intent(envelope, capsys):
-    reply = _gate_reply(_mem_fs_call(envelope, {"command": "write /memories/by-id/x.memory.md --body hi"}), capsys)
+@pytest.mark.parametrize("verb", ["write", "WRITE"])
+def test_nmem_gate_asks_before_mem_fs_write_without_intent(envelope, verb, capsys):
+    reply = _gate_reply(_mem_fs_call(envelope, {"command": f"{verb} /memories/by-id/x.memory.md --body hi"}), capsys)
 
     assert reply["decision"] == "ask"
 
@@ -1127,7 +1164,10 @@ def test_nmem_gate_allows_mem_fs_write_with_intent(tmp_path, capsys):
     payload = _mem_fs_call("direct", {"command": "write /memories/by-id/x.memory.md --body hi"})
     payload["transcriptPath"] = str(transcript)
 
-    assert _gate_reply(payload, capsys)["decision"] == "allow"
+    reply = _gate_reply(payload, capsys)
+    assert reply["decision"] == "allow"
+    # Like other memory writes, an approved write pre-approves later ones; deletes still get force_ask.
+    assert reply["permissionOverrides"] == ["mcp(nowledge-mem/mem_fs)"]
 
 
 @patch("nmem_gate.read_hook_input")
@@ -1567,6 +1607,22 @@ def test_entrypoint_prints_safe_fallback_when_running_hook_fails(subcommand, fal
     else:
         assert reply == fallback
     assert "unsupported operand" in captured.err
+
+
+def test_entrypoint_confirms_a_delete_when_the_running_gate_fails(capsys):
+    # The real gate reads a delete and fails before its answer is written; the fallback must still confirm it.
+    with (
+        patch.object(sys, "argv", ["nmem_entrypoint.py", "gate"]),
+        patch.object(sys, "stdin", io.StringIO(DELETE_MEMORY_PAYLOAD)),
+        patch("importlib.import_module", return_value=nmem_gate),
+        patch.object(nmem_gate, "emit", side_effect=RuntimeError("emit failed")) as emit,
+    ):
+        nmem_entrypoint.main()
+
+    assert emit.call_args.args[0]["decision"] == "force_ask"
+    reply = json.loads(capsys.readouterr().out)
+    assert reply["decision"] == "force_ask"
+    assert "emit failed" in reply["reason"]
 
 
 @pytest.mark.parametrize(("subcommand", "fallback"), HOOK_FALLBACKS)
