@@ -55,9 +55,14 @@ flowchart TD
 ### 2. PreToolUse Gate Hook (`hooks/nmem-gate.py`)
 - **Trigger**: Evaluated before executing `call_mcp_tool`, `mcp_nowledge-mem_*`, or `run_command`.
 - **Policy Enforcement**:
-  - **Auto-Allow**: Read-only tools (`mem_fs`, `memory_search`, `thread_search`, `query_library`, `explore_graph`, `get_memory_by_id`, `ontology_read`, `entity_search`, `list_timeline_reviews`, etc.) return `{"decision": "allow"}` with permission overrides to prevent prompt interruptions; validated status commands (`python3 hooks/nmem_status.py`, `python3 hooks/nmem_entrypoint.py status`, `nmem status`, `nmem tasks`) return `{"decision": "allow", "reason": "..."}`.
+  - **Auto-Allow**: Read-only tools (`memory_search`, `thread_search`, `query_library`, `explore_graph`, `get_memory_by_id`, `ontology_read`, `entity_search`, `list_timeline_reviews`, etc.) return `{"decision": "allow"}` with permission overrides to prevent prompt interruptions; validated status commands (`python3 hooks/nmem_status.py`, `python3 hooks/nmem_entrypoint.py status`, `nmem status`, `nmem tasks`) return `{"decision": "allow", "reason": "..."}`.
   - **Force Confirm**: Destructive operations (`memory_delete`, `thread_delete`, `memory_relation_delete`, `entity_delete`, `label_delete`) return `{"decision": "force_ask"}`.
   - **Intent-Based Write Allow**: Write tools (`memory_add`, `memory_update`, etc.) check recent conversation steps for intent keywords (`save`, `remember`, `store`, `nmem`, `distill`, `handoff`). If found, returns `{"decision": "allow"}`.
+  - **Nowledge FS (`mem_fs`)**: one tool that reads, writes and deletes, so the gate classifies each call by the first word of its `command`, whether it arrives as `mcp_nowledge-mem_mem_fs` or through `call_mcp_tool`.
+    - `ls`, `cat`, `stat`, `find`, `grep`, `recall`, `capabilities` and `caps` return `{"decision": "allow"}` without a permission override, because an override would cover the tool's writes as well.
+    - `rm` and `delete` return `{"decision": "force_ask"}`, like the other deletes.
+    - `write` follows the intent check for write tools.
+    - Anything else, including a missing, empty or unparseable command, returns `{"decision": "force_ask"}`: the server parses the command itself and may still read it as a delete.
   - **Memory Health Catchup Debounce & Gating**: `trigger_memory_catchup` checks for prior execution in the current session directory (`<session_dir>/.nmem/catchup_history.json`) and a 1-hour global cooldown. Redundant calls are auto-suppressed with an explanation; new calls require explicit user maintenance intent (`catch up`, `rescore`, `decay`, `compaction`, `maintenance`) to auto-allow or prompt confirmation.
 
 ### 3. PostInvocation Hook (`hooks/post-invocation.py`)
@@ -88,9 +93,9 @@ flowchart TD
 - Hooks run on whatever `python3` (then `python`) the host provides. On macOS that is the Command Line Tools Python 3.9, so hook and skill code stays compatible with Python 3.9: modules that use `X | None` annotations start with `from __future__ import annotations` (enforced by ruff `FA`), and 3.10+ APIs such as `zip(strict=)` are not used. CI runs `tests/test_hooks.py` on Python 3.9.
 - `hooks/nmem_entrypoint.py` decides who answers when a hook cannot run:
   - **Before the hook starts** (interpreter older than 3.9, or the hook module fails to import), nothing has read stdin yet. The process exits 1 with the cause on stderr (the entrypoint's own message for an old interpreter, a traceback for an import error), so `hooks.json` tries `python` next and then its `echo` fallback.
-  - **Once the hook is running**, it may already have consumed stdin, so re-running it under `python` would see an empty payload. A failure there is answered with the hook's fallback (`{"decision": "ask", "reason": "..."}` for PreToolUse, `{}` otherwise) and exit 0, unless the hook already wrote its reply.
-- The final `echo` in each `hooks.json` chain answers when no interpreter can run the hook. Antigravity aborts the tool call when it cannot parse a PreToolUse reply, so that fallback is single-quoted (`echo '{"decision":"ask"}'`) to keep its double quotes through POSIX shell quote removal.
-- The PreToolUse fallback asks rather than allows because the gate guards destructive memory actions. It is still weaker than the gate's own `force_ask` for deletes: `ask` honors Always Allow. It is also stricter than the gate for unrelated tools, which the gate normally passes with `allow`, so a broken hook shows up as approval prompts on terminal commands and MCP calls.
+  - **Once the hook is running**, it may already have consumed stdin, so re-running it under `python` would see an empty payload. A failure there is answered with the hook's fallback (`{"decision": "force_ask", "reason": "..."}` for PreToolUse, `{}` otherwise) and exit 0, unless the hook already wrote its reply.
+- The final `echo` in each `hooks.json` chain answers when no interpreter can run the hook. Antigravity aborts the tool call when it cannot parse a PreToolUse reply, so that fallback is single-quoted (`echo '{"decision":"force_ask"}'`) to keep its double quotes through POSIX shell quote removal.
+- Both PreToolUse fallbacks answer `force_ask`. Neither can tell a delete from a read, and only `force_ask` still prompts when the user chose Always Allow, as the gate does for deletes. The cost is that while hooks cannot run, every terminal command and MCP call the hook matches asks for approval each time; a healthy gate passes unrelated tools with `allow`.
 
 ---
 
