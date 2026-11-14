@@ -125,6 +125,13 @@ async function main() {
         fail(`${relPath} must not be empty`);
       }
 
+      if (relPath === 'rules/nowledge-mem.md') {
+        const frontmatter = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
+        if (!frontmatter || !/^trigger:\s*always_on\s*$/m.test(frontmatter)) {
+          fail(`${relPath} must declare trigger: always_on in its frontmatter`);
+        }
+      }
+
       if (relPath === 'hooks.json') {
         const hooksConfig = JSON.parse(text);
         if (

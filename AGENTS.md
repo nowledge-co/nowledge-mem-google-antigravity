@@ -63,6 +63,8 @@ Maintain a clean, linear repository history by following these commit guidelines
 
 ## 4. CI/CD, Validation & Integration Testing
 
+* Keep `trigger: always_on` in the frontmatter of `rules/nowledge-mem.md`; Antigravity requires an explicit rule trigger. Validate host discovery with `agy plugin validate . --json` when the CLI is available.
+
 * Before staging or proposing any changes, always run the validation suite:
   ```bash
   npm run validate
