@@ -125,6 +125,11 @@ def main():
         nmem_shared.retry_unsynced_sessions()
         sys.exit(0)
 
+    # hooks.json runs this module for two events. SessionStart (no flag) fires once per
+    # conversation and injects the startup context. PreInvocation (--pre-invocation) fires
+    # before every model call, so it only syncs and never injects.
+    pre_invocation = "--pre-invocation" in sys.argv[1:]
+
     try:
         # Asynchronously sync host skills connection (nmem skills connect antigravity / sync)
         try:
@@ -136,8 +141,6 @@ def main():
         conversation_id = hook_input.get("conversationId")
         transcript_path = hook_input.get("transcriptPath")
         artifact_directory_path = hook_input.get("artifactDirectoryPath")
-        invocation_num = hook_input.get("invocationNum")
-        initial_num_steps = hook_input.get("initialNumSteps")
         workspace_root = nmem_shared.activate_hook_workspace(hook_input)
 
         # Synchronize the MCP transport from this workspace's configuration,
@@ -147,13 +150,7 @@ def main():
         except Exception:
             pass
 
-        # Only run startup injection on the very first invocation.
-        # Supports both 0-indexed and 1-indexed runtimes.
-        is_first = (invocation_num == 0) or (
-            invocation_num == 1 and (initial_num_steps is None or initial_num_steps <= 2)
-        )
-
-        if is_first:
+        if not pre_invocation:
             try:
                 subprocess.Popen(
                     [sys.executable, __file__, "--retry-only"],
@@ -164,7 +161,7 @@ def main():
             except Exception:
                 pass
 
-        if invocation_num is not None and not is_first:
+        if pre_invocation:
             try:
                 space = nmem_shared.resolve_space(workspace_root, validate_explicit=True)
                 nmem_shared.sync_learnings_if_any(conversation_id, transcript_path, artifact_directory_path, space)
