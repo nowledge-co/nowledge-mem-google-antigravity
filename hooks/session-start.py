@@ -188,8 +188,9 @@ def main():
                 f"</{startup_context['tag']}>"
             )
             nmem_shared.emit({"injectSteps": [{"ephemeralMessage": msg}]})
-    except nmem_shared.SpaceResolutionError as e:
-        nmem_shared.emit({"injectSteps": [{"ephemeralMessage": nmem_shared.format_space_resolution_error(e)}]})
+    except nmem_shared.SpaceResolutionError:
+        # PreInvocation reports the Space error before the same model call.
+        nmem_shared.emit({})
     except Exception as e:
         if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
             sys.stderr.write(f"Startup hook failed: {e}\n")

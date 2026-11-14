@@ -747,6 +747,34 @@ def test_session_start_uses_payload_workspace_when_process_cwd_differs(tmp_path,
     assert "project-space" in payload["injectSteps"][0]["ephemeralMessage"]
 
 
+def test_session_start_reports_invalid_workspace_space_once(tmp_path):
+    # SessionStart and PreInvocation both run before the first model call; only PreInvocation reports.
+    workspace = tmp_path / "customer-project"
+    workspace.mkdir()
+    (workspace / ".nmemspace").write_text("missing-space", encoding="utf-8")
+    emitted = {}
+
+    for argv in (["session-start.py"], ["session-start.py", "--pre-invocation"]):
+        with (
+            patch(
+                "nmem_shared.read_hook_input",
+                return_value={"conversationId": "conv-workspace", "workspacePaths": [str(workspace)]},
+            ),
+            patch("nmem_shared.get_existing_spaces", return_value=[{"id": "default"}]),
+            patch("nmem_shared.sync_mcp_config_file"),
+            patch("nmem_shared.sync_host_skills_async"),
+            patch("subprocess.Popen"),
+            patch("nmem_shared.emit") as mock_emit,
+            patch.object(sys, "argv", argv),
+        ):
+            session_start.main()
+        mock_emit.assert_called_once()
+        emitted[len(argv)] = mock_emit.call_args.args[0]
+
+    assert emitted[1] == {}
+    assert "missing-space" in emitted[2]["injectSteps"][0]["ephemeralMessage"]
+
+
 def test_post_invocation_surfaces_invalid_workspace_space(tmp_path):
     workspace = tmp_path / "customer-project"
     workspace.mkdir()
