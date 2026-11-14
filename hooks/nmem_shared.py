@@ -603,7 +603,10 @@ def sync_mcp_config_file(mcp_config_path: str = None, cwd: str | Path | None = N
     clean_url = api_url.rstrip("/")
     server_url = f"{clean_url}/mcp/"
 
-    headers = {"APP": "Google Antigravity"}
+    headers = {
+        "APP": "Google Antigravity",
+        "X-Nmem-Space-Id": resolve_space(cwd, validate_explicit=True),
+    }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
         headers["X-NMEM-API-Key"] = api_key

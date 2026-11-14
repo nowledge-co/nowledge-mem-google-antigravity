@@ -152,6 +152,10 @@ intended destination. Environment Space overrides still take precedence.
 
 ---
 
+MCP configuration synchronization resolves and validates the active Space, then emits `X-Nmem-Space-Id`. Explicit invalid Spaces must not overwrite the connection with Default. The generated plugin configuration is shared on disk; simultaneous workspaces using different Spaces require host-level per-session connections and are not isolated by this file.
+
+Do not opt into the `exact-v1` protocol without backend capability negotiation: local backends requiring migration reject it. The Space header selects the existing configured retrieval policy, which may include shared Default memories.
+
 ## 🚀 Interface Selection Guidelines for Agents & Developers
 
 To minimize user prompt friction and context bloat, select the appropriate transport for each capability:
