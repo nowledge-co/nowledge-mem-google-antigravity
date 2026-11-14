@@ -744,7 +744,7 @@ def test_session_start_uses_payload_workspace_when_process_cwd_differs(tmp_path,
         session_start.main()
 
     payload = mock_emit.call_args.args[0]
-    assert "project-space" in payload["injectSteps"][0]["ephemeralMessage"]
+    assert "project-space" in payload["injectSteps"][0]["systemMessage"]["systemMessage"]
 
 
 def test_session_start_reports_invalid_workspace_space_once(tmp_path):
@@ -873,7 +873,7 @@ def test_session_start_hook(mock_write, mock_space, mock_read, mock_config, mock
         payload = json.loads(mock_write.call_args[0][0])
         assert "injectSteps" in payload
         assert len(payload["injectSteps"]) > 0
-        emitted_text = payload["injectSteps"][0]["ephemeralMessage"]
+        emitted_text = payload["injectSteps"][0]["systemMessage"]["systemMessage"]
         assert "Startup Context Bundle" in emitted_text
 
 
@@ -905,7 +905,7 @@ def test_session_start_hook_working_memory_fallback(
         payload = json.loads(mock_write.call_args[0][0])
         assert "injectSteps" in payload
         assert len(payload["injectSteps"]) > 0
-        emitted_text = payload["injectSteps"][0]["ephemeralMessage"]
+        emitted_text = payload["injectSteps"][0]["systemMessage"]["systemMessage"]
         assert "Daily Working Memory Briefing" in emitted_text
 
 

@@ -187,7 +187,8 @@ def main():
                 f"{startup_context['content']}\n"
                 f"</{startup_context['tag']}>"
             )
-            nmem_shared.emit({"injectSteps": [{"ephemeralMessage": msg}]})
+            # systemMessage stays in the conversation; ephemeralMessage is dropped after one model call.
+            nmem_shared.emit({"injectSteps": [{"systemMessage": {"systemMessage": msg}}]})
     except nmem_shared.SpaceResolutionError:
         # PreInvocation reports the Space error before the same model call.
         nmem_shared.emit({})
