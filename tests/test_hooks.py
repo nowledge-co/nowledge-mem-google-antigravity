@@ -772,8 +772,8 @@ def test_session_start_reports_invalid_workspace_space_once(tmp_path):
         mock_emit.assert_called_once()
         emitted[len(argv)] = mock_emit.call_args.args[0]
 
-    assert emitted[1] == {}
-    assert "missing-space" in emitted[2]["injectSteps"][0]["ephemeralMessage"]
+    assert "missing-space" in emitted[1]["injectSteps"][0]["systemMessage"]["systemMessage"]
+    assert emitted[2] == {}
 
 
 def test_post_invocation_surfaces_invalid_workspace_space(tmp_path):

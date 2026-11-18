@@ -95,7 +95,6 @@ async function main() {
     'hooks/nmem_status.py',
     'hooks/post-invocation.py',
     'hooks/post-tool-use.py',
-    'sidecars/nowledge-mem-sync/sidecar.json',
     'skills/nmem-memory-working/SKILL.md',
     'skills/nmem-bridge-chat/SKILL.md',
     'skills/nmem-memory-search/SKILL.md',
