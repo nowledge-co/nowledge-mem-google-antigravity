@@ -142,7 +142,7 @@ def main():
 
                     append_payload = {"messages": messages[matched_count:] if matched_count > 0 else messages}
                     if space:
-                        append_payload["space"] = space
+                        append_payload["space_id"] = space
                     app_res = nmem_shared.http_request(
                         f"/threads/{conversation_id}/append", method="POST", payload=append_payload, timeout=2.5
                     )
@@ -191,10 +191,10 @@ def main():
                 # Append trailing unmatched messages to existing thread
                 cli_append_msgs = messages[matched_count:] if matched_count > 0 else messages
                 if cli_append_msgs:
-                    append_args = ["t"]
                     if space:
-                        append_args.extend(["--space", space])
-                    append_args.extend(["append", conversation_id, "-m", json.dumps(cli_append_msgs)])
+                        # CLI t append cannot carry space_id precondition; keep scoped item pending for HTTP retry.
+                        break
+                    append_args = nmem_shared.build_cli_thread_append_args(conversation_id, cli_append_msgs)
                     try:
                         result = nmem_shared.run_nmem_command(append_args, timeout=3.0)
                         if result.returncode == 0:

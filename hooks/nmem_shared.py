@@ -1055,6 +1055,11 @@ def get_unsynced_sessions() -> dict:
         return {}
 
 
+def build_cli_thread_append_args(thread_id: str, messages: list[dict]) -> list[str]:
+    """Build supported `nmem t append` CLI arguments (no `--space` flag on append)."""
+    return ["t", "append", thread_id, "-m", json.dumps(messages)]
+
+
 def retry_unsynced_sessions() -> None:
     """Attempt to sync any unsynced sessions in the queue."""
     queue_path = get_unsynced_queue_path()
@@ -1131,7 +1136,7 @@ def retry_unsynced_sessions() -> None:
                                 # Fallback to append if reconcile-tail fails (e.g. prefix divergence)
                                 app_payload = {"messages": messages[matched_count:]}
                                 if space:
-                                    app_payload["space"] = space
+                                    app_payload["space_id"] = space
                                 app_res = http_request(
                                     f"/threads/{conv_id}/append", method="POST", payload=app_payload, timeout=2.5
                                 )
@@ -1140,7 +1145,7 @@ def retry_unsynced_sessions() -> None:
                         else:
                             app_payload = {"messages": messages}
                             if space:
-                                app_payload["space"] = space
+                                app_payload["space_id"] = space
                             app_res = http_request(
                                 f"/threads/{conv_id}/append", method="POST", payload=app_payload, timeout=2.5
                             )
@@ -1185,16 +1190,14 @@ def retry_unsynced_sessions() -> None:
                         # Append trailing unmatched messages to existing thread
                         cli_append_msgs = messages[matched_count:] if matched_count > 0 else messages
                         if cli_append_msgs:
-                            append_args = ["t"]
-                            if space:
-                                append_args.extend(["--space", space])
-                            append_args.extend(["append", conv_id, "-m", json.dumps(cli_append_msgs)])
-                            try:
-                                result = run_nmem_command(append_args, timeout=3.0)
-                                if result.returncode == 0:
-                                    success = True
-                            except Exception:
-                                pass
+                            if not space:
+                                append_args = build_cli_thread_append_args(conv_id, cli_append_msgs)
+                                try:
+                                    result = run_nmem_command(append_args, timeout=3.0)
+                                    if result.returncode == 0:
+                                        success = True
+                                except Exception:
+                                    pass
                         else:
                             success = True
                     else:
@@ -1241,11 +1244,13 @@ def retry_unsynced_sessions() -> None:
 
 
 def sync_learnings_if_any(
-    conversation_id: str, transcript_path: str, artifact_directory_path: str, space: str | None
+    conversation_id: str,
+    transcript_path: str,
+    artifact_directory_path: str,
+    space: str | None = None,
+    workspace_root: str | Path | None = None,
 ) -> None:
     """Scan for learning_proposal.md, verify approval in transcript, and sync to nmem (as rule, skill, or memory)."""
-    if not space:
-        space = resolve_space()
     if not artifact_directory_path or not os.path.exists(artifact_directory_path):
         return
 
@@ -1279,6 +1284,9 @@ def sync_learnings_if_any(
 
     if not approved:
         return
+
+    if not space:
+        space = resolve_space(workspace_root, validate_explicit=True)
 
     # Parse learning_proposal.md
     try:

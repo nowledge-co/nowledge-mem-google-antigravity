@@ -108,9 +108,8 @@ def main():
         emit({"decision": "force_ask", "reason": "Confirmation required: Nowledge Mem could not read this tool call"})
         return
     tool_name = tool_call["name"]
-    tool_args = tool_call.get("args")
-    if not isinstance(tool_args, dict):
-        tool_args = {}
+    raw_tool_args = tool_call.get("args")
+    tool_args = raw_tool_args if isinstance(raw_tool_args, dict) else {}
 
     if tool_name == "run_command" and is_safe_status_command(tool_args.get("CommandLine")):
         emit({"decision": "allow", "reason": "Auto-allowing validated plugin status and diagnostic command"})
@@ -216,6 +215,34 @@ def main():
             return
         # A write falls through to the intent check for memory writes below.
 
+    if sub_tool == "entity_aliases":
+        call_arguments = (
+            raw_tool_args.get("Arguments")
+            if tool_name == "call_mcp_tool" and isinstance(raw_tool_args, dict)
+            else raw_tool_args
+        )
+        if not isinstance(call_arguments, dict):
+            emit({"decision": "force_ask", "reason": "Confirmation required for an unclassifiable entity_aliases call"})
+            return
+        dry_run = call_arguments.get("dry_run", True)
+        has_remove = bool(call_arguments.get("remove"))
+        has_add = bool(call_arguments.get("add"))
+        if dry_run is True and not has_remove and not has_add:
+            # No permission override: a read must not pre-approve mutations.
+            emit({"decision": "allow", "reason": "Auto-allowing read-only entity_aliases inspection"})
+            return
+        if has_remove or dry_run is not False or not has_add:
+            emit(
+                {
+                    "decision": "force_ask",
+                    "reason": "Confirmation required before removing or ambiguously modifying entity aliases",
+                }
+            )
+            return
+        # Additive-only mutation (dry_run=False, add=[...], no remove): prompt without permissionOverrides.
+        emit({"decision": "ask", "reason": "Confirmation required to add entity aliases"})
+        return
+
     # 2. Read-only tools (auto-allow)
     read_only = {
         "memory_search",
@@ -239,6 +266,11 @@ def main():
         "search_artifact_chunks",
         "analyze_source_data",
         "analyze_artifact_data",
+        "artifact_list",
+        "artifact_read",
+        "artifact_analyze",
+        "artifact_search_chunks",
+        "artifact_search",
         "get_memory_by_id",
         "memory_neighbors",
         "report_skill_outcome",
@@ -259,6 +291,9 @@ def main():
         "ontology_read",
         "entity_search",
         "list_timeline_reviews",
+        "visibility_reason",
+        "memory_identity_read",
+        "read_skill",
     }
     if sub_tool in read_only:
         emit(
@@ -290,6 +325,11 @@ def main():
         "label_merge",
         "schedule_follow_up",
         "resolve_timeline_review",
+        "memory_identity_extract",
+        "save_thread_attachment",
+        "library_add",
+        "artifact_add",
+        "sync_thread",
         "mem_fs",
     }:
         transcript_path = data.get("transcriptPath")

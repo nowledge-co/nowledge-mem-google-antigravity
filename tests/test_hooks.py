@@ -2049,6 +2049,202 @@ def test_unified_script_config_resolution():
                 assert payload.get("space_id") == "local_space"
 
 
+def test_nmem_gate_allows_new_readonly_tools_and_gates_entity_aliases():
+    import nmem_gate
+
+    for tool in ("visibility_reason", "memory_identity_read", "read_skill"):
+        with (
+            patch.object(
+                nmem_gate,
+                "read_hook_input",
+                return_value={"toolCall": {"name": f"mcp_nowledge-mem_{tool}", "args": {}}},
+            ),
+            patch.object(nmem_gate, "emit") as mock_emit,
+        ):
+            nmem_gate.main()
+            assert mock_emit.call_args.args[0]["decision"] == "allow"
+
+    for tool_call in (
+        {
+            "name": "call_mcp_tool",
+            "args": {"ServerName": "nowledge-mem", "ToolName": "entity_aliases", "Arguments": {"entity_id": "ent_1"}},
+        },
+        {"name": "mcp_nowledge-mem_entity_aliases", "args": {"entity_id": "ent_1"}},
+    ):
+        with (
+            patch.object(nmem_gate, "read_hook_input", return_value={"toolCall": tool_call}),
+            patch.object(nmem_gate, "emit") as mock_emit,
+        ):
+            nmem_gate.main()
+            reply = mock_emit.call_args.args[0]
+            assert reply["decision"] == "allow"
+            assert "permissionOverrides" not in reply
+
+    for tool_call in (
+        {
+            "name": "call_mcp_tool",
+            "args": {
+                "ServerName": "nowledge-mem",
+                "ToolName": "entity_aliases",
+                "Arguments": {"entity_id": "ent_1", "dry_run": False, "remove": ["old"]},
+            },
+        },
+        {
+            "name": "mcp_nowledge-mem_entity_aliases",
+            "args": {"entity_id": "ent_1", "dry_run": False, "remove": ["old"]},
+        },
+        {
+            "name": "call_mcp_tool",
+            "args": {"ServerName": "nowledge-mem", "ToolName": "entity_aliases", "Arguments": "invalid"},
+        },
+        {"name": "mcp_nowledge-mem_entity_aliases", "args": "invalid"},
+        {"name": "mcp_nowledge-mem_entity_aliases", "args": None},
+        {"name": "mcp_nowledge-mem_entity_aliases", "args": {"entity_id": "ent_1", "dry_run": False}},
+    ):
+        with (
+            patch.object(nmem_gate, "read_hook_input", return_value={"toolCall": tool_call}),
+            patch.object(nmem_gate, "emit") as mock_emit,
+        ):
+            nmem_gate.main()
+            assert mock_emit.call_args.args[0]["decision"] == "force_ask"
+
+    for tool_call in (
+        {
+            "name": "call_mcp_tool",
+            "args": {
+                "ServerName": "nowledge-mem",
+                "ToolName": "entity_aliases",
+                "Arguments": {"entity_id": "ent_1", "dry_run": False, "add": ["new"]},
+            },
+        },
+        {
+            "name": "mcp_nowledge-mem_entity_aliases",
+            "args": {"entity_id": "ent_1", "dry_run": False, "add": ["new"]},
+        },
+    ):
+        with (
+            patch.object(nmem_gate, "read_hook_input", return_value={"toolCall": tool_call}),
+            patch.object(nmem_gate, "emit") as mock_emit,
+        ):
+            nmem_gate.main()
+            reply = mock_emit.call_args.args[0]
+            assert reply["decision"] == "ask"
+            assert "permissionOverrides" not in reply
+
+
+def test_session_end_and_retry_cli_append_omit_space_flag(tmp_path):
+    session_end = importlib.import_module("session-end")
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(json.dumps({"source": "USER_EXPLICIT", "content": "hello"}) + "\n", encoding="utf-8")
+
+    # 1. HTTP append sends space_id (not space) as its mutation guard.
+    with (
+        patch.object(
+            nmem_shared,
+            "read_hook_input",
+            return_value={"conversationId": "conv-append-http", "transcriptPath": str(transcript)},
+        ),
+        patch.object(nmem_shared, "activate_hook_workspace", return_value=tmp_path),
+        patch.object(nmem_shared, "resolve_space", return_value="work-space"),
+        patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
+        patch.object(
+            nmem_shared,
+            "http_request",
+            side_effect=[{"id": "conv-append-http", "messages": []}, {"status": "ok"}],
+        ) as mock_http,
+        patch.object(nmem_shared, "sync_learnings_if_any"),
+        patch.object(nmem_shared, "emit"),
+    ):
+        session_end.main()
+        append_payload = mock_http.call_args_list[1].kwargs["payload"]
+        assert append_payload.get("space_id") == "work-space"
+        assert "space" not in append_payload
+
+    # 2. Scoped CLI append is skipped (kept pending) because CLI t append cannot carry space_id.
+    with (
+        patch.object(
+            nmem_shared,
+            "read_hook_input",
+            return_value={"conversationId": "conv-append-scoped", "transcriptPath": str(transcript)},
+        ),
+        patch.object(nmem_shared, "activate_hook_workspace", return_value=tmp_path),
+        patch.object(nmem_shared, "resolve_space", return_value="work-space"),
+        patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
+        patch.object(nmem_shared, "http_request", return_value=None),
+        patch.object(nmem_shared, "run_nmem_command") as mock_run,
+        patch.object(nmem_shared, "save_unsynced_session") as mock_save,
+        patch.object(nmem_shared, "sync_learnings_if_any"),
+        patch.object(nmem_shared, "emit"),
+    ):
+        mock_run.return_value = MagicMock(returncode=0, stdout="{}")
+        session_end.main()
+        assert mock_run.call_count == 1  # only t show, no unscoped t append
+        mock_save.assert_called_once()
+
+    # 3. Unscoped CLI append uses shared args without --space.
+    with (
+        patch.object(
+            nmem_shared,
+            "read_hook_input",
+            return_value={"conversationId": "conv-append-1", "transcriptPath": str(transcript)},
+        ),
+        patch.object(nmem_shared, "activate_hook_workspace", return_value=tmp_path),
+        patch.object(nmem_shared, "resolve_space", return_value=""),
+        patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
+        patch.object(nmem_shared, "http_request", return_value=None),
+        patch.object(nmem_shared, "run_nmem_command") as mock_run,
+        patch.object(nmem_shared, "sync_learnings_if_any"),
+        patch.object(nmem_shared, "emit"),
+    ):
+        mock_run.return_value = MagicMock(returncode=0, stdout="{}")
+        session_end.main()
+        show_call = mock_run.call_args_list[0].args[0]
+        append_call = mock_run.call_args_list[1].args[0]
+        assert show_call == ["t", "show", "conv-append-1"]
+        assert append_call[:3] == ["t", "append", "conv-append-1"]
+        assert "--space" not in append_call
+
+    nmem_bin = shutil.which("nmem")
+    if nmem_bin:
+        help_res = subprocess.run(
+            [nmem_bin, *nmem_shared.build_cli_thread_append_args("fixture-id", []), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert help_res.returncode == 0
+
+
+def test_hooks_json_and_pre_invocation_sync_only(tmp_path):
+    assert "session-start" in _hook_command("SessionStart")
+    assert "--pre-invocation" not in _hook_command("SessionStart")
+    assert _hook_command("PreInvocation").count("session-start --pre-invocation") == 2
+
+    with (
+        patch.object(
+            nmem_shared,
+            "read_hook_input",
+            return_value={"conversationId": "conv-1", "artifactDirectoryPath": str(tmp_path)},
+        ),
+        patch.object(nmem_shared, "activate_hook_workspace", return_value=tmp_path),
+        patch.object(nmem_shared, "resolve_space") as mock_resolve,
+        patch.object(nmem_shared, "http_request") as mock_http,
+        patch.object(nmem_shared, "run_nmem_command") as mock_run,
+        patch.object(session_start, "read_startup_context") as mock_read,
+        patch("subprocess.Popen") as mock_popen,
+        patch.object(nmem_shared, "emit") as mock_emit,
+        patch.object(sys, "argv", ["session-start.py", "--pre-invocation"]),
+    ):
+        session_start.main()
+
+    mock_resolve.assert_not_called()
+    mock_http.assert_not_called()
+    mock_run.assert_not_called()
+    mock_read.assert_not_called()
+    mock_popen.assert_not_called()
+    mock_emit.assert_called_once_with({})
+
+
 def load_tests(loader, tests, pattern):
     import inspect
     import unittest
