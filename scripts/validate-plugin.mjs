@@ -102,6 +102,7 @@ async function main() {
     'skills/nmem-memory-working/SKILL.md',
     'skills/nmem-bridge-chat/SKILL.md',
     'skills/nmem-memory-search/SKILL.md',
+    'skills/nmem-graph-explore/SKILL.md',
     'skills/nmem-memory-distill/SKILL.md',
     'skills/nmem-thread-save/SKILL.md',
     'skills/nmem-thread-handoff/SKILL.md',
