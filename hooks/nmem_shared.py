@@ -601,14 +601,14 @@ def sync_mcp_config_file(mcp_config_path: str = None, cwd: str | Path | None = N
 
     api_url, api_key = get_effective_config(cwd)
     clean_url = api_url.rstrip("/")
-    server_url = f"{clean_url}/mcp/"
+    server_url = f"{clean_url}/mcp"
 
     headers = {"APP": "Google Antigravity"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
         headers["X-NMEM-API-Key"] = api_key
 
-    target_data = {"mcpServers": {"nowledge-mem": {"serverUrl": server_url, "headers": headers}}}
+    target_data = {"mcpServers": {"nowledge-mem": {"url": server_url, "headers": headers}}}
 
     p = Path(mcp_config_path)
     current_data = None

@@ -130,7 +130,8 @@ def test_sync_mcp_config_file(mock_get_effective_config):
         updated = nmem_shared.sync_mcp_config_file(tf_path)
         assert updated is True
         data = json.loads(Path(tf_path).read_text(encoding="utf-8"))
-        assert data["mcpServers"]["nowledge-mem"]["serverUrl"] == "https://mem.example.com/mcp/"
+        assert data["mcpServers"]["nowledge-mem"]["url"] == "https://mem.example.com/mcp"
+        assert "serverUrl" not in data["mcpServers"]["nowledge-mem"]
         assert data["mcpServers"]["nowledge-mem"]["headers"]["Authorization"] == "Bearer nmem_sec_123"
         assert data["mcpServers"]["nowledge-mem"]["headers"]["X-NMEM-API-Key"] == "nmem_sec_123"
         assert "X-MEM-API-Key" not in data["mcpServers"]["nowledge-mem"]["headers"]
