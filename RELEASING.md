@@ -13,9 +13,12 @@ In this repo, the repository root is already the plugin root. That means:
 
 ## Manual Prerequisites
 
-These are required for the gallery crawler:
+These are required for Marketplace submission and discovery:
 - the GitHub repository must be public
 - the repository About section must include the `google-antigravity-plugin` topic
+- `plugin.json` must include `name`, `displayName`, `description`, `version`, `logo` (bundled 1:1 square icon under `assets/`), `suggestedPrompts` (up to 3), and `author`
+- the plugin must pass `agy plugin validate` with zero errors (and `agy plugin validate --strict dist/release-root` on the built archive)
+- initial Marketplace listing is submitted via the [Antigravity Marketplace partner intake form](https://forms.gle/2EX5RFYPoJe1UgxR9) (there is no `agy plugin publish` CLI or API)
 - the release must be tagged and published on GitHub
 - the attached archive must contain `plugin.json` at the archive root
 - the attached archive must be free of macOS AppleDouble metadata entries such as `._README.md`
@@ -86,7 +89,7 @@ Once the tagged GitHub Release exists, users can download the release archive an
 - update `CHANGELOG.md`
 - add `release-notes/<version>.md`
 - run `npm run verify:release`
-- confirm the archive root contains `plugin.json`, `mcp_config.json`, `hooks.json`, `package.json`, `rules/`, and `skills/`
+- confirm the archive root contains `plugin.json`, `assets/`, `mcp_config.json`, `hooks.json`, `package.json`, `rules/`, `skills/`, and `hooks/`
 - create and push a matching tag
 - publish the GitHub Release with the generated `.tar.gz` asset and checksum
 - verify the repo still has the `google-antigravity-plugin` topic
