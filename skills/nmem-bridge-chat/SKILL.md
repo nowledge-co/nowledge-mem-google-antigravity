@@ -9,7 +9,7 @@ Use the long-lived Agent mailbox for an authorized message or handoff. An Antigr
 
 ## Choose the established connection
 
-For an explicit request and an approved Cloud MCP connection that advertises Bridge, use the [Remote MCP Bridge skill](https://github.com/nowledge-co/community/blob/main/shared/bridge/remote-mcp/SKILL.md). For the startup Hook or a CLI-only session, use the CLI with the approved Context. Do not switch transports after a refusal or an uncertain operation.
+For an explicit request and an approved Cloud MCP connection that advertises Bridge, use the [Remote MCP Bridge skill](https://github.com/nowledge-co/community/blob/main/shared/bridge/nowledge-bridge-mcp/SKILL.md). For the startup Hook or a CLI-only session, use the CLI with the approved Context. Do not switch transports after a refusal or an uncertain operation.
 
 ## Check the configured CLI connection
 
