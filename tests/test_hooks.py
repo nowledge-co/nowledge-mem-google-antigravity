@@ -1662,12 +1662,34 @@ def test_nmem_entrypoint_status(mock_status_main):
 
 
 HOOK_FALLBACKS = [
+    ("bridge-start", {}),
     ("session-start", {}),
     ("session-end", {}),
     ("gate", {"decision": "force_ask"}),
     ("post-invocation", {}),
     ("post-tool-use", {}),
 ]
+
+
+@pytest.mark.parametrize(
+    ("enabled", "context", "expects_hint"),
+    [("1", "approved-role", True), ("1", " ", False), ("0", "approved-role", False), ("", "", False)],
+)
+def test_bridge_start_requires_opt_in_and_configured_context(monkeypatch, capsys, enabled, context, expects_hint):
+    monkeypatch.setenv("NMEM_BRIDGE_INBOX_ON_START", enabled)
+    monkeypatch.setenv("NMEM_AGENT_CONTEXT", context)
+    monkeypatch.setattr(sys, "argv", ["nmem_entrypoint.py", "bridge-start"])
+    nmem_entrypoint.main()
+
+    output = json.loads(capsys.readouterr().out)
+    if expects_hint:
+        hint = output["injectSteps"][0]["ephemeralMessage"]
+        assert "nmem-bridge-chat" in hint
+        assert "NMEM_AGENT_CONTEXT" in hint
+        assert "check one page" in hint
+        assert context not in hint
+    else:
+        assert output == {}
 
 
 @pytest.mark.parametrize(("subcommand", "fallback"), HOOK_FALLBACKS)

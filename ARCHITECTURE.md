@@ -100,6 +100,10 @@ flowchart TD
 
 ---
 
+### Bridge SessionStart
+
+The separate Bridge `SessionStart` group runs `hooks/bridge-start.py` through the shared entrypoint. When enabled alongside an approved `NMEM_AGENT_CONTEXT`, it emits one ephemeral instruction. The agent uses the CLI to inspect the Context and check one inbox page. The hook does not touch mailbox state, include message content, or depend on startup memory.
+
 ## ⚙️ Configuration & Path Resolution Hierarchy
 
 ### Config Resolution Order
