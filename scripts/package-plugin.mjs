@@ -12,6 +12,7 @@ const archivePath = path.join(distDir, archiveName);
 const stageDir = path.join(distDir, 'release-root');
 const filesToShip = [
   'plugin.json',
+  'assets',
   'mcp_config.json',
   'hooks.json',
   'package.json',
@@ -24,6 +25,7 @@ const filesToShip = [
 ];
 const requiredArchiveEntries = new Set([
   './plugin.json',
+  './assets/logo.png',
   './mcp_config.json',
   './hooks.json',
   './package.json',
