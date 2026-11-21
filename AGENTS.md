@@ -50,6 +50,10 @@ When modifying or adding hook scripts under `hooks/` and configuring them in `ho
 
 ---
 
+MCP synchronization must propagate the resolved Space with `X-Nmem-Space-Id`, validate explicit workspace declarations, and preserve the existing configuration on validation failure. Test header routing, Space changes, and invalid declarations.
+
+Do not opt into the `exact-v1` protocol without backend capability negotiation: local backends requiring migration reject it. The Space header selects the existing configured retrieval policy, which may include shared Default memories.
+
 ## 3. Git Commit Standards
 
 Maintain a clean, linear repository history by following these commit guidelines:
