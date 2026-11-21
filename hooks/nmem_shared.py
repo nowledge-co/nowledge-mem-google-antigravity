@@ -701,23 +701,22 @@ def sync_mcp_config_file(mcp_config_path: str = None, cwd: str | Path | None = N
     except SpaceResolutionError:
         servers = current_data.get("mcpServers") if isinstance(current_data, dict) else None
         if isinstance(servers, dict) and "nowledge-mem" in servers:
-            previous = servers["nowledge-mem"]
-            previous_headers = previous.get("headers") if isinstance(previous, dict) else None
-            if isinstance(previous_headers, dict):
-                previous_headers = dict(previous_headers)
-                previous_headers.pop("X-Nmem-Space-Id", None)
-            if not isinstance(previous, dict) or previous.get("serverUrl") != server_url or previous_headers != headers:
-                del servers["nowledge-mem"]
-                try:
-                    _write_mcp_config(p, current_data)
-                except OSError as exc:
-                    raise SpaceResolutionError(
-                        "Could not disable the previous MCP connection; check config file permissions"
-                    ) from exc
+            del servers["nowledge-mem"]
+            try:
+                _write_mcp_config(p, current_data)
+            except OSError as exc:
+                raise SpaceResolutionError(
+                    "Could not disable the previous MCP connection; check config file permissions"
+                ) from exc
         raise
     if space_id is not None:
         headers["X-Nmem-Space-Id"] = space_id
-    target_data = {"mcpServers": {"nowledge-mem": {"serverUrl": server_url, "headers": headers}}}
+    target_data = dict(current_data) if isinstance(current_data, dict) else {}
+    servers = target_data.get("mcpServers")
+    target_data["mcpServers"] = {
+        **(servers if isinstance(servers, dict) else {}),
+        "nowledge-mem": {"serverUrl": server_url, "headers": headers},
+    }
 
     if current_data == target_data:
         return False

@@ -2085,10 +2085,9 @@ def test_sync_mcp_space_change_and_validation(tmp_path, monkeypatch):
     data = json.loads(config.read_text())
     assert data["mcpServers"]["nowledge-mem"]["headers"]["X-Nmem-Space-Id"] == "personal"
     (tmp_path / ".nmemspace").write_text("nonexistent-space")
-    before = config.read_bytes()
     with pytest.raises(nmem_shared.SpaceResolutionError):
         nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
-    assert config.read_bytes() == before
+    assert json.loads(config.read_text()) == {"mcpServers": {}}
 
 
 def test_mcp_space_header_uses_canonical_id_and_preserves_unbound_policy(tmp_path, monkeypatch):
@@ -2125,7 +2124,7 @@ def test_mcp_space_header_uses_canonical_id_and_preserves_unbound_policy(tmp_pat
     assert "X-Nmem-Space-Id" not in headers()
 
 
-def test_mcp_catalog_failure_preserves_previous_inferred_header(tmp_path, monkeypatch):
+def test_mcp_catalog_failure_disables_previous_inferred_header(tmp_path, monkeypatch):
     config = tmp_path / "mcp.json"
     workspace = tmp_path / "research"
     workspace.mkdir()
@@ -2147,7 +2146,7 @@ def test_mcp_catalog_failure_preserves_previous_inferred_header(tmp_path, monkey
     monkeypatch.setattr(nmem_shared, "http_request", lambda *args, **kwargs: None)
     with pytest.raises(nmem_shared.SpaceResolutionError):
         nmem_shared.sync_mcp_config_file(str(config), cwd=workspace)
-    assert config.read_bytes() == before
+    assert json.loads(config.read_text()) == {"mcpServers": {}}
 
 
 @pytest.mark.parametrize("initial", [False, True])
@@ -2192,11 +2191,15 @@ def test_offline_switch_disables_previous_mcp_transport(tmp_path, monkeypatch, n
     monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd: ("https://a.invalid", "key-a"))
     monkeypatch.setattr(nmem_shared, "http_request", lambda *a, **kw: [{"id": "old", "name": "Research"}])
     nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
+    existing = json.loads(config.read_text())
+    existing["mcpServers"]["other"] = {"command": "other"}
+    config.write_text(json.dumps(existing))
     monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd: next_connection)
     monkeypatch.setattr(nmem_shared, "http_request", lambda *a, **kw: None)
     with pytest.raises(nmem_shared.SpaceResolutionError):
         nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
-    assert json.loads(config.read_text()) == {"mcpServers": {}}
+    assert json.loads(config.read_text()) == {"mcpServers": {"other": {"command": "other"}}}
     monkeypatch.setattr(nmem_shared, "http_request", lambda *a, **kw: [{"id": "new", "name": "Research"}])
     assert nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
     assert json.loads(config.read_text())["mcpServers"]["nowledge-mem"]["headers"]["X-Nmem-Space-Id"] == "new"
+    assert json.loads(config.read_text())["mcpServers"]["other"] == {"command": "other"}
