@@ -164,6 +164,8 @@ nmem config mcp show --host google-antigravity
 Paste the generated JSON into Antigravity's custom MCP config (`~/.gemini/config/mcp_config.json` or modified raw via the MCP Store).
 
 
+MCP connections use the resolved Space, just like startup context and automatic thread saving. Restart the Antigravity session after changing its Space so the MCP connection reloads.
+
 ## Direct `nmem` Use Is Always Allowed
 
 The bundled skills are convenience paths, not a cage. Antigravity should freely compose direct `nmem` commands when that is clearer or more flexible.
