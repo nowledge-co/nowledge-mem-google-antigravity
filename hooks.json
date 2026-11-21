@@ -1,9 +1,16 @@
 {
   "nowledge-mem-hooks": {
-    "PreInvocation": [
+    "SessionStart": [
       {
         "type": "command",
         "command": "python3 hooks/nmem_entrypoint.py session-start || python hooks/nmem_entrypoint.py session-start || echo {}",
+        "timeout": 10
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python3 hooks/nmem_entrypoint.py session-start --pre-invocation || python hooks/nmem_entrypoint.py session-start --pre-invocation || echo {}",
         "timeout": 10
       }
     ],
@@ -43,6 +50,15 @@
         "type": "command",
         "command": "python3 hooks/nmem_entrypoint.py session-end || python hooks/nmem_entrypoint.py session-end || echo {}",
         "timeout": 20
+      }
+    ]
+  },
+  "nowledge-mem-bridge": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "python3 hooks/nmem_entrypoint.py bridge-start || python hooks/nmem_entrypoint.py bridge-start || echo {}",
+        "timeout": 5
       }
     ]
   }

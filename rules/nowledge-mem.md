@@ -72,7 +72,7 @@ If the command succeeds but returns `exists: false`, there is no Working Memory 
 If the runtime already knows the current project or agent lane, add `--space "<space name>"` to either command. Multi-agent orchestrators can set `NMEM_AGENT_ID="<agent-slug>"` before launching. Add `NMEM_SPACE` only when that whole run should override the identity's default space. Use `NMEM_HOST_AGENT_ID` only for advanced host-id aliases.
 
 **Using Host Agent ID**:
-At session startup, the PreInvocation hook injects the Context Bundle containing the derived host agent ID (e.g. `Agent id: antigravity-XXXXXXXX`). Always read this ID from your session context.
+At session startup, the SessionStart hook injects the Context Bundle containing the derived host agent ID (e.g. `Agent id: antigravity-XXXXXXXX`). Always read this ID from your session context.
 - **For MCP Tool calls**: When invoking MCP tools (such as `read_context_bundle` or `memory_add`), always pass the resolved host ID in the `host_agent_id` parameter to maintain context and space isolation.
 - **For CLI terminal commands**: If executing direct `nmem` shell commands in the terminal (such as adding, searching, or editing memories), prefix them with the resolved host ID:
   ```bash

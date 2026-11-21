@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -722,7 +723,6 @@ def test_session_start_uses_payload_workspace_when_process_cwd_differs(tmp_path,
     _write_workspace_space_config(workspace, config_kind, "project-space")
     hook_input = {
         "conversationId": "conv-workspace",
-        "invocationNum": 0,
         "workspacePaths": [str(workspace)],
         "transcriptPath": str(workspace / ".gemini" / "antigravity" / "transcript.jsonl"),
     }
@@ -745,7 +745,35 @@ def test_session_start_uses_payload_workspace_when_process_cwd_differs(tmp_path,
         session_start.main()
 
     payload = mock_emit.call_args.args[0]
-    assert "project-space" in payload["injectSteps"][0]["ephemeralMessage"]
+    assert "project-space" in payload["injectSteps"][0]["systemMessage"]["systemMessage"]
+
+
+def test_session_start_reports_invalid_workspace_space_once(tmp_path):
+    # SessionStart and PreInvocation both run before the first model call; only PreInvocation reports.
+    workspace = tmp_path / "customer-project"
+    workspace.mkdir()
+    (workspace / ".nmemspace").write_text("missing-space", encoding="utf-8")
+    emitted = {}
+
+    for argv in (["session-start.py"], ["session-start.py", "--pre-invocation"]):
+        with (
+            patch(
+                "nmem_shared.read_hook_input",
+                return_value={"conversationId": "conv-workspace", "workspacePaths": [str(workspace)]},
+            ),
+            patch("nmem_shared.get_existing_spaces", return_value=[{"id": "default"}]),
+            patch("nmem_shared.sync_mcp_config_file"),
+            patch("nmem_shared.sync_host_skills_async"),
+            patch("subprocess.Popen"),
+            patch("nmem_shared.emit") as mock_emit,
+            patch.object(sys, "argv", argv),
+        ):
+            session_start.main()
+        mock_emit.assert_called_once()
+        emitted[len(argv)] = mock_emit.call_args.args[0]
+
+    assert emitted[1] == {}
+    assert "missing-space" in emitted[2]["injectSteps"][0]["ephemeralMessage"]
 
 
 def test_post_invocation_surfaces_invalid_workspace_space(tmp_path):
@@ -835,16 +863,18 @@ def test_session_start_hook(mock_write, mock_space, mock_read, mock_config, mock
 
     with (
         patch("nmem_shared.sync_host_skills_async") as mock_skills_sync,
+        patch("subprocess.Popen") as mock_popen,
         patch.object(sys, "argv", ["session-start.py"]),
     ):
         session_start.main()
         mock_skills_sync.assert_called_once()
+        assert mock_popen.call_args.args[0][-1] == "--retry-only"
         assert mock_http.call_count >= 1
         mock_write.assert_called_once()
         payload = json.loads(mock_write.call_args[0][0])
         assert "injectSteps" in payload
         assert len(payload["injectSteps"]) > 0
-        emitted_text = payload["injectSteps"][0]["ephemeralMessage"]
+        emitted_text = payload["injectSteps"][0]["systemMessage"]["systemMessage"]
         assert "Startup Context Bundle" in emitted_text
 
 
@@ -866,6 +896,7 @@ def test_session_start_hook_working_memory_fallback(
 
     with (
         patch("nmem_shared.sync_host_skills_async") as mock_skills_sync,
+        patch("subprocess.Popen"),
         patch.object(sys, "argv", ["session-start.py"]),
     ):
         session_start.main()
@@ -875,8 +906,42 @@ def test_session_start_hook_working_memory_fallback(
         payload = json.loads(mock_write.call_args[0][0])
         assert "injectSteps" in payload
         assert len(payload["injectSteps"]) > 0
-        emitted_text = payload["injectSteps"][0]["ephemeralMessage"]
+        emitted_text = payload["injectSteps"][0]["systemMessage"]["systemMessage"]
         assert "Daily Working Memory Briefing" in emitted_text
+
+
+@pytest.mark.parametrize(
+    ("invocation_num", "initial_num_steps"),
+    [(0, 1), (1, 4), (0, 6)],
+    ids=["first-turn", "after-tool-call", "later-turn"],
+)
+def test_session_start_pre_invocation_never_injects_startup_context(invocation_num, initial_num_steps):
+    # Antigravity restarts invocationNum at 0 on every user turn, so PreInvocation cannot tell a new conversation.
+    hook_input = {
+        "conversationId": "conv-123",
+        "invocationNum": invocation_num,
+        "initialNumSteps": initial_num_steps,
+    }
+
+    with (
+        patch("nmem_shared.read_hook_input", return_value=hook_input),
+        patch("nmem_shared.resolve_space", return_value="default"),
+        patch("nmem_shared.sync_mcp_config_file") as mock_sync_mcp,
+        patch("nmem_shared.sync_host_skills_async") as mock_sync_skills,
+        patch("nmem_shared.sync_learnings_if_any") as mock_sync_learnings,
+        patch("session_start.read_startup_context") as mock_read_context,
+        patch("subprocess.Popen") as mock_popen,
+        patch("nmem_shared.emit") as mock_emit,
+        patch.object(sys, "argv", ["session-start.py", "--pre-invocation"]),
+    ):
+        session_start.main()
+
+    mock_emit.assert_called_once_with({})
+    mock_read_context.assert_not_called()
+    mock_popen.assert_not_called()
+    mock_sync_mcp.assert_not_called()
+    mock_sync_skills.assert_not_called()
+    mock_sync_learnings.assert_called_once()
 
 
 @patch("nmem_shared.http_request")
@@ -1662,12 +1727,48 @@ def test_nmem_entrypoint_status(mock_status_main):
 
 
 HOOK_FALLBACKS = [
+    ("bridge-start", {}),
     ("session-start", {}),
     ("session-end", {}),
     ("gate", {"decision": "force_ask"}),
     ("post-invocation", {}),
     ("post-tool-use", {}),
 ]
+
+
+@pytest.mark.parametrize(
+    ("enabled", "context", "expects_hint"),
+    [("1", "approved-role", True), ("1", " ", False), ("0", "approved-role", False), ("", "", False)],
+)
+def test_bridge_start_requires_opt_in_and_configured_context(monkeypatch, capsys, enabled, context, expects_hint):
+    monkeypatch.setenv("NMEM_BRIDGE_INBOX_ON_START", enabled)
+    monkeypatch.setenv("NMEM_AGENT_CONTEXT", context)
+    monkeypatch.setattr(sys, "argv", ["nmem_entrypoint.py", "bridge-start"])
+    nmem_entrypoint.main()
+
+    output = json.loads(capsys.readouterr().out)
+    if expects_hint:
+        hint = output["injectSteps"][0]["ephemeralMessage"]
+        assert "nmem-bridge-chat" in hint
+        assert "NMEM_AGENT_CONTEXT" in hint
+        assert "check one page" in hint
+        assert "CLI-only" in hint
+        assert context not in hint
+    else:
+        assert output == {}
+
+
+def test_bridge_skill_commands_keep_the_selected_inbox_scope():
+    guide = (PLUGIN_ROOT / "skills/nmem-bridge-chat/SKILL.md").read_text(encoding="utf-8")
+    examples = [shlex.split(line) for line in guide.splitlines() if line.startswith('"${NMEM_CLI_PATH:-nmem}"')]
+    prefix = ["${NMEM_CLI_PATH:-nmem}", "--json", "--agent-context=$NMEM_AGENT_CONTEXT", "bridge"]
+    scoped = [*prefix, "--resolved-space-id=$bridge_space_id"]
+    assert [*scoped, "inbox"] in examples
+    assert [*scoped, "open", "$message_id"] in examples
+    assert [*scoped, "reply", "$message_id", "--body=$reply_body"] in examples
+    assert [*prefix, "inbox"] in examples
+    for response_field in ("messages[].message", "open_args", "reply_args_prefix", "incomplete"):
+        assert f"`{response_field}`" in guide
 
 
 @pytest.mark.parametrize(("subcommand", "fallback"), HOOK_FALLBACKS)
@@ -1805,7 +1906,9 @@ def _run_hook_command(event, tmp_path, python3, python, payload="{}"):
 
 
 @pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
-@pytest.mark.parametrize("event", ["PreInvocation", "PostInvocation", "PreToolUse", "PostToolUse", "Stop"])
+@pytest.mark.parametrize(
+    "event", ["SessionStart", "PreInvocation", "PostInvocation", "PreToolUse", "PostToolUse", "Stop"]
+)
 def test_hooks_json_shell_fallback_prints_valid_json(event, tmp_path):
     # With neither python3 nor python runnable, the echo at the end of the chain answers alone.
     result = _run_hook_command(event, tmp_path, FAILING_INTERPRETER, FAILING_INTERPRETER)
@@ -1816,6 +1919,25 @@ def test_hooks_json_shell_fallback_prints_valid_json(event, tmp_path):
         assert payload == {"decision": "force_ask"}
     else:
         assert payload == {}
+
+
+def test_hooks_json_injects_startup_context_from_session_start_only():
+    # SessionStart runs once per conversation; both PreInvocation interpreters must carry the sync-only flag.
+    assert "session-start" in _hook_command("SessionStart")
+    assert "--pre-invocation" not in _hook_command("SessionStart")
+    assert _hook_command("PreInvocation").count("session-start --pre-invocation") == 2
+
+
+def test_entrypoint_passes_pre_invocation_flag_to_session_start():
+    hook = MagicMock()
+    hook.main.side_effect = lambda: hook.seen_args(sys.argv[1:])
+    with (
+        patch.object(sys, "argv", ["nmem_entrypoint.py", "session-start", "--pre-invocation"]),
+        patch("importlib.import_module", return_value=hook),
+    ):
+        nmem_entrypoint.main()
+
+    hook.seen_args.assert_called_once_with(["--pre-invocation"])
 
 
 @pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")

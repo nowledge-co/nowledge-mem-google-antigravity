@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-20
+
+### Added
+- Added `/nmem-bridge-chat` and an opt-in startup inbox check for the approved Nowledge Cloud Agent mailbox.
+
 ### Fixed
+- The startup Context Bundle is now injected once per conversation and stays available for the whole conversation. Previously it was injected again on every user turn, and the agent lost it as soon as it called a tool. Subagent conversations still receive their own copy, once.
 - Offline session retry now removes empty queue markers, preserves malformed queues as timestamped recovery files, and avoids overlapping workers without letting a recycled process ID block retries forever.
 - Project-specific Space settings now follow the workspace opened in Antigravity, including for globally installed plugins whose hooks run from the plugin directory. Invalid project settings are reported instead of silently sending memories to Default.
 - Hooks and skill scripts now run on the macOS system Python 3.9. Previously every hook failed there, and the PreToolUse fallback printed invalid JSON, so Antigravity aborted every terminal command and MCP call the hook matches.
