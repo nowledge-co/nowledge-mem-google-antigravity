@@ -14,8 +14,8 @@ def main():
                 {
                     "ephemeralMessage": (
                         "Nowledge Bridge inbox check requested. Use nmem-bridge-chat to inspect the approved "
-                        "NMEM_AGENT_CONTEXT and check one page. Keep that Context and its Space. "
-                        "Open only mail relevant to authorized work."
+                        "NMEM_AGENT_CONTEXT with the CLI and check one page in its exact Space. "
+                        "Stop if verification fails. This startup check is CLI-only."
                     )
                 }
             ]

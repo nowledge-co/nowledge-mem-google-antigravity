@@ -102,7 +102,7 @@ flowchart TD
 
 ### Bridge SessionStart
 
-The separate Bridge `SessionStart` group runs `hooks/bridge-start.py` through the shared entrypoint. When enabled alongside an approved `NMEM_AGENT_CONTEXT`, it emits one ephemeral instruction. The agent uses the CLI to inspect the Context and check one inbox page. The hook does not touch mailbox state, include message content, or depend on startup memory.
+The separate Bridge `SessionStart` group runs `hooks/bridge-start.py` through the shared entrypoint. When enabled alongside an approved `NMEM_AGENT_CONTEXT`, it emits one ephemeral instruction. The agent uses the CLI to verify the Context and check one page in its exact Space. Interactive identity-wide CLI reads retain the original Space on each message. The bundled skill also documents exact-Space Remote MCP calls for explicit interactive requests.
 
 ## ⚙️ Configuration & Path Resolution Hierarchy
 

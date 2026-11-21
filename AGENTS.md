@@ -15,7 +15,7 @@ This plugin is a hybrid integration of the user's Nowledge Mem knowledge base an
 
 ## 2. Hook Development Constraints
 
-* The opt-in Bridge `SessionStart` hook emits an ephemeral inbox-check instruction for the configured Context. Keep Bridge I/O and all mailbox effects in the agent's approved CLI or MCP flow.
+* The opt-in Bridge `SessionStart` hook emits a CLI-only, single-Space inbox instruction for the configured Context. Keep mailbox I/O in the agent turn. Identity-wide CLI reads and Remote MCP require a separate user request.
 
 When modifying or adding hook scripts under `hooks/` and configuring them in `hooks.json`, adhere to the following rules:
 

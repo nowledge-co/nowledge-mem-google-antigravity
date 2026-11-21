@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1687,9 +1688,23 @@ def test_bridge_start_requires_opt_in_and_configured_context(monkeypatch, capsys
         assert "nmem-bridge-chat" in hint
         assert "NMEM_AGENT_CONTEXT" in hint
         assert "check one page" in hint
+        assert "CLI-only" in hint
         assert context not in hint
     else:
         assert output == {}
+
+
+def test_bridge_skill_commands_keep_the_selected_inbox_scope():
+    guide = (PLUGIN_ROOT / "skills/nmem-bridge-chat/SKILL.md").read_text(encoding="utf-8")
+    examples = [shlex.split(line) for line in guide.splitlines() if line.startswith('"${NMEM_CLI_PATH:-nmem}"')]
+    prefix = ["${NMEM_CLI_PATH:-nmem}", "--json", "--agent-context", "$NMEM_AGENT_CONTEXT", "bridge"]
+    scoped = [*prefix, "--resolved-space-id", "$bridge_space_id"]
+    assert [*scoped, "inbox"] in examples
+    assert [*scoped, "open", "$message_id"] in examples
+    assert [*scoped, "reply", "$message_id", "--body", "$reply_body"] in examples
+    assert [*prefix, "inbox"] in examples
+    for response_field in ("messages[].message", "open_args", "reply_args_prefix", "incomplete"):
+        assert f"`{response_field}`" in guide
 
 
 @pytest.mark.parametrize(("subcommand", "fallback"), HOOK_FALLBACKS)

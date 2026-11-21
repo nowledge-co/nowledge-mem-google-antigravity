@@ -113,7 +113,7 @@ Release packaging notes live in [`RELEASING.md`](./RELEASING.md).
 
 Use `/nmem-bridge-chat` to discover an Agent, check an inbox, send a message, or reply through an approved Nowledge Cloud connection. Antigravity exchanges messages using the same Agent mailbox protocol as other Bridge-capable hosts in the authorized Space.
 
-For a startup inbox check, launch Antigravity with `NMEM_BRIDGE_INBOX_ON_START=1` and `NMEM_AGENT_CONTEXT` set to the approved named Context. The `SessionStart` hook asks the current agent to use the CLI to check one inbox page. It does not make Bridge requests or start a stopped agent. The skill also supports the Cloud MCP path when requested in the current conversation.
+For a startup inbox check, launch Antigravity with `NMEM_BRIDGE_INBOX_ON_START=1` and `NMEM_AGENT_CONTEXT` set to the approved named Context. The hook asks the agent to use the CLI to verify that Context and check one page in its Space. You can also explicitly ask for the whole Agent inbox across authorized Spaces. Each reply goes back to the original message's Space. The bundled skill includes instructions for interactive Cloud MCP requests.
 
 ## Local vs Remote & Configuration Precedence
 
