@@ -12,13 +12,15 @@ The plugin bridges **Google Antigravity** with **Nowledge Mem** via a hybrid mul
 flowchart TD
     subgraph Antigravity Engine ["Google Antigravity 2.0 Engine"]
         A[Session Ingestion & Planner]
+        S[SessionStart Hook]
         B[PreInvocation Hook]
         C[PreToolUse Gate Hook]
         D[Stop Hook]
     end
 
     subgraph Plugin ["nowledge-mem-google-antigravity Plugin"]
-        B -->|Turn 1| E[session-start.py]
+        S -->|New conversation| E[session-start.py]
+        B -->|Every model call| E
         C -->|Every Tool Call| F[nmem-gate.py]
         D -->|Session End| G[session-end.py]
 
@@ -44,13 +46,14 @@ flowchart TD
 
 ## 🔄 Lifecycle Hook Dynamics
 
-### 1. PreInvocation Hook (`hooks/session-start.py`)
-- **Trigger**: Runs at session start (when `invocationNum == 0` or initial step).
+### 1. SessionStart and PreInvocation Hooks (`hooks/session-start.py`)
+- **SessionStart trigger**: Antigravity runs it once when a new conversation starts, including each subagent conversation. It does not run again on later turns or when a conversation is resumed.
 - **Execution Flow**:
   1. Queries the Nowledge Mem backend via `nmem_shared.http_request("/context?source_app=google-antigravity")`.
   2. If Context Bundle is unavailable, falls back to `/working-memory`.
-  3. Emits `injectSteps` containing a `<nowledge_context_bundle>` block into Antigravity's active session.
+  3. Emits `injectSteps` with one `systemMessage` step containing a `<nowledge_context_bundle>` block. A `systemMessage` stays in the conversation for later model calls and turns; the deprecated `ephemeralMessage` is dropped after the first model call.
   4. Launches a background retry daemon (`python3 session-start.py --retry-only`) to flush any pending unsynced sessions from `~/.nowledge-mem/plugins/antigravity/unsynced.json`.
+- **PreInvocation trigger** (`session-start --pre-invocation`): runs before every model call. It syncs approved `learning_proposal.md` artifacts and never injects the startup context. `invocationNum` in its payload restarts at `0` on every user turn, so it cannot identify the first turn of a conversation.
 
 ### 2. PreToolUse Gate Hook (`hooks/nmem-gate.py`)
 - **Trigger**: Evaluated before executing `call_mcp_tool`, `mcp_nowledge-mem_*`, or `run_command`.
@@ -99,6 +102,10 @@ flowchart TD
 - Both PreToolUse fallbacks answer `force_ask`. Neither can tell a delete from a read, and only `force_ask` still prompts when the user chose Always Allow, as the gate does for deletes. The cost is that while hooks cannot run, every terminal command and MCP call the hook matches asks for approval each time; a healthy gate passes unrelated tools with `allow`.
 
 ---
+
+### Bridge SessionStart
+
+The separate Bridge `SessionStart` group runs `hooks/bridge-start.py` through the shared entrypoint. When enabled alongside an approved `NMEM_AGENT_CONTEXT`, it emits one ephemeral instruction. The agent uses the CLI to verify the Context and check one page in its exact Space. Interactive identity-wide CLI reads retain the original Space on each message. The bundled skill also documents exact-Space Remote MCP calls for explicit interactive requests.
 
 ## ⚙️ Configuration & Path Resolution Hierarchy
 

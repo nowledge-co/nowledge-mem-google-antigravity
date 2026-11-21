@@ -125,48 +125,20 @@ def main():
         nmem_shared.retry_unsynced_sessions()
         sys.exit(0)
 
-    try:
-        # Asynchronously sync host skills connection (nmem skills connect antigravity / sync)
-        try:
-            nmem_shared.sync_host_skills_async()
-        except Exception:
-            pass
+    # hooks.json runs this module for two events. SessionStart (no flag) fires once per
+    # conversation and injects the startup context. PreInvocation (--pre-invocation) fires
+    # before every model call, so it only syncs and never injects.
+    pre_invocation = "--pre-invocation" in sys.argv[1:]
+    inject_steps = []
 
+    try:
         hook_input = nmem_shared.read_hook_input()
         conversation_id = hook_input.get("conversationId")
         transcript_path = hook_input.get("transcriptPath")
         artifact_directory_path = hook_input.get("artifactDirectoryPath")
-        invocation_num = hook_input.get("invocationNum")
-        initial_num_steps = hook_input.get("initialNumSteps")
         workspace_root = nmem_shared.activate_hook_workspace(hook_input)
 
-        # Only run startup injection on the very first invocation.
-        # Supports both 0-indexed and 1-indexed runtimes.
-        is_first = (invocation_num == 0) or (
-            invocation_num == 1 and (initial_num_steps is None or initial_num_steps <= 2)
-        )
-
-        inject_steps = []
-        if is_first or invocation_num is None:
-            try:
-                nmem_shared.sync_mcp_config_file(cwd=workspace_root)
-            except nmem_shared.SpaceResolutionError as error:
-                inject_steps.append({"ephemeralMessage": nmem_shared.format_space_resolution_error(error)})
-            except OSError:
-                pass
-
-        if is_first:
-            try:
-                subprocess.Popen(
-                    [sys.executable, __file__, "--retry-only"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-            except Exception:
-                pass
-
-        if invocation_num is not None and not is_first:
+        if pre_invocation:
             try:
                 space = nmem_shared.resolve_space(workspace_root, validate_explicit=True)
                 nmem_shared.sync_learnings_if_any(conversation_id, transcript_path, artifact_directory_path, space)
@@ -181,6 +153,31 @@ def main():
             nmem_shared.emit({})
             return
 
+        # Asynchronously sync host skills connection (nmem skills connect antigravity / sync)
+        try:
+            nmem_shared.sync_host_skills_async()
+        except Exception:
+            pass
+
+        # Synchronize the MCP transport from this workspace's configuration,
+        # rather than from the plugin directory used as the hook process cwd.
+        try:
+            nmem_shared.sync_mcp_config_file(cwd=workspace_root)
+        except nmem_shared.SpaceResolutionError as error:
+            inject_steps.append({"ephemeralMessage": nmem_shared.format_space_resolution_error(error)})
+        except Exception:
+            pass
+
+        try:
+            subprocess.Popen(
+                [sys.executable, __file__, "--retry-only"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            pass
+
         startup_context = read_startup_context(workspace_root)
         if startup_context:
             msg = (
@@ -190,10 +187,12 @@ def main():
                 f"{startup_context['content']}\n"
                 f"</{startup_context['tag']}>"
             )
-            inject_steps.append({"ephemeralMessage": msg})
+            # systemMessage stays in the conversation; ephemeralMessage is dropped after one model call.
+            inject_steps.append({"systemMessage": {"systemMessage": msg}})
         nmem_shared.emit({"injectSteps": inject_steps} if inject_steps else {})
-    except nmem_shared.SpaceResolutionError as e:
-        nmem_shared.emit({"injectSteps": [{"ephemeralMessage": nmem_shared.format_space_resolution_error(e)}]})
+    except nmem_shared.SpaceResolutionError:
+        # PreInvocation reports errors from its own Space resolution.
+        nmem_shared.emit({"injectSteps": inject_steps} if inject_steps else {})
     except Exception as e:
         if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
             sys.stderr.write(f"Startup hook failed: {e}\n")

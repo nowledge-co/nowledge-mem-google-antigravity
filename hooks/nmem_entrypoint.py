@@ -16,6 +16,7 @@ MIN_PYTHON = (3, 9)
 # gate's is force_ask: it cannot tell a delete from a read, and only force_ask
 # still prompts when the user chose Always Allow.
 HOOKS = {
+    "bridge-start": ("bridge-start", {}),
     "session-start": ("session-start", {}),
     "session-end": ("session-end", {}),
     "gate": ("nmem-gate", {"decision": "force_ask"}),
@@ -84,7 +85,7 @@ def main():
     if len(sys.argv) < 2:
         sys.stderr.write("Usage: python3 hooks/nmem_entrypoint.py <subcommand> [args...]\n")
         sys.stderr.write(
-            "Subcommands: status, session-start, session-end, gate, skill-load, skill-manage, skill-propose\n"
+            "Subcommands: status, bridge-start, session-start, session-end, gate, skill-load, skill-manage, skill-propose\n"
         )
         sys.exit(1)
 
@@ -187,7 +188,7 @@ def main():
     else:
         sys.stderr.write(f"Unknown subcommand: {cmd}\n")
         sys.stderr.write(
-            "Available subcommands: status, session-start, session-end, gate, skill-load, skill-manage, skill-propose, artifact-update, wm-update, rule-manage\n"
+            "Available subcommands: status, bridge-start, session-start, session-end, gate, skill-load, skill-manage, skill-propose, artifact-update, wm-update, rule-manage\n"
         )
         sys.exit(1)
 

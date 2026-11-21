@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -661,6 +662,17 @@ def _mcp_space_id(cwd: str | Path | None, client_config: tuple[str, str | None])
     raise SpaceResolutionError(f"Cannot resolve MCP Space '{selected}' to a unique ID on the connected server")
 
 
+def _write_mcp_config(path: Path, data: dict) -> None:
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as staged:
+        temporary = Path(staged.name)
+        try:
+            staged.write(json.dumps(data, indent=2) + "\n")
+            staged.close()
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def sync_mcp_config_file(mcp_config_path: str = None, cwd: str | Path | None = None) -> bool:
     """Synchronize plugin mcp_config.json with effective client configuration
     (~/.nowledge-mem/config.json or NMEM_API_URL/NMEM_API_KEY env vars).
@@ -673,29 +685,45 @@ def sync_mcp_config_file(mcp_config_path: str = None, cwd: str | Path | None = N
     clean_url = api_url.rstrip("/")
     server_url = f"{clean_url}/mcp/"
 
+    p = Path(mcp_config_path)
+    try:
+        current_data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        current_data = None
+
     headers = {"APP": "Google Antigravity"}
-    space_id = _mcp_space_id(cwd, (api_url, api_key))
-    if space_id is not None:
-        headers["X-Nmem-Space-Id"] = space_id
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
         headers["X-NMEM-API-Key"] = api_key
 
+    try:
+        space_id = _mcp_space_id(cwd, (api_url, api_key))
+    except SpaceResolutionError:
+        servers = current_data.get("mcpServers") if isinstance(current_data, dict) else None
+        if isinstance(servers, dict) and "nowledge-mem" in servers:
+            previous = servers["nowledge-mem"]
+            previous_headers = previous.get("headers") if isinstance(previous, dict) else None
+            if isinstance(previous_headers, dict):
+                previous_headers = dict(previous_headers)
+                previous_headers.pop("X-Nmem-Space-Id", None)
+            if not isinstance(previous, dict) or previous.get("serverUrl") != server_url or previous_headers != headers:
+                del servers["nowledge-mem"]
+                try:
+                    _write_mcp_config(p, current_data)
+                except OSError as exc:
+                    raise SpaceResolutionError(
+                        "Could not disable the previous MCP connection; check config file permissions"
+                    ) from exc
+        raise
+    if space_id is not None:
+        headers["X-Nmem-Space-Id"] = space_id
     target_data = {"mcpServers": {"nowledge-mem": {"serverUrl": server_url, "headers": headers}}}
-
-    p = Path(mcp_config_path)
-    current_data = None
-    if p.exists():
-        try:
-            current_data = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            pass
 
     if current_data == target_data:
         return False
 
     try:
-        p.write_text(json.dumps(target_data, indent=2) + "\n", encoding="utf-8")
+        _write_mcp_config(p, target_data)
         return True
     except Exception as e:
         if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):

@@ -80,7 +80,7 @@ Release packaging notes live in [`RELEASING.md`](./RELEASING.md).
 
 **Automatic lifecycle hooks**
 
-- **PreInvocation Hook**: Automatically loads Context Bundle when available, with Working Memory as the lightweight fallback, and injects it as situational context at the start of the session. Prioritizes direct native HTTP REST transport (<30ms latency), falling back to CLI subprocess execution. Concurrently launches a non-blocking background thread to connect and sync active host skills (`nmem skills connect antigravity` and `nmem skills sync`).
+- **SessionStart Hook**: Automatically loads Context Bundle when available, with Working Memory as the lightweight fallback, and injects it once as situational context when a conversation starts. It is injected as a system message, so it stays available after tool calls and on later turns. Prioritizes direct native HTTP REST transport (<30ms latency), falling back to CLI subprocess execution. Concurrently launches a non-blocking background thread to connect and sync active host skills (`nmem skills connect antigravity` and `nmem skills sync`).
 - **PostInvocation Hook**: Evaluates mid-session runtime state (such as pending offline sessions in `~/.nowledge-mem/plugins/antigravity/unsynced.json`), triggers asynchronous background synchronization, and throttles informational notifications to at most once per conversation session.
 - **Stop Hook**: Automatically imports conversation messages from Antigravity's `transcript.jsonl` log into Nowledge Mem under the current conversation ID when execution completes. Defers capture when background tasks are still running (`fullyIdle: false`), and prioritizes incremental tail reconciliation (`/threads/{id}/reconcile-tail`) to eliminate duplicate messages and reduce payload size. Prioritizes direct native HTTP REST transport, falling back to CLI execution and local offline buffer queuing (`~/.nowledge-mem/plugins/antigravity/unsynced.json`).
 - **Space Resolution & Verification**: Resolves the active space by prioritizing explicit environment overrides (`NMEM_SPACE`/`NMEM_SPACE_ID`), workspace/plugin config (`.config.json` / `~/.nowledge-mem/plugins/antigravity/config.json`), and project config (`.nmemspace`/`.nowledge/config.json`). Dynamically detected candidate spaces from workspace directory names are verified against existing backend spaces; if the space does not exist on the server, Antigravity safely falls back to `default`.
@@ -97,6 +97,7 @@ Release packaging notes live in [`RELEASING.md`](./RELEASING.md).
 
 **Agent skills**
 
+- `nmem-bridge-chat`
 - `nmem-fs-explore`
 - `nmem-memory-distill`
 - `nmem-memory-search`
@@ -107,6 +108,12 @@ Release packaging notes live in [`RELEASING.md`](./RELEASING.md).
 - `nmem-status`
 - `nmem-thread-handoff`
 - `nmem-thread-save`
+
+## Bridge
+
+Use `/nmem-bridge-chat` to discover an Agent, check an inbox, send a message, or reply through an approved Nowledge Cloud connection. Antigravity exchanges messages using the same Agent mailbox protocol as other Bridge-capable hosts in the authorized Space.
+
+For a startup inbox check, launch Antigravity with `NMEM_BRIDGE_INBOX_ON_START=1` and `NMEM_AGENT_CONTEXT` set to the approved named Context. The hook asks the agent to use the CLI to verify that Context and check one page in its Space. You can also explicitly ask for the whole Agent inbox across authorized Spaces. Each reply goes back to the original message's Space. The bundled skill includes instructions for interactive Cloud MCP requests.
 
 ## Local vs Remote & Configuration Precedence
 
