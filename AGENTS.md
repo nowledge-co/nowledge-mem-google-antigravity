@@ -15,6 +15,8 @@ This plugin is a hybrid integration of the user's Nowledge Mem knowledge base an
 
 ## 2. Hook Development Constraints
 
+* The opt-in Bridge `SessionStart` hook emits a CLI-only, single-Space inbox instruction for the configured Context. Keep mailbox I/O in the agent turn. Identity-wide CLI reads and Remote MCP require a separate user request.
+
 When modifying or adding hook scripts under `hooks/` and configuring them in `hooks.json`, adhere to the following rules:
 
 * **POSIX Path Safety**: Do NOT use dynamic path variables (such as `${extensionPath}`) inside `hooks.json`. They are not supported by the Antigravity hook runner. Keep invocations generic and POSIX-compliant (e.g. `python3 hooks/nmem_entrypoint.py session-start || python hooks/nmem_entrypoint.py session-start || echo {}`).

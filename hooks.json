@@ -45,5 +45,14 @@
         "timeout": 20
       }
     ]
+  },
+  "nowledge-mem-bridge": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "python3 hooks/nmem_entrypoint.py bridge-start || python hooks/nmem_entrypoint.py bridge-start || echo {}",
+        "timeout": 5
+      }
+    ]
   }
 }

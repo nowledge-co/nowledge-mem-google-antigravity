@@ -88,6 +88,7 @@ async function main() {
     'RELEASING.md',
     'rules/nowledge-mem.md',
     'hooks/nmem_entrypoint.py',
+    'hooks/bridge-start.py',
     'hooks/session-start.py',
     'hooks/session-end.py',
     'hooks/nmem-gate.py',
@@ -96,6 +97,7 @@ async function main() {
     'hooks/post-tool-use.py',
     'sidecars/nowledge-mem-sync/sidecar.json',
     'skills/nmem-memory-working/SKILL.md',
+    'skills/nmem-bridge-chat/SKILL.md',
     'skills/nmem-memory-search/SKILL.md',
     'skills/nmem-memory-distill/SKILL.md',
     'skills/nmem-thread-save/SKILL.md',
@@ -135,6 +137,10 @@ async function main() {
           Array.isArray(hooksConfig['nowledge-mem-hooks'])
         ) {
           fail('hooks.json must contain a top-level "nowledge-mem-hooks" object');
+        }
+        const bridgeStart = hooksConfig['nowledge-mem-bridge']?.SessionStart?.[0];
+        if (bridgeStart?.type !== 'command' || !bridgeStart.command?.includes('nmem_entrypoint.py bridge-start')) {
+          fail('hooks.json must route the Bridge SessionStart hook through nmem_entrypoint.py');
         }
       }
     } catch (error) {

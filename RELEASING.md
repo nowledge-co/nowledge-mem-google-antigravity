@@ -88,6 +88,7 @@ Once the tagged GitHub Release exists, users can download the release archive an
 - run `npm run verify:release`
 - confirm the archive root contains `plugin.json`, `mcp_config.json`, `hooks.json`, `package.json`, `rules/`, and `skills/`
 - create and push a matching tag
+- with the startup Context in Space A, deliver a synthetic message in an authorized Space B. Verify startup only checks A. Ask for the whole Agent inbox, open the B message and verify its reply in B from the sender. Also check a scoped open and reply with a message in A.
 - publish the GitHub Release with the generated `.tar.gz` asset and checksum
 - verify the repo still has the `google-antigravity-plugin` topic
 - verify the archive contents with `tar -tzf dist/nowledge-mem-google-antigravity.tar.gz` and make sure there are no `._*` entries
