@@ -313,7 +313,7 @@ def test_retry_unsynced_sessions_success_unlinks_queue(mock_http):
             encoding="utf-8",
         )
         mock_http.side_effect = [
-            {"error": "not_found"},
+            {"status": 404, "detail": "Thread not found"},
             {"id": "conv-1", "title": "Title"},
         ]
         assert queue_file.exists()
@@ -752,7 +752,7 @@ def test_session_start_uses_payload_workspace_when_process_cwd_differs(tmp_path,
 
 
 def test_session_start_reports_invalid_workspace_space_once(tmp_path):
-    # SessionStart and PreInvocation both run before the first model call; only PreInvocation reports.
+    # SessionStart reports a Space error once; PreInvocation skips Space lookup when no proposal exists.
     workspace = tmp_path / "customer-project"
     workspace.mkdir()
     (workspace / ".nmemspace").write_text("missing-space", encoding="utf-8")
@@ -825,7 +825,7 @@ def test_session_end_writes_to_payload_workspace_space(tmp_path):
         patch("nmem_shared.emit"),
         patch.object(sys, "argv", ["session-end.py"]),
     ):
-        mock_http.side_effect = [{"status": 404, "error": "not_found"}, {"status": "ok"}]
+        mock_http.side_effect = [{"status": 404, "detail": "Thread not found"}, {"status": "ok"}]
         session_end.main()
 
     create_call = next(call for call in mock_http.call_args_list if call.args[0] == "/threads")
@@ -1080,7 +1080,7 @@ def test_session_end_captures_a_utf8_payload_whatever_the_stdin_encoding(
     )
     hook_input = {"conversationId": "conv-utf8", "transcriptPath": str(transcript), "fullyIdle": True}
     raw = json.dumps(hook_input, ensure_ascii=False).encode("utf-8")
-    mock_http.side_effect = [{"status": 404, "error": "not_found"}, {"status": "ok"}]
+    mock_http.side_effect = [{"status": 404, "detail": "Thread not found"}, {"status": "ok"}]
     with (
         patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(raw), encoding="gbk")),
         patch("sys.stdout.write"),
@@ -1090,7 +1090,8 @@ def test_session_end_captures_a_utf8_payload_whatever_the_stdin_encoding(
 
     creates = [call for call in mock_http.call_args_list if call.args[0] == "/threads"]
     assert len(creates) == 1
-    assert creates[0].kwargs["payload"]["id"] == "conv-utf8"
+    assert creates[0].kwargs["payload"]["thread_id"] == "conv-utf8"
+    assert "id" not in creates[0].kwargs["payload"]
     assert creates[0].kwargs["payload"]["messages"] == [
         {"role": "user", "content": "Save this"},
         {"role": "assistant", "content": "Saved."},
@@ -2328,13 +2329,13 @@ def test_scoped_capture_retains_queue_and_never_relocates_via_import(tmp_path):
             patch("nmem_shared.is_backend_unreachable", return_value=False),
             patch(
                 "nmem_shared.http_request",
-                side_effect=[{"status": 404, "error": "not_found"}, {"error": "thread_exists_in_other_space"}],
+                side_effect=[{"status": 404, "detail": "Thread not found"}, {"error": "thread_exists_in_other_space"}],
             ) as mock_http,
             patch("nmem_shared.run_nmem_command") as mock_run,
         ):
             nmem_shared.retry_unsynced_sessions()
             assert [c.args[0] for c in mock_http.call_args_list] == [
-                "/threads/conv-replay-1?space=work-space",
+                "/threads/conv-replay-1?space_id=work-space",
                 "/threads",
             ]
             mock_run.assert_not_called()
@@ -2354,6 +2355,551 @@ def test_scoped_capture_retains_queue_and_never_relocates_via_import(tmp_path):
             assert all("import" not in c.args[0] and "create" not in c.args[0] for c in mock_run.call_args_list)
         assert queue_file.exists()
         assert "conv-replay-1" in json.loads(queue_file.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("disable_httpx", [False, True], ids=["httpx", "urllib"])
+def test_loopback_http_capture_404_create_and_identical_scope_guard(tmp_path, disable_httpx):
+    import http.server
+    import threading
+
+    session_end = importlib.import_module("session-end")
+    recorded_requests = []
+    mode = {"state": "missing"}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            pass
+
+        def do_GET(self):
+            if self.path == "/spaces":
+                body = json.dumps({"spaces": [{"id": "work-space", "name": "Work Space", "aliases": ["ws"]}]}).encode(
+                    "utf-8"
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            recorded_requests.append(("GET", self.path, None))
+            state = mode["state"]
+            if state == "missing":
+                body = json.dumps({"detail": "Thread not found"}).encode("utf-8")
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+            elif state == "unauthorized":
+                body = json.dumps({"detail": "Unauthorized"}).encode("utf-8")
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+            elif state == "forbidden":
+                body = json.dumps({"detail": "Forbidden", "error": None}).encode("utf-8")
+                self.send_response(403)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+            elif state == "route_404":
+                body = json.dumps({"detail": "Not Found"}).encode("utf-8")
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+            elif state == "gateway_json_404":
+                body = json.dumps({"message": "Not Found"}).encode("utf-8")
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+            elif state == "generic_error_not_found":
+                body = json.dumps({"error": "not_found"}).encode("utf-8")
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+            elif state == "space_not_found":
+                body = json.dumps({"error": "not_found", "detail": "Space not found"}).encode("utf-8")
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+            elif state == "server_503":
+                body = json.dumps({"detail": "Service Unavailable", "error": ""}).encode("utf-8")
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+            elif state == "proxy_html_404":
+                self.send_response(404)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"<html>404 Not Found</html>")
+            elif state == "wrong_space_identical":
+                body = json.dumps(
+                    {
+                        "thread_id": "conv/1",
+                        "space_id": "other-space",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+            elif state == "canonical_space_id_identical":
+                body = json.dumps(
+                    {
+                        "thread": {
+                            "thread_id": "conv/1",
+                            "space_id": "work-space",
+                            "messages": [{"role": "user", "content": "hello"}],
+                        }
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+            elif state == "matching_space_identical":
+                body = json.dumps(
+                    {
+                        "thread_id": "conv/1",
+                        "space_id": "work space",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            payload = json.loads(raw.decode("utf-8"))
+            recorded_requests.append(("POST", self.path, payload))
+            # Enforce ThreadCreateRequest contract: require thread_id, reject id.
+            if self.path == "/threads":
+                if "thread_id" not in payload or "id" in payload:
+                    self.send_response(422)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"detail": "thread_id required"}).encode("utf-8"))
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"thread": {"thread_id": payload["thread_id"]}}).encode("utf-8"))
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(json.dumps({"source": "USER_EXPLICIT", "content": "hello"}) + "\n", encoding="utf-8")
+
+    sys_mods = {"httpx": None} if disable_httpx else {}
+    try:
+        with (
+            tempfile.TemporaryDirectory() as home_dir,
+            patch.dict(
+                os.environ,
+                {
+                    "HOME": home_dir,
+                    "USERPROFILE": home_dir,
+                    "NMEM_API_URL": base_url,
+                    "NMEM_IGNORE_HOST_CONFIG": "1",
+                },
+            ),
+            patch.dict(sys.modules, sys_mods),
+            patch.object(nmem_shared, "run_nmem_command", side_effect=AssertionError("CLI must not be called")),
+            patch.object(nmem_shared, "resolve_space", return_value="work space"),
+            patch.object(nmem_shared, "sync_learnings_if_any"),
+            patch.object(nmem_shared, "emit"),
+        ):
+            nmem_shared.reset_backend_unreachable()
+
+            # 1. Real 404 reaches POST /threads with thread_id + URL-encoded space_id lookup, no CLI needed.
+            mode["state"] = "missing"
+            recorded_requests.clear()
+            with patch.object(
+                nmem_shared,
+                "read_hook_input",
+                return_value={"conversationId": "conv/1", "transcriptPath": str(transcript)},
+            ):
+                session_end.main()
+
+            assert [r[:2] for r in recorded_requests] == [
+                ("GET", "/threads/conv%2F1?space_id=work%20space"),
+                ("POST", "/threads"),
+            ]
+            post_payload = recorded_requests[1][2]
+            assert post_payload is not None
+            assert post_payload["thread_id"] == "conv/1"
+            assert "id" not in post_payload
+            assert post_payload["space_id"] == "work space"
+            assert not nmem_shared.get_unsynced_queue_path().exists()
+
+            # 2. Unauthorized (401) and HTML proxy 404 do not dispatch POST /threads and leave capture queued.
+            for bad_state in (
+                "unauthorized",
+                "forbidden",
+                "route_404",
+                "gateway_json_404",
+                "generic_error_not_found",
+                "space_not_found",
+                "proxy_html_404",
+                "server_503",
+            ):
+                mode["state"] = bad_state
+                recorded_requests.clear()
+                nmem_shared.reset_backend_unreachable()
+                with patch.object(
+                    nmem_shared,
+                    "read_hook_input",
+                    return_value={"conversationId": "conv/1", "transcriptPath": str(transcript)},
+                ):
+                    session_end.main()
+                assert all(r[0] != "POST" for r in recorded_requests)
+                assert nmem_shared.get_unsynced_queue_path().exists()
+
+            # 3. Identical-transcript thread in wrong Space stays queued in replay; matching Space unlinks queue.
+            mode["state"] = "wrong_space_identical"
+            recorded_requests.clear()
+            nmem_shared.reset_backend_unreachable()
+            nmem_shared.retry_unsynced_sessions()
+            assert [r[:2] for r in recorded_requests] == [("GET", "/threads/conv%2F1?space_id=work%20space")]
+            assert nmem_shared.get_unsynced_queue_path().exists()
+
+            mode["state"] = "canonical_space_id_identical"
+            recorded_requests.clear()
+            nmem_shared.reset_backend_unreachable()
+            nmem_shared.retry_unsynced_sessions()
+            assert [r[:2] for r in recorded_requests] == [("GET", "/threads/conv%2F1?space_id=work%20space")]
+            assert not nmem_shared.get_unsynced_queue_path().exists()
+
+            nmem_shared.save_unsynced_session(
+                "conv/1", [{"role": "user", "content": "hello"}], "hello", "work space", "host"
+            )
+            mode["state"] = "matching_space_identical"
+            recorded_requests.clear()
+            nmem_shared.retry_unsynced_sessions()
+            assert [r[:2] for r in recorded_requests] == [("GET", "/threads/conv%2F1?space_id=work%20space")]
+            assert not nmem_shared.get_unsynced_queue_path().exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_spaces_cache_binds_to_connection_across_memory_and_fresh_process(tmp_path):
+    import http.server
+    import threading
+
+    def _start_spaces_server(space_id: str):
+        hits = []
+
+        class SpacesHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+
+            def do_GET(self):
+                hits.append(self.headers.get("Authorization"))
+                body = json.dumps({"spaces": [{"id": space_id, "name": "project"}]}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), SpacesHandler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv, hits
+
+    srv_a, hits_a = _start_spaces_server("first-id")
+    srv_b, hits_b = _start_spaces_server("second-id")
+    url_a = f"http://127.0.0.1:{srv_a.server_port}"
+    url_b = f"http://127.0.0.1:{srv_b.server_port}"
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    proj_dir = tmp_path / "project"
+    proj_dir.mkdir()
+
+    try:
+        saved_cache = nmem_shared._SPACES_CACHE
+        nmem_shared._SPACES_CACHE = {"timestamp": 0.0, "spaces": None}
+        try:
+            # Seed an unscoped legacy list at the current cache path; it must be discarded.
+            cache_file = home_dir / ".nowledge-mem" / "plugins" / "antigravity" / "cache" / "spaces_cache.json"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(json.dumps([{"id": "stale-unscoped-id"}]), encoding="utf-8")
+
+            # 1. Warm in-memory switch: resolve A ("first-id"), then switch directly to B ("second-id").
+            with patch.dict(
+                os.environ,
+                {
+                    "HOME": str(home_dir),
+                    "USERPROFILE": str(home_dir),
+                    "NMEM_API_URL": url_a,
+                    "NMEM_API_KEY": "secret-key-a",
+                    "NMEM_IGNORE_HOST_CONFIG": "1",
+                },
+            ):
+                nmem_shared.reset_backend_unreachable()
+                spaces_a = nmem_shared.get_existing_spaces()
+                assert spaces_a == [{"id": "first-id", "name": "project"}]
+                assert len(hits_a) == 1
+
+            with patch.dict(
+                os.environ,
+                {
+                    "HOME": str(home_dir),
+                    "USERPROFILE": str(home_dir),
+                    "NMEM_API_URL": url_b,
+                    "NMEM_API_KEY": "secret-key-b",
+                    "NMEM_IGNORE_HOST_CONFIG": "1",
+                },
+            ):
+                nmem_shared.reset_backend_unreachable()
+                assert nmem_shared.get_existing_spaces() == [{"id": "second-id", "name": "project"}]
+                assert len(hits_b) == 1
+
+            # Simulate a memory-cache miss (as in a new process) and verify disk hit without new HTTP requests.
+            nmem_shared._SPACES_CACHE = {"timestamp": 0.0, "spaces": None}
+            with patch.dict(
+                os.environ,
+                {
+                    "HOME": str(home_dir),
+                    "USERPROFILE": str(home_dir),
+                    "NMEM_API_URL": url_b,
+                    "NMEM_API_KEY": "secret-key-b",
+                    "NMEM_IGNORE_HOST_CONFIG": "1",
+                },
+            ):
+                nmem_shared.reset_backend_unreachable()
+                spaces_b = nmem_shared.get_existing_spaces()
+                assert spaces_b == [{"id": "second-id", "name": "project"}]
+                assert len(hits_b) == 1
+
+            # 2. Disk cache must contain zero raw secrets and serve each connection in a fresh Python process.
+            raw_cache = cache_file.read_text(encoding="utf-8")
+            assert "secret-key-a" not in raw_cache
+            assert "secret-key-b" not in raw_cache
+            assert url_a not in raw_cache
+            assert url_b not in raw_cache
+
+            check_code = (
+                f"import sys; sys.path.insert(0, {str(HOOKS_DIR)!r}); import nmem_shared, json; "
+                "print(json.dumps(nmem_shared.get_existing_spaces()))"
+            )
+            for url, key, expected_id in ((url_a, "secret-key-a", "first-id"), (url_b, "secret-key-b", "second-id")):
+                proc = subprocess.run(
+                    [sys.executable, "-c", check_code],
+                    env={
+                        **os.environ,
+                        "HOME": str(home_dir),
+                        "USERPROFILE": str(home_dir),
+                        "NMEM_API_URL": url,
+                        "NMEM_API_KEY": key,
+                        "NMEM_IGNORE_HOST_CONFIG": "1",
+                    },
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                assert proc.returncode == 0
+                assert json.loads(proc.stdout.strip()) == [{"id": expected_id, "name": "project"}]
+            # Neither A nor B received a second HTTP /spaces request during the fresh-process cache hits.
+            assert len(hits_a) == 1
+            assert len(hits_b) == 1
+        finally:
+            nmem_shared._SPACES_CACHE = saved_cache
+    finally:
+        srv_a.shutdown()
+        srv_a.server_close()
+        srv_b.shutdown()
+        srv_b.server_close()
+
+
+@pytest.mark.parametrize("disable_httpx", [False, True], ids=["httpx", "urllib"])
+def test_spaces_cache_401_reload_and_cli_switch_bind_to_answering_connection(tmp_path, disable_httpx, monkeypatch):
+    import http.server
+    import threading
+
+    if disable_httpx:
+        monkeypatch.setitem(sys.modules, "httpx", None)
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    proj_dir = tmp_path / "project"
+    proj_dir.mkdir()
+    local_cfg_file = proj_dir / ".config.json"
+
+    hits_a = []
+    hits_b = []
+    rotate_on_401 = {"armed": True, "url_b": ""}
+
+    class HandlerA(http.server.BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            pass
+
+        def do_GET(self):
+            hits_a.append(self.headers.get("Authorization"))
+            if rotate_on_401["armed"]:
+                rotate_on_401["armed"] = False
+                local_cfg_file.write_text(
+                    json.dumps({"apiUrl": rotate_on_401["url_b"], "apiKey": "key-b"}),
+                    encoding="utf-8",
+                )
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"detail":"Unauthorized"}')
+                return
+            body = json.dumps({"spaces": [{"id": "first-id", "name": "project"}]}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+    class HandlerB(http.server.BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            pass
+
+        def do_GET(self):
+            hits_b.append(self.headers.get("Authorization"))
+            # Rotate config AGAIN (B -> C) while B's response is in flight so neither pre-call (A)
+            # nor post-call (C) get_effective_config() matches B; only connection_out knows B answered.
+            local_cfg_file.write_text(
+                json.dumps({"apiUrl": rotate_on_401["url_a"], "apiKey": "key-c"}),
+                encoding="utf-8",
+            )
+            body = json.dumps({"spaces": [{"id": "second-id", "name": "project"}]}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv_a = http.server.HTTPServer(("127.0.0.1", 0), HandlerA)
+    srv_b = http.server.HTTPServer(("127.0.0.1", 0), HandlerB)
+    threading.Thread(target=srv_a.serve_forever, daemon=True).start()
+    threading.Thread(target=srv_b.serve_forever, daemon=True).start()
+    url_a = f"http://127.0.0.1:{srv_a.server_port}"
+    url_b = f"http://127.0.0.1:{srv_b.server_port}"
+    rotate_on_401["url_a"] = url_a
+    rotate_on_401["url_b"] = url_b
+
+    monkeypatch.delenv("NMEM_API_URL", raising=False)
+    monkeypatch.delenv("NMEM_API_KEY", raising=False)
+    monkeypatch.delenv("NMEM_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("NMEM_CLI_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+    monkeypatch.setenv("NMEM_IGNORE_HOST_CONFIG", "1")
+
+    saved_cache = nmem_shared._SPACES_CACHE
+    saved_ws = nmem_shared._ACTIVE_WORKSPACE_ROOT
+    nmem_shared._SPACES_CACHE = {"timestamp": 0.0, "spaces": None}
+    try:
+        nmem_shared.activate_hook_workspace({"workspacePaths": [str(proj_dir)]})
+        nmem_shared.reset_backend_unreachable()
+        cache_file = home_dir / ".nowledge-mem" / "plugins" / "antigravity" / "cache" / "spaces_cache.json"
+
+        # Start configured for A; A returns 401 while rotating A -> B, and B rotates B -> C before replying 200.
+        local_cfg_file.write_text(json.dumps({"apiUrl": url_a, "apiKey": "key-a"}), encoding="utf-8")
+        scope_a = nmem_shared._spaces_cache_scope_id((url_a, "key-a"))
+        scope_b = nmem_shared._spaces_cache_scope_id((url_b, "key-b"))
+        scope_c = nmem_shared._spaces_cache_scope_id((url_a, "key-c"))
+
+        spaces = nmem_shared.get_existing_spaces()
+        assert spaces == [{"id": "second-id", "name": "project"}]
+        assert len(hits_a) == 1
+        assert len(hits_b) == 1
+
+        # Persisted and in-memory caches must record B's catalog under scope_b ONLY (never scope_a or scope_c).
+        persisted = json.loads(cache_file.read_text(encoding="utf-8"))
+        assert scope_b in persisted["entries"]
+        assert scope_a not in persisted["entries"]
+        assert scope_c not in persisted["entries"]
+        mem_entries = nmem_shared._SPACES_CACHE.get("entries")
+        assert isinstance(mem_entries, dict)
+        assert any(k.startswith(f"{scope_b}:") for k in mem_entries)
+        assert all(not k.startswith(f"{scope_a}:") and not k.startswith(f"{scope_c}:") for k in mem_entries)
+
+        # Connection B hits both memory and disk caches with zero new requests to B.
+        local_cfg_file.write_text(json.dumps({"apiUrl": url_b, "apiKey": "key-b"}), encoding="utf-8")
+        assert nmem_shared.get_existing_spaces() == [{"id": "second-id", "name": "project"}]
+        nmem_shared._SPACES_CACHE = {"timestamp": 0.0, "spaces": None}
+        assert nmem_shared.get_existing_spaces() == [{"id": "second-id", "name": "project"}]
+        assert len(hits_b) == 1
+
+        # Returning to Connection A (warm memory + populated disk cache) must NOT read B's catalog; it queries A.
+        local_cfg_file.write_text(json.dumps({"apiUrl": url_a, "apiKey": "key-a"}), encoding="utf-8")
+        assert nmem_shared.get_existing_spaces() == [{"id": "first-id", "name": "project"}]
+        assert len(hits_a) == 2
+
+        # CLI fallback: config rotates A -> B during HTTP failure, and B -> C during subprocess execution;
+        # CLI also isolates NMEM_CLI_CONFIG_DIR when target connection has no apiKey.
+        nmem_shared._SPACES_CACHE = {"timestamp": 0.0, "spaces": None}
+        cache_file.unlink(missing_ok=True)
+        host_cfg = home_dir / ".nowledge-mem" / "config.json"
+        host_cfg.write_text(
+            json.dumps({"apiUrl": "https://other.example.com", "apiKey": "foreign-key"}), encoding="utf-8"
+        )
+        monkeypatch.setenv("NMEM_IGNORE_HOST_CONFIG", "0")
+        local_cfg_file.write_text(json.dumps({"apiUrl": url_a, "apiKey": "cli-key-a"}), encoding="utf-8")
+        scope_cli_a = nmem_shared._spaces_cache_scope_id((url_a, "cli-key-a"))
+        scope_cli_b_nokey = nmem_shared._spaces_cache_scope_id((url_b, None))
+        scope_cli_c = nmem_shared._spaces_cache_scope_id((url_a, "cli-key-c"))
+
+        def _fail_http_and_rotate_to_keyless_b(*args, **kwargs):
+            local_cfg_file.write_text(json.dumps({"apiUrl": url_b}), encoding="utf-8")
+            return None
+
+        captured_envs = []
+
+        def _fake_cli_run(*args, **kwargs):
+            captured_envs.append(dict(kwargs.get("env") or {}))
+            local_cfg_file.write_text(json.dumps({"apiUrl": url_a, "apiKey": "cli-key-c"}), encoding="utf-8")
+            return subprocess.CompletedProcess(
+                args=["nmem", "--json", "spaces", "list"],
+                returncode=0,
+                stdout=json.dumps({"spaces": [{"id": "cli-second-id", "name": "project"}]}),
+                stderr="",
+            )
+
+        with (
+            patch.object(nmem_shared, "http_request", side_effect=_fail_http_and_rotate_to_keyless_b),
+            patch.object(nmem_shared, "_nmem_command", return_value="/usr/bin/nmem"),
+            patch("subprocess.run", side_effect=_fake_cli_run),
+        ):
+            nmem_shared.reset_backend_unreachable()
+            assert nmem_shared.get_existing_spaces() == [{"id": "cli-second-id", "name": "project"}]
+
+        assert len(captured_envs) == 1
+        assert captured_envs[0].get("NMEM_API_URL") == url_b
+        assert captured_envs[0].get("NMEM_API_KEY") == ""
+        assert captured_envs[0].get("NMEM_CLI_CONFIG_DIR") == os.devnull
+        assert captured_envs[0].get("NMEM_CONFIG_PATH") == os.devnull
+
+        persisted_cli = json.loads(cache_file.read_text(encoding="utf-8"))
+        assert scope_cli_b_nokey in persisted_cli["entries"]
+        assert scope_cli_a not in persisted_cli["entries"]
+        assert scope_cli_c not in persisted_cli["entries"]
+        cli_mem_entries = nmem_shared._SPACES_CACHE.get("entries")
+        assert isinstance(cli_mem_entries, dict)
+        assert any(k.startswith(f"{scope_cli_b_nokey}:") for k in cli_mem_entries)
+    finally:
+        nmem_shared._SPACES_CACHE = saved_cache
+        nmem_shared._ACTIVE_WORKSPACE_ROOT = saved_ws
+        nmem_shared.reset_backend_unreachable()
+        srv_a.shutdown()
+        srv_a.server_close()
+        srv_b.shutdown()
+        srv_b.server_close()
 
 
 def load_tests(loader, tests, pattern):

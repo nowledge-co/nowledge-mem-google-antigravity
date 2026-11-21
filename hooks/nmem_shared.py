@@ -313,19 +313,27 @@ def get_effective_config(cwd: str | Path | None = None) -> tuple[str, str | None
 
     # 3. Check plugin storage config file (~/.nowledge-mem/plugins/antigravity/config.json) if not ignored
     if not ignore_host and (not api_url or not api_key):
+        prior_url = api_url
         plugin_cfg = get_plugin_config()
         plugin_url = str(plugin_cfg.get("apiUrl") or plugin_cfg.get("api_url") or "").strip().rstrip("/")
         plugin_key = str(plugin_cfg.get("apiKey") or plugin_cfg.get("api_key") or "").strip() or None
         if not api_url and plugin_url:
             api_url = plugin_url
         if not api_key and plugin_key:
-            if not env_url or env_url.rstrip("/") == plugin_url:
+            if not prior_url or prior_url.rstrip("/") == plugin_url:
                 api_key = plugin_key
 
     # 4. Check global config file (~/.nowledge-mem/config.json)
     if not ignore_host and (not api_url or not api_key):
+        prior_url = api_url
         custom_cfg = os.environ.get("NMEM_CONFIG_PATH", "").strip()
-        config_file = Path(custom_cfg).expanduser() if custom_cfg else Path("~/.nowledge-mem/config.json").expanduser()
+        cli_cfg_dir = os.environ.get("NMEM_CLI_CONFIG_DIR", "").strip()
+        if custom_cfg:
+            config_file = Path(custom_cfg).expanduser()
+        elif cli_cfg_dir:
+            config_file = Path(cli_cfg_dir).expanduser() / "config.json"
+        else:
+            config_file = Path("~/.nowledge-mem/config.json").expanduser()
         if config_file.is_file():
             try:
                 data = json.loads(config_file.read_text(encoding="utf-8"))
@@ -335,10 +343,10 @@ def get_effective_config(cwd: str | Path | None = None) -> tuple[str, str | None
                 if not api_url and file_url:
                     api_url = file_url
 
-                # Only reuse host API key if explicit NMEM_API_KEY was NOT set
-                # AND either NMEM_API_URL was not set or matches host file_url
+                # Only reuse host API key if no higher-precedence API key was set
+                # AND any higher-precedence API URL matches host file_url
                 if not api_key and file_key:
-                    if not env_url or env_url.rstrip("/") == file_url:
+                    if not prior_url or prior_url.rstrip("/") == file_url:
                         api_key = file_key
             except Exception:
                 pass
@@ -371,17 +379,34 @@ def reset_backend_unreachable():
     _BACKEND_UNREACHABLE_UNTIL = 0.0
 
 
-_SPACES_CACHE = {"timestamp": 0.0, "spaces": None}
+_SPACES_CACHE: dict = {"timestamp": 0.0, "spaces": None}
+
+
+def _spaces_cache_scope_id(config: tuple[str, str | None] | None = None) -> str:
+    """Derive a non-reversible connection scope ID from effective URL and credential."""
+    api_url, api_key = config if config is not None else get_effective_config()
+    raw = f"{api_url.rstrip('/')}\0{api_key or ''}".encode()
+    return hashlib.sha256(raw).hexdigest()[:16]
 
 
 def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
-    """Fetch known spaces from the Nowledge Mem backend with in-memory & file caching."""
+    """Fetch known spaces from the Nowledge Mem backend with connection-scoped memory & disk caching."""
     global _SPACES_CACHE
     now = time.time()
-    if _SPACES_CACHE["spaces"] is not None and (now - _SPACES_CACHE["timestamp"]) < ttl:
-        return _SPACES_CACHE["spaces"]
-
     plugin_dir = get_plugin_storage_dir()
+    initial_config = get_effective_config()
+    read_scope_id = _spaces_cache_scope_id(initial_config)
+    read_mem_key = f"{read_scope_id}:{plugin_dir}"
+    mem_entries = _SPACES_CACHE.get("entries")
+    if isinstance(mem_entries, dict):
+        cached = mem_entries.get(read_mem_key)
+        if (
+            isinstance(cached, dict)
+            and isinstance(cached.get("spaces"), list)
+            and (now - cached.get("timestamp", 0.0)) < ttl
+        ):
+            return cached["spaces"]
+
     cache_dir = plugin_dir / "cache"
 
     # Clean up legacy root-level or top-level spaces_cache.json if present
@@ -395,24 +420,37 @@ def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
             except Exception:
                 pass
 
-    # 1. Try file cache (~/.nowledge-mem/plugins/antigravity/cache/spaces_cache.json) if valid
+    # 1. Try connection-scoped entry in ~/.nowledge-mem/plugins/antigravity/cache/spaces_cache.json
     cache_file = cache_dir / "spaces_cache.json"
     if cache_file.is_file():
         try:
-            mtime = cache_file.stat().st_mtime
-            if (now - mtime) < ttl:
-                data = json.loads(cache_file.read_text(encoding="utf-8"))
-                if isinstance(data, list):
-                    _SPACES_CACHE["spaces"] = data
-                    _SPACES_CACHE["timestamp"] = now
-                    return data
+            raw_data = json.loads(cache_file.read_text(encoding="utf-8"))
+            if isinstance(raw_data, dict) and isinstance(raw_data.get("entries"), dict):
+                scoped_entry = raw_data["entries"].get(read_scope_id)
+                if (
+                    isinstance(scoped_entry, dict)
+                    and isinstance(scoped_entry.get("spaces"), list)
+                    and (now - float(scoped_entry.get("timestamp", 0.0))) < ttl
+                ):
+                    if not isinstance(_SPACES_CACHE.get("entries"), dict):
+                        _SPACES_CACHE["entries"] = {}
+                    _SPACES_CACHE["entries"][read_mem_key] = {
+                        "timestamp": float(scoped_entry["timestamp"]),
+                        "spaces": scoped_entry["spaces"],
+                    }
+                    return scoped_entry["spaces"]
+            else:
+                # Unscoped legacy list/object whose connection origin cannot be verified: discard it.
+                cache_file.unlink(missing_ok=True)
         except Exception:
             pass
 
     spaces_data = None
+    actual_config: tuple[str, str | None] = initial_config
 
     # 2. Try HTTP GET /spaces
-    res = http_request("/spaces", method="GET", timeout=1.5)
+    http_conn: list[tuple[str, str | None]] = []
+    res = http_request("/spaces", method="GET", timeout=1.5, connection_out=http_conn)
     if isinstance(res, dict):
         if "spaces" in res and isinstance(res["spaces"], list):
             spaces_data = res["spaces"]
@@ -420,26 +458,67 @@ def get_existing_spaces(ttl: float = 60.0) -> list[dict] | None:
             spaces_data = res["items"]
     elif isinstance(res, list):
         spaces_data = res
+    if spaces_data is not None:
+        actual_config = http_conn[0] if http_conn else initial_config
 
     # 3. Fallback to CLI nmem --json spaces list if backend is not marked unreachable
     if spaces_data is None and not is_backend_unreachable():
         try:
-            cmd_res = run_nmem_command(["--json", "spaces", "list"], timeout=2.5)
+            cli_before_config = get_effective_config()
+            cli_env: dict[str, str] = {"NMEM_API_URL": cli_before_config[0]}
+            if cli_before_config[1] is not None:
+                cli_env["NMEM_API_KEY"] = cli_before_config[1]
+            else:
+                cli_env["NMEM_API_KEY"] = ""
+                cli_env["NMEM_CLI_CONFIG_DIR"] = os.devnull
+                cli_env["NMEM_CONFIG_PATH"] = os.devnull
+            cli_conn: list[tuple[str, str | None]] = []
+            cmd_res = run_nmem_command(
+                ["--json", "spaces", "list"],
+                env=cli_env,
+                timeout=2.5,
+                connection_out=cli_conn,
+            )
             if cmd_res.returncode == 0 and cmd_res.stdout:
                 parsed = json.loads(cmd_res.stdout)
                 if isinstance(parsed, dict) and "spaces" in parsed and isinstance(parsed["spaces"], list):
                     spaces_data = parsed["spaces"]
                 elif isinstance(parsed, list):
                     spaces_data = parsed
+                if spaces_data is not None:
+                    actual_config = cli_conn[0] if cli_conn else cli_before_config
         except Exception:
             pass
 
     if spaces_data is not None:
-        _SPACES_CACHE["spaces"] = spaces_data
-        _SPACES_CACHE["timestamp"] = now
+        write_now = time.time()
+        write_plugin_dir = get_plugin_storage_dir()
+        write_cache_dir = write_plugin_dir / "cache"
+        write_cache_file = write_cache_dir / "spaces_cache.json"
+        write_scope_id = _spaces_cache_scope_id(actual_config)
+        write_mem_key = f"{write_scope_id}:{write_plugin_dir}"
+        if not isinstance(_SPACES_CACHE.get("entries"), dict):
+            _SPACES_CACHE["entries"] = {}
+        _SPACES_CACHE["entries"][write_mem_key] = {"timestamp": write_now, "spaces": spaces_data}
         try:
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(json.dumps(spaces_data), encoding="utf-8")
+            write_cache_dir.mkdir(parents=True, exist_ok=True)
+            latest_disk_entries: dict = {}
+            if write_cache_file.is_file():
+                try:
+                    latest_raw = json.loads(write_cache_file.read_text(encoding="utf-8"))
+                    if isinstance(latest_raw, dict) and isinstance(latest_raw.get("entries"), dict):
+                        latest_disk_entries = latest_raw["entries"]
+                except Exception:
+                    pass
+            merged_entries = {
+                k: v
+                for k, v in latest_disk_entries.items()
+                if isinstance(v, dict)
+                and isinstance(v.get("spaces"), list)
+                and (write_now - float(v.get("timestamp", 0.0))) < max(ttl, 300.0)
+            }
+            merged_entries[write_scope_id] = {"timestamp": write_now, "spaces": spaces_data}
+            write_cache_file.write_text(json.dumps({"entries": merged_entries}), encoding="utf-8")
         except Exception:
             pass
         return spaces_data
@@ -653,12 +732,36 @@ def sync_host_skills_async() -> None:
     t.start()
 
 
+def _format_http_error_response(status_code: int, raw_body: bytes) -> dict:
+    parsed = None
+    if raw_body:
+        try:
+            candidate = json.loads(raw_body.decode("utf-8"))
+            if isinstance(candidate, dict):
+                parsed = candidate
+        except Exception:
+            pass
+    result: dict = {"status": status_code, "error": f"http_{status_code}", "_http_error": True}
+    if parsed is not None:
+        for k, v in parsed.items():
+            if k not in ("status", "error", "_http_error", "_is_json"):
+                result[k] = v
+        if isinstance(parsed.get("error"), str) and parsed["error"].strip():
+            result["error"] = parsed["error"].strip()
+        result["_is_json"] = True
+    else:
+        result["_is_json"] = False
+    return result
+
+
 def http_request(
     endpoint: str,
     method: str = "GET",
     payload: dict | None = None,
     timeout: float = 1.5,
     skip_circuit_breaker: bool = False,
+    include_error_response: bool = False,
+    connection_out: list[tuple[str, str | None]] | None = None,
 ) -> dict | None:
     """Make a direct HTTP request to the Nowledge Mem backend using httpx prior to CLI fallback."""
     import urllib.error
@@ -668,6 +771,9 @@ def http_request(
         import httpx
     except ImportError:
         httpx = None
+
+    if connection_out is not None:
+        connection_out.clear()
 
     if not skip_circuit_breaker and is_backend_unreachable():
         return None
@@ -685,19 +791,40 @@ def http_request(
         try:
             resp = httpx.request(method, url, json=payload, headers=headers, timeout=timeout)
             if resp.status_code in (200, 201):
+                parsed_body = resp.json() if resp.text else {}
+                if connection_out is not None:
+                    connection_out[:] = [(api_url, api_key)]
                 reset_backend_unreachable()
-                return resp.json() if resp.text else {}
-            elif resp.status_code in (401, 403):
+                return parsed_body
+            if resp.status_code in (401, 403):
                 api_url, api_key = get_effective_config()
                 url = f"{api_url}{endpoint}"
+                headers = {"Content-Type": "application/json", "APP": "Google Antigravity"}
                 if api_key:
                     headers["Authorization"] = f"Bearer {api_key}"
                     headers["X-NMEM-API-Key"] = api_key
                     headers["X-MEM-API-Key"] = api_key
-                resp_retry = httpx.request(method, url, json=payload, headers=headers, timeout=timeout)
-                if resp_retry.status_code in (200, 201):
+                resp = httpx.request(method, url, json=payload, headers=headers, timeout=timeout)
+                if resp.status_code in (200, 201):
+                    parsed_body = resp.json() if resp.text else {}
+                    if connection_out is not None:
+                        connection_out[:] = [(api_url, api_key)]
                     reset_backend_unreachable()
-                    return resp_retry.json() if resp_retry.text else {}
+                    return parsed_body
+            if resp.status_code >= 500:
+                mark_backend_unreachable()
+            else:
+                reset_backend_unreachable()
+            if include_error_response:
+                if connection_out is not None:
+                    connection_out[:] = [(api_url, api_key)]
+                raw_bytes = (
+                    resp.content
+                    if isinstance(getattr(resp, "content", None), bytes)
+                    else (resp.text or "").encode("utf-8")
+                )
+                return _format_http_error_response(resp.status_code, raw_bytes)
+            return None
         except Exception:
             pass
 
@@ -707,11 +834,21 @@ def http_request(
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status in (200, 201):
-                reset_backend_unreachable()
                 body = resp.read().decode("utf-8")
-                return json.loads(body) if body else {}
+                parsed_body = json.loads(body) if body else {}
+                if connection_out is not None:
+                    connection_out[:] = [(api_url, api_key)]
+                reset_backend_unreachable()
+                return parsed_body
     except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
+        err_status = e.code
+        err_bytes = b""
+        try:
+            err_bytes = e.read()
+        except Exception:
+            pass
+        e.close()
+        if err_status in (401, 403):
             if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                 sys.stderr.write("Authorization failure (401/403). Retrying with reloaded config...\n")
             api_url, api_key = get_effective_config()
@@ -725,20 +862,35 @@ def http_request(
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     if resp.status in (200, 201):
-                        reset_backend_unreachable()
                         body = resp.read().decode("utf-8")
-                        e.close()
-                        return json.loads(body) if body else {}
+                        parsed_body = json.loads(body) if body else {}
+                        if connection_out is not None:
+                            connection_out[:] = [(api_url, api_key)]
+                        reset_backend_unreachable()
+                        return parsed_body
+            except urllib.error.HTTPError as retry_http_err:
+                err_status = retry_http_err.code
+                try:
+                    err_bytes = retry_http_err.read()
+                except Exception:
+                    err_bytes = b""
+                retry_http_err.close()
             except Exception as retry_err:
                 mark_backend_unreachable()
                 if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                     sys.stderr.write(f"Retry HTTP request to {url} failed: {retry_err}\n")
+                return None
+        if err_status >= 500:
+            mark_backend_unreachable()
         else:
-            if e.code >= 500:
-                mark_backend_unreachable()
-            if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
-                sys.stderr.write(f"HTTP request to {url} failed: {e}\n")
-        e.close()
+            reset_backend_unreachable()
+        if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+            sys.stderr.write(f"HTTP request to {url} failed with status {err_status}\n")
+        if include_error_response:
+            if connection_out is not None:
+                connection_out[:] = [(api_url, api_key)]
+            return _format_http_error_response(err_status, err_bytes)
+        return None
     except Exception as e:
         mark_backend_unreachable()
         if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
@@ -823,8 +975,12 @@ def run_nmem_command(
     cwd: str | None = None,
     timeout: float | None = 5.0,
     input_str: str | None = None,
+    connection_out: list[tuple[str, str | None]] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run an nmem command, finding the binary, translating path arguments if needed, and executing safely."""
+    if connection_out is not None:
+        connection_out.clear()
+
     nmem = _nmem_command()
     if not nmem:
         raise FileNotFoundError("nowledge-mem: nmem command not found in PATH")
@@ -841,23 +997,32 @@ def run_nmem_command(
     cmd = _build_nmem_command(nmem, *processed_args)
 
     run_env = os.environ.copy()
+    effective_url = ""
+    effective_key: str | None = None
     try:
-        api_url, api_key = get_effective_config()
-        if api_url and "NMEM_API_URL" not in run_env:
-            run_env["NMEM_API_URL"] = api_url
-        if api_key and "NMEM_API_KEY" not in run_env:
-            run_env["NMEM_API_KEY"] = api_key
+        effective_url, effective_key = get_effective_config(cwd)
+        if effective_url and not str(run_env.get("NMEM_API_URL") or "").strip():
+            run_env["NMEM_API_URL"] = effective_url
+        if effective_key and not str(run_env.get("NMEM_API_KEY") or "").strip():
+            run_env["NMEM_API_KEY"] = effective_key
     except Exception:
         pass
     if env:
         run_env.update(env)
 
+    raw_url = str(run_env.get("NMEM_API_URL") or "").strip()
+    final_url = (raw_url or effective_url or "http://127.0.0.1:14242").rstrip("/")
+    run_env["NMEM_API_URL"] = final_url
+    final_key = str(run_env.get("NMEM_API_KEY") or "").strip() or None
+
     # Safeguard spawned nmem CLI subprocess from accidentally picking up host ~/.nowledge-mem/config.json
     if run_env.get("NMEM_IGNORE_HOST_CONFIG", "").strip().lower() in ("1", "true", "yes"):
-        if "NMEM_CONFIG_PATH" not in run_env:
+        if not str(run_env.get("NMEM_CONFIG_PATH") or "").strip():
             run_env["NMEM_CONFIG_PATH"] = os.devnull
+        if not str(run_env.get("NMEM_CLI_CONFIG_DIR") or "").strip():
+            run_env["NMEM_CLI_CONFIG_DIR"] = os.devnull
 
-    return subprocess.run(
+    proc = subprocess.run(
         cmd,
         input=input_str,
         stdout=subprocess.PIPE,
@@ -868,6 +1033,9 @@ def run_nmem_command(
         timeout=timeout,
         **_windows_no_window_kwargs(),
     )
+    if connection_out is not None:
+        connection_out[:] = [(final_url, final_key)]
+    return proc
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -1086,7 +1254,254 @@ def is_cli_thread_not_found(result) -> bool:
     if result is None or getattr(result, "returncode", 0) == 0:
         return False
     combined = f"{getattr(result, 'stderr', '') or ''}\n{getattr(result, 'stdout', '') or ''}".lower()
-    return any(marker in combined for marker in ("not found", "not_found", "thread_not_found", "404", "does not exist"))
+    if "thread_not_found" in combined:
+        return True
+    return "thread" in combined and any(marker in combined for marker in ("not found", "not_found", "does not exist"))
+
+
+def build_http_thread_lookup_endpoint(thread_id: str, space: str | None = None) -> str:
+    """Build URL-encoded `GET /threads/{thread_id}` endpoint with optional `space_id` guard."""
+    import urllib.parse
+
+    encoded_id = urllib.parse.quote(thread_id, safe="")
+    if space:
+        return f"/threads/{encoded_id}?space_id={urllib.parse.quote(space, safe='')}"
+    return f"/threads/{encoded_id}"
+
+
+def build_http_thread_create_payload(
+    thread_id: str, title: str, messages: list[dict], space: str | None = None
+) -> dict:
+    """Build `POST /threads` (`ThreadCreateRequest`) payload using `thread_id` and optional `space_id`."""
+    payload: dict = {
+        "thread_id": thread_id,
+        "title": title,
+        "source": "google-antigravity",
+        "messages": messages,
+    }
+    if space:
+        payload["space_id"] = space
+    return payload
+
+
+def _is_http_ok(res: dict | None) -> bool:
+    return isinstance(res, dict) and not res.get("_http_error") and not res.get("error")
+
+
+def is_http_thread_not_found(res: dict | None) -> bool:
+    """Return True only for an explicit thread-not-found error code or thread-specific 404 detail."""
+    if not isinstance(res, dict):
+        return False
+    status = res.get("status")
+    if status not in (None, 404):
+        return False
+    if res.get("error") == "thread_not_found" or res.get("error_code") == "thread_not_found":
+        return True
+    if status != 404 or res.get("_is_json") is False:
+        return False
+    detail = res.get("detail")
+    return isinstance(detail, str) and "thread" in detail.lower() and "not found" in detail.lower()
+
+
+def extract_thread_space_id(payload: dict) -> str | None:
+    """Extract the thread's `space_id` from a `GET /threads/{id}` response."""
+    nested = payload.get("thread")
+    candidates = (
+        payload.get("space_id"),
+        nested.get("space_id") if isinstance(nested, dict) else None,
+        payload.get("space"),
+        nested.get("space") if isinstance(nested, dict) else None,
+    )
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return None
+
+
+def spaces_match(expected_space: str, actual_space_id: str | None) -> bool:
+    """Check whether `actual_space_id` matches `expected_space` (by exact ID, `default` casing, or Space name/alias)."""
+    if not isinstance(actual_space_id, str) or not actual_space_id:
+        return False
+    if actual_space_id == expected_space:
+        return True
+    norm_expected = expected_space.strip().lower()
+    if norm_expected == "default" and actual_space_id == "default":
+        return True
+    for ttl in (60.0, 0.0):
+        entries = get_existing_spaces(ttl=ttl) or []
+        found_id = False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = entry.get("id") or entry.get("key")
+            if entry_id != actual_space_id:
+                continue
+            found_id = True
+            names = [entry.get("id"), entry.get("key"), entry.get("name")]
+            aliases = entry.get("aliases")
+            if isinstance(aliases, list):
+                names.extend(aliases)
+            if any(isinstance(n, str) and n.strip().lower() == norm_expected for n in names):
+                return True
+        if found_id:
+            break
+    return False
+
+
+def sync_thread_capture(
+    conv_id: str,
+    title: str,
+    messages: list[dict],
+    space: str | None = None,
+    host_agent_id: str | None = None,
+) -> tuple[bool, bool]:
+    """Synchronize a single thread via HTTP (with CLI fallback).
+
+    Returns `(synced, stop_retrying_in_current_pass)`.
+    """
+    import urllib.parse
+
+    if is_backend_unreachable():
+        return False, True
+
+    matched_count = 0
+    http_handled = False
+    encoded_id = urllib.parse.quote(conv_id, safe="")
+
+    try:
+        lookup_endpoint = build_http_thread_lookup_endpoint(conv_id, space)
+        check_res = http_request(lookup_endpoint, method="GET", timeout=1.5, include_error_response=True)
+        if _is_http_ok(check_res) and (
+            check_res.get("id") or check_res.get("thread_id") or "messages" in check_res or "thread" in check_res
+        ):
+            http_handled = True
+            res_space = extract_thread_space_id(check_res)
+            if space and res_space is not None and not spaces_match(space, res_space):
+                return False, True
+
+            existing_msgs = check_res.get("messages")
+            if existing_msgs is None and isinstance(check_res.get("thread"), dict):
+                existing_msgs = check_res["thread"].get("messages")
+            existing_msgs = existing_msgs or []
+            if isinstance(existing_msgs, list):
+                for old_m, new_m in zip(existing_msgs, messages):
+                    old_role = old_m.get("role") or old_m.get("sender")
+                    new_role = new_m.get("role") or new_m.get("sender")
+                    old_text = old_m.get("content") or old_m.get("text")
+                    new_text = new_m.get("content") or new_m.get("text")
+                    if old_role == new_role and old_text == new_text:
+                        matched_count += 1
+                    else:
+                        break
+
+            if matched_count == len(messages):
+                if not space or spaces_match(space, res_space):
+                    return True, True
+                return False, True
+
+            if matched_count > 0:
+                rec_payload = {"matched_count": matched_count, "messages": messages[matched_count:]}
+                if space:
+                    rec_payload["space_id"] = space
+                rec_res = http_request(
+                    f"/threads/{encoded_id}/reconcile-tail",
+                    method="POST",
+                    payload=rec_payload,
+                    timeout=2.5,
+                    include_error_response=True,
+                )
+                if _is_http_ok(rec_res):
+                    return True, True
+
+            app_payload = {"messages": messages[matched_count:] if matched_count > 0 else messages}
+            if space:
+                app_payload["space_id"] = space
+            app_res = http_request(
+                f"/threads/{encoded_id}/append",
+                method="POST",
+                payload=app_payload,
+                timeout=2.5,
+                include_error_response=True,
+            )
+            if _is_http_ok(app_res):
+                return True, True
+            return False, True
+        elif is_http_thread_not_found(check_res):
+            http_handled = True
+            create_payload = build_http_thread_create_payload(conv_id, title, messages, space)
+            create_res = http_request(
+                "/threads",
+                method="POST",
+                payload=create_payload,
+                timeout=2.5,
+                include_error_response=True,
+            )
+            if _is_http_ok(create_res):
+                return True, True
+            return False, True
+        elif isinstance(check_res, dict):
+            return False, True
+    except Exception:
+        pass
+
+    if is_backend_unreachable() or http_handled:
+        return False, True
+
+    # CLI Fallback (only when HTTP transport yielded None / could not complete)
+    check_args = ["t", "show", conv_id]
+    if space:
+        check_args.extend(["--space", space])
+
+    thread_exists = False
+    thread_not_found = False
+    try:
+        result = run_nmem_command(check_args, timeout=2.0)
+        if result.returncode == 0:
+            thread_exists = True
+        elif is_cli_thread_not_found(result):
+            thread_not_found = True
+    except Exception as e:
+        if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+            sys.stderr.write(f"nmem t show execution failed: {e}\n")
+
+    env = {"NMEM_HOST_AGENT_ID": host_agent_id} if host_agent_id else None
+
+    if thread_exists:
+        cli_append_msgs = messages[matched_count:] if matched_count > 0 else messages
+        if cli_append_msgs:
+            if space:
+                return False, True
+            append_args = build_cli_thread_append_args(conv_id, cli_append_msgs)
+            try:
+                result = (
+                    run_nmem_command(append_args, env=env, timeout=3.0)
+                    if env
+                    else run_nmem_command(append_args, timeout=3.0)
+                )
+                if result.returncode == 0:
+                    return True, True
+            except Exception as e:
+                if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+                    sys.stderr.write(f"nmem t append execution failed: {e}\n")
+        else:
+            if not space:
+                return True, True
+            return False, True
+    elif thread_not_found:
+        create_args = build_cli_thread_create_args(conv_id, title, messages, space)
+        try:
+            result = (
+                run_nmem_command(create_args, env=env, timeout=3.0)
+                if env
+                else run_nmem_command(create_args, timeout=3.0)
+            )
+            if result.returncode == 0:
+                return True, True
+        except Exception as e:
+            if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+                sys.stderr.write(f"nmem t create execution failed: {e}\n")
+
+    return False, False
 
 
 def retry_unsynced_sessions() -> None:
@@ -1130,128 +1545,7 @@ def retry_unsynced_sessions() -> None:
                 space = data.get("space")
                 host_agent_id = data.get("host_agent_id")
 
-                matched_count = 0
-                success = False
-                http_handled = False
-                # Try HTTP transport first
-                try:
-                    space_param = f"?space={space}" if space else ""
-                    check_res = http_request(f"/threads/{conv_id}{space_param}", method="GET", timeout=1.5)
-                    if isinstance(check_res, dict) and (
-                        check_res.get("id") or check_res.get("thread_id") or "messages" in check_res
-                    ):
-                        http_handled = True
-                        existing_msgs = check_res.get("messages") or []
-                        if isinstance(existing_msgs, list):
-                            for old_m, new_m in zip(existing_msgs, messages):
-                                old_role = old_m.get("role") or old_m.get("sender")
-                                new_role = new_m.get("role") or new_m.get("sender")
-                                old_text = old_m.get("content") or old_m.get("text")
-                                new_text = new_m.get("content") or new_m.get("text")
-                                if old_role == new_role and old_text == new_text:
-                                    matched_count += 1
-                                else:
-                                    break
-                        if matched_count == len(messages):
-                            success = True
-                        elif matched_count > 0:
-                            rec_payload = {"matched_count": matched_count, "messages": messages[matched_count:]}
-                            if space:
-                                rec_payload["space_id"] = space
-                            rec_res = http_request(
-                                f"/threads/{conv_id}/reconcile-tail", method="POST", payload=rec_payload, timeout=2.5
-                            )
-                            if isinstance(rec_res, dict) and not rec_res.get("error"):
-                                success = True
-                            else:
-                                # Fallback to append if reconcile-tail fails (e.g. prefix divergence)
-                                app_payload = {"messages": messages[matched_count:]}
-                                if space:
-                                    app_payload["space_id"] = space
-                                app_res = http_request(
-                                    f"/threads/{conv_id}/append", method="POST", payload=app_payload, timeout=2.5
-                                )
-                                if isinstance(app_res, dict) and not app_res.get("error"):
-                                    success = True
-                        else:
-                            app_payload = {"messages": messages}
-                            if space:
-                                app_payload["space_id"] = space
-                            app_res = http_request(
-                                f"/threads/{conv_id}/append", method="POST", payload=app_payload, timeout=2.5
-                            )
-                            if isinstance(app_res, dict) and not app_res.get("error"):
-                                success = True
-                    elif isinstance(check_res, dict) and (
-                        check_res.get("error") in ("not_found", "thread_not_found") or check_res.get("status") == 404
-                    ):
-                        http_handled = True
-                        # Explicit 404 / thread not found -> create-only (rejects identity collisions across Spaces)
-                        create_payload = {
-                            "id": conv_id,
-                            "title": title,
-                            "source": "google-antigravity",
-                            "messages": messages,
-                        }
-                        if space:
-                            create_payload["space_id"] = space
-                        create_res = http_request("/threads", method="POST", payload=create_payload, timeout=2.5)
-                        if isinstance(create_res, dict) and not create_res.get("error"):
-                            success = True
-                    elif isinstance(check_res, dict):
-                        # Indeterminate/scope error from backend: retain in queue rather than falling through.
-                        http_handled = True
-                except Exception:
-                    pass
-
-                if is_backend_unreachable():
-                    break
-
-                if not success and not http_handled:
-                    # CLI Fallback
-                    check_args = ["t", "show", conv_id]
-                    if space:
-                        check_args.extend(["--space", space])
-
-                    thread_exists = False
-                    thread_not_found = False
-                    try:
-                        result = run_nmem_command(check_args, timeout=2.0)
-                        if result.returncode == 0:
-                            thread_exists = True
-                        elif is_cli_thread_not_found(result):
-                            thread_not_found = True
-                    except Exception:
-                        pass
-
-                    if thread_exists:
-                        # Append trailing unmatched messages to existing thread
-                        cli_append_msgs = messages[matched_count:] if matched_count > 0 else messages
-                        if cli_append_msgs:
-                            if not space:
-                                append_args = build_cli_thread_append_args(conv_id, cli_append_msgs)
-                                try:
-                                    result = run_nmem_command(append_args, timeout=3.0)
-                                    if result.returncode == 0:
-                                        success = True
-                                except Exception:
-                                    pass
-                        else:
-                            success = True
-                    elif thread_not_found:
-                        # Create new thread only when lookup explicitly confirmed not-found (rejects collisions)
-                        create_args = build_cli_thread_create_args(conv_id, title, messages, space)
-
-                        env = {}
-                        if host_agent_id:
-                            env["NMEM_HOST_AGENT_ID"] = host_agent_id
-                        try:
-                            result = run_nmem_command(create_args, env=env, timeout=3.0)
-                            if result.returncode == 0:
-                                success = True
-                        except Exception:
-                            pass
-
+                success, _ = sync_thread_capture(conv_id, title, messages, space, host_agent_id)
                 if success:
                     del updated_queue[conv_id]
 
