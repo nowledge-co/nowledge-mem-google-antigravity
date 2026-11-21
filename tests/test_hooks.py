@@ -120,8 +120,9 @@ def test_host_agent_fingerprint(mock_gethostname, mock_getnode):
     assert fp.startswith("antigravity-")
 
 
+@patch("nmem_shared._mcp_space_id", return_value="personal")
 @patch("nmem_shared.get_effective_config")
-def test_sync_mcp_config_file(mock_get_effective_config):
+def test_sync_mcp_config_file(mock_get_effective_config, mock_resolve_space):
     mock_get_effective_config.return_value = ("https://mem.example.com", "nmem_sec_123")
     with tempfile.NamedTemporaryFile("w+", delete=False) as tf:
         tf.write('{"mcpServers":{"nowledge-mem":{"serverUrl":"http://127.0.0.1:14242/mcp/"}}}')
@@ -134,6 +135,11 @@ def test_sync_mcp_config_file(mock_get_effective_config):
         assert data["mcpServers"]["nowledge-mem"]["headers"]["Authorization"] == "Bearer nmem_sec_123"
         assert data["mcpServers"]["nowledge-mem"]["headers"]["X-NMEM-API-Key"] == "nmem_sec_123"
         assert "X-MEM-API-Key" not in data["mcpServers"]["nowledge-mem"]["headers"]
+
+        headers = data["mcpServers"]["nowledge-mem"]["headers"]
+        assert headers["X-Nmem-Space-Id"] == "personal"
+        assert "x-nmem-space-protocol" not in headers
+        mock_resolve_space.assert_called_once_with(None, ("https://mem.example.com", "nmem_sec_123"))
 
         # Second call should return False (already up to date)
         updated_again = nmem_shared.sync_mcp_config_file(tf_path)
@@ -2071,3 +2077,161 @@ def load_tests(loader, tests, pattern):
         if name.startswith("test_") and inspect.isfunction(obj):
             suite.addTest(unittest.FunctionTestCase(obj))
     return suite
+
+
+def test_sync_mcp_space_change_and_validation(tmp_path, monkeypatch):
+    config = tmp_path / "mcp.json"
+    monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd: ("https://mem.example.com", None))
+    monkeypatch.setattr(nmem_shared, "http_request", lambda *args, **kwargs: [{"id": "personal"}, {"id": "work"}])
+    monkeypatch.setenv("NMEM_SPACE", "personal")
+    assert nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
+    monkeypatch.setenv("NMEM_SPACE", "work")
+    assert nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
+    data = json.loads(config.read_text())
+    assert data["mcpServers"]["nowledge-mem"]["headers"]["X-Nmem-Space-Id"] == "work"
+    assert "Authorization" not in data["mcpServers"]["nowledge-mem"]["headers"]
+    monkeypatch.delenv("NMEM_SPACE")
+    monkeypatch.delenv("NMEM_SPACE_ID", raising=False)
+    monkeypatch.setattr(nmem_shared, "get_existing_spaces", lambda: [{"id": "personal"}])
+    (tmp_path / ".nmemspace").write_text("personal")
+    assert nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
+    data = json.loads(config.read_text())
+    assert data["mcpServers"]["nowledge-mem"]["headers"]["X-Nmem-Space-Id"] == "personal"
+    (tmp_path / ".nmemspace").write_text("nonexistent-space")
+    with pytest.raises(nmem_shared.SpaceResolutionError):
+        nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
+    assert json.loads(config.read_text()) == {"mcpServers": {}}
+
+
+def test_mcp_space_header_uses_canonical_id_and_preserves_unbound_policy(tmp_path, monkeypatch):
+    config = tmp_path / "mcp.json"
+    workspace = tmp_path / "unbound-project"
+    workspace.mkdir()
+    monkeypatch.delenv("NMEM_SPACE", raising=False)
+    monkeypatch.delenv("NMEM_SPACE_ID", raising=False)
+    monkeypatch.setattr(nmem_shared, "get_plugin_config", lambda: {})
+    monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd: ("https://mem.example.com", None))
+    monkeypatch.setattr(
+        nmem_shared,
+        "http_request",
+        lambda *args, **kwargs: [
+            {"id": "space-42", "name": "Research", "aliases": ["work"]},
+            {"id": "default"},
+        ],
+    )
+
+    def headers():
+        nmem_shared.sync_mcp_config_file(str(config), cwd=workspace)
+        return json.loads(config.read_text())["mcpServers"]["nowledge-mem"]["headers"]
+
+    assert "X-Nmem-Space-Id" not in headers()
+    monkeypatch.setattr(nmem_shared, "get_existing_spaces", lambda: [])
+    assert nmem_shared.resolve_space(workspace) == "default"
+
+    binding = workspace / ".nmemspace"
+    binding.write_text("work")
+    assert headers()["X-Nmem-Space-Id"] == "space-42"
+    binding.write_text("default")
+    assert headers()["X-Nmem-Space-Id"] == "default"
+    binding.unlink()
+    assert "X-Nmem-Space-Id" not in headers()
+
+
+def test_mcp_catalog_failure_disables_previous_inferred_header(tmp_path, monkeypatch):
+    config = tmp_path / "mcp.json"
+    workspace = tmp_path / "research"
+    workspace.mkdir()
+    monkeypatch.delenv("NMEM_SPACE", raising=False)
+    monkeypatch.delenv("NMEM_SPACE_ID", raising=False)
+    monkeypatch.setattr(nmem_shared, "get_plugin_config", lambda: {})
+    monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd: ("https://mem.example.com", "fixture-key"))
+
+    def catalog(endpoint, *, client_config):
+        assert endpoint == "/spaces"
+        assert client_config == ("https://mem.example.com", "fixture-key")
+        return {"spaces": [{"id": "space-42", "name": "Research"}]}
+
+    monkeypatch.setattr(nmem_shared, "http_request", catalog)
+    assert nmem_shared.sync_mcp_config_file(str(config), cwd=workspace)
+    before = config.read_bytes()
+    assert json.loads(before)["mcpServers"]["nowledge-mem"]["headers"]["X-Nmem-Space-Id"] == "space-42"
+
+    monkeypatch.setattr(nmem_shared, "http_request", lambda *args, **kwargs: None)
+    with pytest.raises(nmem_shared.SpaceResolutionError):
+        nmem_shared.sync_mcp_config_file(str(config), cwd=workspace)
+    assert json.loads(config.read_text()) == {"mcpServers": {}}
+
+
+@pytest.mark.parametrize("initial", [False, True])
+def test_hook_mcp_sync_refusal_keeps_startup_context_and_skips_tool_rounds(initial):
+    hook_input = {"conversationId": "fixture", "invocationNum": 0 if initial else 2, "initialNumSteps": 5}
+    context = {"tag": "nowledge_working_memory", "label": "legacy Working Memory file", "content": "local context"}
+    with (
+        patch("nmem_shared.read_hook_input", return_value=hook_input),
+        patch("nmem_shared.activate_hook_workspace", return_value=None),
+        patch("nmem_shared.sync_host_skills_async"),
+        patch(
+            "nmem_shared.sync_mcp_config_file", side_effect=nmem_shared.SpaceResolutionError("catalog unavailable")
+        ) as sync,
+        patch("nmem_shared.resolve_space", return_value="default"),
+        patch("nmem_shared.sync_learnings_if_any"),
+        patch("session_start.read_startup_context", return_value=context) as read_context,
+        patch("subprocess.Popen") as retry,
+        patch("nmem_shared.emit") as emit,
+        patch.object(sys, "argv", ["session-start.py"] if initial else ["session-start.py", "--pre-invocation"]),
+    ):
+        session_start.main()
+    if initial:
+        sync.assert_called_once()
+        read_context.assert_called_once()
+        retry.assert_called_once()
+        steps = emit.call_args.args[0]["injectSteps"]
+        assert "catalog unavailable" in steps[0]["ephemeralMessage"]
+        assert "local context" in steps[1]["systemMessage"]["systemMessage"]
+    else:
+        sync.assert_not_called()
+        read_context.assert_not_called()
+        retry.assert_not_called()
+        emit.assert_called_once_with({})
+
+
+@pytest.mark.parametrize(
+    "next_connection", [("https://b.invalid", "key-a"), ("https://a.invalid", "key-b"), ("https://a.invalid", None)]
+)
+def test_offline_switch_disables_previous_mcp_transport(tmp_path, monkeypatch, next_connection):
+    config = tmp_path / "mcp.json"
+    monkeypatch.setenv("NMEM_SPACE", "Research")
+    monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd: ("https://a.invalid", "key-a"))
+    monkeypatch.setattr(nmem_shared, "http_request", lambda *a, **kw: [{"id": "old", "name": "Research"}])
+    nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
+    existing = json.loads(config.read_text())
+    existing["mcpServers"]["other"] = {"command": "other"}
+    config.write_text(json.dumps(existing))
+    monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd: next_connection)
+    monkeypatch.setattr(nmem_shared, "http_request", lambda *a, **kw: None)
+    with pytest.raises(nmem_shared.SpaceResolutionError):
+        nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
+    assert json.loads(config.read_text()) == {"mcpServers": {"other": {"command": "other"}}}
+    monkeypatch.setattr(nmem_shared, "http_request", lambda *a, **kw: [{"id": "new", "name": "Research"}])
+    assert nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
+    assert json.loads(config.read_text())["mcpServers"]["nowledge-mem"]["headers"]["X-Nmem-Space-Id"] == "new"
+    assert json.loads(config.read_text())["mcpServers"]["other"] == {"command": "other"}
+
+
+def test_mcp_write_failure_reports_old_connection_without_credentials(tmp_path, monkeypatch, capsys):
+    config = tmp_path / "mcp.json"
+    monkeypatch.setenv("NMEM_SPACE", "default")
+    monkeypatch.setenv("NMEM_DEBUG", "1")
+    monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd: ("https://a.invalid", "first-key"))
+    assert nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
+    before = config.read_bytes()
+    monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd: ("https://b.invalid", "second-key"))
+    with (
+        patch("nmem_shared._write_mcp_config", side_effect=PermissionError("private-error-marker")),
+        pytest.raises(nmem_shared.SpaceResolutionError, match="previous MCP connection may still be active") as err,
+    ):
+        nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
+    assert config.read_bytes() == before
+    diagnostic = str(err.value) + capsys.readouterr().err
+    for private in ("first-key", "second-key", "private-error-marker"):
+        assert private not in diagnostic
