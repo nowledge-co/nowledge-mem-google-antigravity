@@ -828,8 +828,8 @@ def test_session_end_writes_to_payload_workspace_space(tmp_path):
         mock_http.side_effect = [{"status": 404, "error": "not_found"}, {"status": "ok"}]
         session_end.main()
 
-    import_call = next(call for call in mock_http.call_args_list if call.args[0] == "/threads/import")
-    assert import_call.kwargs["payload"]["space"] == "project-space"
+    create_call = next(call for call in mock_http.call_args_list if call.args[0] == "/threads")
+    assert create_call.kwargs["payload"]["space_id"] == "project-space"
 
 
 def test_status_workspace_argument_surfaces_malformed_project_config(tmp_path, capsys):
@@ -1088,10 +1088,10 @@ def test_session_end_captures_a_utf8_payload_whatever_the_stdin_encoding(
     ):
         session_end.main()
 
-    imports = [call for call in mock_http.call_args_list if call.args[0] == "/threads/import"]
-    assert len(imports) == 1
-    assert imports[0].kwargs["payload"]["id"] == "conv-utf8"
-    assert imports[0].kwargs["payload"]["messages"] == [
+    creates = [call for call in mock_http.call_args_list if call.args[0] == "/threads"]
+    assert len(creates) == 1
+    assert creates[0].kwargs["payload"]["id"] == "conv-utf8"
+    assert creates[0].kwargs["payload"]["messages"] == [
         {"role": "user", "content": "Save this"},
         {"role": "assistant", "content": "Saved."},
     ]
@@ -2247,6 +2247,113 @@ def test_hooks_json_and_pre_invocation_sync_only(tmp_path):
     mock_read.assert_not_called()
     mock_popen.assert_not_called()
     mock_emit.assert_called_once_with({})
+
+
+def test_scoped_capture_retains_queue_and_never_relocates_via_import(tmp_path):
+    session_end = importlib.import_module("session-end")
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(json.dumps({"source": "USER_EXPLICIT", "content": "hello"}) + "\n", encoding="utf-8")
+
+    # 1. session-end: guarded HTTP append error must keep item queued without falling back to CLI/import.
+    with (
+        patch.object(
+            nmem_shared,
+            "read_hook_input",
+            return_value={"conversationId": "conv-mismatch", "transcriptPath": str(transcript)},
+        ),
+        patch.object(nmem_shared, "activate_hook_workspace", return_value=tmp_path),
+        patch.object(nmem_shared, "resolve_space", return_value="work-space"),
+        patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
+        patch.object(
+            nmem_shared,
+            "http_request",
+            side_effect=[{"id": "conv-mismatch", "messages": []}, {"error": "space_mismatch"}],
+        ) as mock_http,
+        patch.object(nmem_shared, "run_nmem_command") as mock_run,
+        patch.object(nmem_shared, "save_unsynced_session") as mock_save,
+        patch.object(nmem_shared, "sync_learnings_if_any"),
+        patch.object(nmem_shared, "emit"),
+    ):
+        session_end.main()
+        assert all(call.args[0] != "/threads/import" for call in mock_http.call_args_list)
+        mock_run.assert_not_called()
+        mock_save.assert_called_once()
+
+    # 2. session-end: indeterminate CLI `t show` failure must keep item queued and never run `t import` or `t create`.
+    with (
+        patch.object(
+            nmem_shared,
+            "read_hook_input",
+            return_value={"conversationId": "conv-indeterminate", "transcriptPath": str(transcript)},
+        ),
+        patch.object(nmem_shared, "activate_hook_workspace", return_value=tmp_path),
+        patch.object(nmem_shared, "resolve_space", return_value="work-space"),
+        patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
+        patch.object(nmem_shared, "http_request", return_value=None),
+        patch.object(
+            nmem_shared,
+            "run_nmem_command",
+            return_value=MagicMock(returncode=1, stdout="", stderr="connection timed out"),
+        ) as mock_run,
+        patch.object(nmem_shared, "save_unsynced_session") as mock_save,
+        patch.object(nmem_shared, "sync_learnings_if_any"),
+        patch.object(nmem_shared, "emit"),
+    ):
+        session_end.main()
+        assert all("import" not in c.args[0] and "create" not in c.args[0] for c in mock_run.call_args_list)
+        mock_save.assert_called_once()
+
+    # 3. retry_unsynced_sessions: failed guarded write or collision must retain queue item and never call /threads/import.
+    with (
+        tempfile.TemporaryDirectory() as home_dir,
+        patch.dict(os.environ, {"HOME": home_dir, "USERPROFILE": home_dir}),
+    ):
+        queue_file = nmem_shared.get_unsynced_queue_path()
+        queue_file.parent.mkdir(parents=True, exist_ok=True)
+        queue_file.write_text(
+            json.dumps(
+                {
+                    "conv-replay-1": {
+                        "conversation_id": "conv-replay-1",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "title": "Title",
+                        "space": "work-space",
+                        "host_agent_id": "host",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        with (
+            patch("nmem_shared.is_backend_unreachable", return_value=False),
+            patch(
+                "nmem_shared.http_request",
+                side_effect=[{"status": 404, "error": "not_found"}, {"error": "thread_exists_in_other_space"}],
+            ) as mock_http,
+            patch("nmem_shared.run_nmem_command") as mock_run,
+        ):
+            nmem_shared.retry_unsynced_sessions()
+            assert [c.args[0] for c in mock_http.call_args_list] == [
+                "/threads/conv-replay-1?space=work-space",
+                "/threads",
+            ]
+            mock_run.assert_not_called()
+        assert queue_file.exists()
+        assert "conv-replay-1" in json.loads(queue_file.read_text(encoding="utf-8"))
+
+        # 4. retry_unsynced_sessions: indeterminate CLI `t show` failure retains queue item without `t import` or `t create`.
+        with (
+            patch("nmem_shared.is_backend_unreachable", return_value=False),
+            patch("nmem_shared.http_request", return_value=None),
+            patch(
+                "nmem_shared.run_nmem_command",
+                return_value=MagicMock(returncode=1, stdout="", stderr="503 service unavailable"),
+            ) as mock_run,
+        ):
+            nmem_shared.retry_unsynced_sessions()
+            assert all("import" not in c.args[0] and "create" not in c.args[0] for c in mock_run.call_args_list)
+        assert queue_file.exists()
+        assert "conv-replay-1" in json.loads(queue_file.read_text(encoding="utf-8"))
 
 
 def load_tests(loader, tests, pattern):

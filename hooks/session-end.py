@@ -99,6 +99,7 @@ def main():
                 break
 
             matched_count = 0
+            http_handled = False
             # Try HTTP transport first
             try:
                 space_param = f"?space={space}" if space else ""
@@ -108,6 +109,7 @@ def main():
                 if isinstance(check_res, dict) and (
                     check_res.get("id") or check_res.get("thread_id") or "messages" in check_res
                 ):
+                    http_handled = True
                     existing_msgs = check_res.get("messages") or []
                     if isinstance(existing_msgs, list):
                         for old_m, new_m in zip(existing_msgs, messages):
@@ -149,28 +151,36 @@ def main():
                     if isinstance(app_res, dict) and not app_res.get("error"):
                         success = True
                         break
+                    # Guarded HTTP write failed (e.g. scope mismatch): keep pending, do not fall through to CLI/create.
+                    break
                 elif isinstance(check_res, dict) and (
                     check_res.get("error") in ("not_found", "thread_not_found") or check_res.get("status") == 404
                 ):
-                    # Explicit 404 / thread not found -> import new thread
-                    import_payload = {
+                    http_handled = True
+                    # Explicit 404 / thread not found -> create-only (rejects identity collisions across Spaces)
+                    create_payload = {
                         "id": conversation_id,
                         "title": title,
                         "source": "google-antigravity",
                         "messages": messages,
                     }
                     if space:
-                        import_payload["space"] = space
-                    imp_res = nmem_shared.http_request(
-                        "/threads/import", method="POST", payload=import_payload, timeout=2.5
+                        create_payload["space_id"] = space
+                    create_res = nmem_shared.http_request(
+                        "/threads", method="POST", payload=create_payload, timeout=2.5
                     )
-                    if isinstance(imp_res, dict) and not imp_res.get("error"):
+                    if isinstance(create_res, dict) and not create_res.get("error"):
                         success = True
                         break
+                    break
+                elif isinstance(check_res, dict):
+                    # Indeterminate/scope error from backend: keep pending, do not fall through to CLI/create.
+                    http_handled = True
+                    break
             except Exception:
                 pass
 
-            if nmem_shared.is_backend_unreachable():
+            if nmem_shared.is_backend_unreachable() or http_handled:
                 break
 
             # Check if the thread exists (CLI Fallback)
@@ -179,10 +189,13 @@ def main():
                 check_args.extend(["--space", space])
 
             thread_exists = False
+            thread_not_found = False
             try:
                 result = nmem_shared.run_nmem_command(check_args, timeout=2.0)
                 if result.returncode == 0:
                     thread_exists = True
+                elif nmem_shared.is_cli_thread_not_found(result):
+                    thread_not_found = True
             except Exception as e:
                 if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                     sys.stderr.write(f"nmem t show execution failed: {e}\n")
@@ -206,34 +219,21 @@ def main():
                 else:
                     success = True
                     break
-            else:
-                # Import new thread
-                import_args = [
-                    "t",
-                    "import",
-                    "-m",
-                    json.dumps(messages),
-                    "--id",
-                    conversation_id,
-                    "-t",
-                    title,
-                    "-s",
-                    "google-antigravity",
-                ]
-                if space:
-                    import_args.extend(["--space", space])
+            elif thread_not_found:
+                # Create new thread only when lookup explicitly confirmed not-found (rejects collisions)
+                create_args = nmem_shared.build_cli_thread_create_args(conversation_id, title, messages, space)
 
                 try:
-                    result = nmem_shared.run_nmem_command(import_args, timeout=3.0)
+                    result = nmem_shared.run_nmem_command(create_args, timeout=3.0)
                     if result.returncode == 0:
                         success = True
                         break
                     else:
                         if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
-                            sys.stderr.write(f"nmem t import failed: {result.stderr}\n")
+                            sys.stderr.write(f"nmem t create failed: {result.stderr}\n")
                 except Exception as e:
                     if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
-                        sys.stderr.write(f"nmem t import execution failed: {e}\n")
+                        sys.stderr.write(f"nmem t create execution failed: {e}\n")
 
         if not success:
             nmem_shared.save_unsynced_session(conversation_id, messages, title, space, host_agent_id)

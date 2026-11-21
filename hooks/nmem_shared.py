@@ -1060,6 +1060,35 @@ def build_cli_thread_append_args(thread_id: str, messages: list[dict]) -> list[s
     return ["t", "append", thread_id, "-m", json.dumps(messages)]
 
 
+def build_cli_thread_create_args(
+    thread_id: str, title: str, messages: list[dict], space: str | None = None
+) -> list[str]:
+    """Build create-only `nmem t create` CLI arguments (never relocates an existing thread)."""
+    args = [
+        "t",
+        "create",
+        "--id",
+        thread_id,
+        "-t",
+        title,
+        "-m",
+        json.dumps(messages),
+        "-s",
+        "google-antigravity",
+    ]
+    if space:
+        args.extend(["--space", space])
+    return args
+
+
+def is_cli_thread_not_found(result) -> bool:
+    """Return True only when `nmem t show` explicitly reports the thread was not found."""
+    if result is None or getattr(result, "returncode", 0) == 0:
+        return False
+    combined = f"{getattr(result, 'stderr', '') or ''}\n{getattr(result, 'stdout', '') or ''}".lower()
+    return any(marker in combined for marker in ("not found", "not_found", "thread_not_found", "404", "does not exist"))
+
+
 def retry_unsynced_sessions() -> None:
     """Attempt to sync any unsynced sessions in the queue."""
     queue_path = get_unsynced_queue_path()
@@ -1103,6 +1132,7 @@ def retry_unsynced_sessions() -> None:
 
                 matched_count = 0
                 success = False
+                http_handled = False
                 # Try HTTP transport first
                 try:
                     space_param = f"?space={space}" if space else ""
@@ -1110,6 +1140,7 @@ def retry_unsynced_sessions() -> None:
                     if isinstance(check_res, dict) and (
                         check_res.get("id") or check_res.get("thread_id") or "messages" in check_res
                     ):
+                        http_handled = True
                         existing_msgs = check_res.get("messages") or []
                         if isinstance(existing_msgs, list):
                             for old_m, new_m in zip(existing_msgs, messages):
@@ -1154,35 +1185,42 @@ def retry_unsynced_sessions() -> None:
                     elif isinstance(check_res, dict) and (
                         check_res.get("error") in ("not_found", "thread_not_found") or check_res.get("status") == 404
                     ):
-                        # Explicit 404 / thread not found -> import new thread
-                        import_payload = {
+                        http_handled = True
+                        # Explicit 404 / thread not found -> create-only (rejects identity collisions across Spaces)
+                        create_payload = {
                             "id": conv_id,
                             "title": title,
                             "source": "google-antigravity",
                             "messages": messages,
                         }
                         if space:
-                            import_payload["space"] = space
-                        imp_res = http_request("/threads/import", method="POST", payload=import_payload, timeout=2.5)
-                        if isinstance(imp_res, dict) and not imp_res.get("error"):
+                            create_payload["space_id"] = space
+                        create_res = http_request("/threads", method="POST", payload=create_payload, timeout=2.5)
+                        if isinstance(create_res, dict) and not create_res.get("error"):
                             success = True
+                    elif isinstance(check_res, dict):
+                        # Indeterminate/scope error from backend: retain in queue rather than falling through.
+                        http_handled = True
                 except Exception:
                     pass
 
                 if is_backend_unreachable():
                     break
 
-                if not success:
+                if not success and not http_handled:
                     # CLI Fallback
                     check_args = ["t", "show", conv_id]
                     if space:
                         check_args.extend(["--space", space])
 
                     thread_exists = False
+                    thread_not_found = False
                     try:
                         result = run_nmem_command(check_args, timeout=2.0)
                         if result.returncode == 0:
                             thread_exists = True
+                        elif is_cli_thread_not_found(result):
+                            thread_not_found = True
                     except Exception:
                         pass
 
@@ -1200,28 +1238,15 @@ def retry_unsynced_sessions() -> None:
                                     pass
                         else:
                             success = True
-                    else:
-                        # Import new thread
-                        import_args = [
-                            "t",
-                            "import",
-                            "-m",
-                            json.dumps(messages),
-                            "--id",
-                            conv_id,
-                            "-t",
-                            title,
-                            "-s",
-                            "google-antigravity",
-                        ]
-                        if space:
-                            import_args.extend(["--space", space])
+                    elif thread_not_found:
+                        # Create new thread only when lookup explicitly confirmed not-found (rejects collisions)
+                        create_args = build_cli_thread_create_args(conv_id, title, messages, space)
 
                         env = {}
                         if host_agent_id:
                             env["NMEM_HOST_AGENT_ID"] = host_agent_id
                         try:
-                            result = run_nmem_command(import_args, env=env, timeout=3.0)
+                            result = run_nmem_command(create_args, env=env, timeout=3.0)
                             if result.returncode == 0:
                                 success = True
                         except Exception:
