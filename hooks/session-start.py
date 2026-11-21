@@ -131,35 +131,11 @@ def main():
     pre_invocation = "--pre-invocation" in sys.argv[1:]
 
     try:
-        # Asynchronously sync host skills connection (nmem skills connect antigravity / sync)
-        try:
-            nmem_shared.sync_host_skills_async()
-        except Exception:
-            pass
-
         hook_input = nmem_shared.read_hook_input()
         conversation_id = hook_input.get("conversationId")
         transcript_path = hook_input.get("transcriptPath")
         artifact_directory_path = hook_input.get("artifactDirectoryPath")
         workspace_root = nmem_shared.activate_hook_workspace(hook_input)
-
-        # Synchronize the MCP transport from this workspace's configuration,
-        # rather than from the plugin directory used as the hook process cwd.
-        try:
-            nmem_shared.sync_mcp_config_file(cwd=workspace_root)
-        except Exception:
-            pass
-
-        if not pre_invocation:
-            try:
-                subprocess.Popen(
-                    [sys.executable, __file__, "--retry-only"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-            except Exception:
-                pass
 
         if pre_invocation:
             try:
@@ -175,6 +151,29 @@ def main():
                     sys.stderr.write(f"Learning sync failed in start hook: {e}\n")
             nmem_shared.emit({})
             return
+
+        # Asynchronously sync host skills connection (nmem skills connect antigravity / sync)
+        try:
+            nmem_shared.sync_host_skills_async()
+        except Exception:
+            pass
+
+        # Synchronize the MCP transport from this workspace's configuration,
+        # rather than from the plugin directory used as the hook process cwd.
+        try:
+            nmem_shared.sync_mcp_config_file(cwd=workspace_root)
+        except Exception:
+            pass
+
+        try:
+            subprocess.Popen(
+                [sys.executable, __file__, "--retry-only"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            pass
 
         startup_context = read_startup_context(workspace_root)
         if not startup_context:

@@ -925,8 +925,8 @@ def test_session_start_pre_invocation_never_injects_startup_context(invocation_n
     with (
         patch("nmem_shared.read_hook_input", return_value=hook_input),
         patch("nmem_shared.resolve_space", return_value="default"),
-        patch("nmem_shared.sync_mcp_config_file"),
-        patch("nmem_shared.sync_host_skills_async"),
+        patch("nmem_shared.sync_mcp_config_file") as mock_sync_mcp,
+        patch("nmem_shared.sync_host_skills_async") as mock_sync_skills,
         patch("nmem_shared.sync_learnings_if_any") as mock_sync_learnings,
         patch("session_start.read_startup_context") as mock_read_context,
         patch("subprocess.Popen") as mock_popen,
@@ -938,6 +938,8 @@ def test_session_start_pre_invocation_never_injects_startup_context(invocation_n
     mock_emit.assert_called_once_with({})
     mock_read_context.assert_not_called()
     mock_popen.assert_not_called()
+    mock_sync_mcp.assert_not_called()
+    mock_sync_skills.assert_not_called()
     mock_sync_learnings.assert_called_once()
 
 
