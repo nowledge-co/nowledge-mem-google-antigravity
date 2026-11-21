@@ -302,6 +302,7 @@ def test_retry_unsynced_sessions_success_unlinks_queue(mock_http):
             json.dumps(
                 {
                     "conv-1": {
+                        "connection_scope": nmem_shared._spaces_cache_scope_id(),
                         "conversation_id": "conv-1",
                         "messages": [{"role": "user", "content": "hi"}],
                         "title": "Title",
@@ -336,6 +337,7 @@ def test_retry_unsynced_sessions_reconciles_existing_thread_prefix(mock_http, mo
             json.dumps(
                 {
                     "conv-1": {
+                        "connection_scope": nmem_shared._spaces_cache_scope_id(),
                         "conversation_id": "conv-1",
                         "messages": [
                             {"role": "user", "content": "Save this"},
@@ -2315,6 +2317,7 @@ def test_scoped_capture_retains_queue_and_never_relocates_via_import(tmp_path):
             json.dumps(
                 {
                     "conv-replay-1": {
+                        "connection_scope": nmem_shared._spaces_cache_scope_id(),
                         "conversation_id": "conv-replay-1",
                         "messages": [{"role": "user", "content": "hi"}],
                         "title": "Title",
@@ -2912,3 +2915,41 @@ def load_tests(loader, tests, pattern):
         if name.startswith("test_") and inspect.isfunction(obj):
             suite.addTest(unittest.FunctionTestCase(obj))
     return suite
+
+
+def test_pending_capture_replays_only_for_original_account(tmp_path, monkeypatch):
+    path = tmp_path / "pending.json"
+    monkeypatch.setattr(nmem_shared, "get_unsynced_queue_path", lambda: path)
+    monkeypatch.setattr(nmem_shared, "is_backend_unreachable", lambda: False)
+    monkeypatch.setenv("NMEM_API_URL", "https://test.invalid")
+    path.write_text(json.dumps({"legacy": {"messages": []}}))
+    for key in ("first", "second"):
+        monkeypatch.setenv("NMEM_API_KEY", key)
+        nmem_shared.save_unsynced_session("same", [{"role": "user", "content": key}], "Title", "default", None)
+    with patch.object(nmem_shared, "sync_thread_capture", return_value=(True, True)) as sync:
+        for key in ("first", "second"):
+            monkeypatch.setenv("NMEM_API_KEY", key)
+            nmem_shared.retry_unsynced_sessions()
+            assert sync.call_args.args[0:3] == ("same", "Title", [{"role": "user", "content": key}])
+        assert sync.call_count == 2
+    assert list(json.loads(path.read_text())) == ["legacy"]
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_paginated_capture_requires_complete_prefix_and_honors_reconcile_refusal(changed):
+    rows = [{"role": "user", "content": str(i)} for i in range(501)]
+    local = [*rows[:-1], {"role": "user", "content": "changed"}] if changed else rows
+    page = {"space_id": "project", "total_messages": 501, "messages": rows[:500]}
+    with (
+        patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
+        patch.object(
+            nmem_shared,
+            "http_request",
+            side_effect=[page, {**page, "messages": rows}, {"status": 409, "error": "linked"}],
+        ) as request,
+    ):
+        assert nmem_shared.sync_thread_capture("c", "Title", local, "project") == (not changed, True)
+    assert request.call_args_list[1].args == ("/threads/c?space_id=project&limit=501",)
+    assert request.call_count == (3 if changed else 2)
+    if changed:
+        assert request.call_args.args == ("/threads/c/reconcile-tail",)

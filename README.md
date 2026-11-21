@@ -224,3 +224,5 @@ make validate
 - [Nowledge Mem](https://mem.nowledge.co)
 - [Discord](https://nowled.ge/discord)
 - [GitHub](https://github.com/nowledge-co/nowledge-mem-google-antigravity)
+
+Pending captures are tied to the Mem endpoint and credentials used by the Stop hook. Restore that connection to resume automatic retries. Older queue entries without a recorded connection remain on disk in the plugin storage directory (`unsynced.json`). Inspect their destination before manually importing them.

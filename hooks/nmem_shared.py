@@ -10,6 +10,8 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 
@@ -281,6 +283,19 @@ def get_plugin_config() -> dict:
     return {}
 
 
+_capture_connection: ContextVar = ContextVar("capture_connection", default=None)
+
+
+@contextmanager
+def pin_capture_connection():
+    connection = get_effective_config()
+    token = _capture_connection.set(connection)
+    try:
+        yield connection
+    finally:
+        _capture_connection.reset(token)
+
+
 def get_effective_config(cwd: str | Path | None = None) -> tuple[str, str | None]:
     """Resolve effective API URL and API key following the hierarchy:
     1. NMEM_API_URL / NMEM_API_KEY environment variables
@@ -292,6 +307,9 @@ def get_effective_config(cwd: str | Path | None = None) -> tuple[str, str | None
     Guards against inadvertently picking up host ~/.nowledge-mem/config.json credentials
     when targeting custom server URLs or running isolated test environments.
     """
+    pinned = _capture_connection.get()
+    if pinned is not None:
+        return pinned
     cwd = _effective_cwd(cwd)
     env_url = os.environ.get("NMEM_API_URL", "").strip()
     env_key = os.environ.get("NMEM_API_KEY", "").strip() or None
@@ -1010,6 +1028,12 @@ def run_nmem_command(
     if env:
         run_env.update(env)
 
+    if _capture_connection.get() is not None:
+        run_env["NMEM_API_URL"], key = _capture_connection.get()
+        run_env["NMEM_API_KEY"] = key or ""
+        run_env["NMEM_CONFIG_PATH"] = os.devnull
+        run_env["NMEM_CLI_CONFIG_DIR"] = os.devnull
+
     raw_url = str(run_env.get("NMEM_API_URL") or "").strip()
     final_url = (raw_url or effective_url or "http://127.0.0.1:14242").rstrip("/")
     run_env["NMEM_API_URL"] = final_url
@@ -1193,7 +1217,12 @@ def save_unsynced_session(
                     pass
 
             # Add/Update session
-            queue[conv_id] = {
+            scope = _spaces_cache_scope_id()
+            key = conv_id
+            if f"{scope}:{conv_id}" in queue or (key in queue and queue[key].get("connection_scope") != scope):
+                key = f"{scope}:{conv_id}"
+            queue[key] = {
+                "connection_scope": scope,
                 "conversation_id": conv_id,
                 "messages": messages,
                 "title": title,
@@ -1300,7 +1329,7 @@ def is_http_thread_not_found(res: dict | None) -> bool:
     if status != 404 or res.get("_is_json") is False:
         return False
     detail = res.get("detail")
-    return isinstance(detail, str) and "thread" in detail.lower() and "not found" in detail.lower()
+    return isinstance(detail, str) and detail.strip().lower() == "thread not found"
 
 
 def extract_thread_space_id(payload: dict) -> str | None:
@@ -1383,6 +1412,24 @@ def sync_thread_capture(
             if existing_msgs is None and isinstance(check_res.get("thread"), dict):
                 existing_msgs = check_res["thread"].get("messages")
             existing_msgs = existing_msgs or []
+            total = check_res.get("total_messages", len(existing_msgs))
+            if not isinstance(total, int) or not isinstance(existing_msgs, list):
+                return False, True
+            if len(existing_msgs) < min(total, len(messages)):
+                separator = "&" if "?" in lookup_endpoint else "?"
+                full = http_request(
+                    f"{lookup_endpoint}{separator}limit={len(messages)}",
+                    method="GET",
+                    timeout=2.5,
+                    include_error_response=True,
+                )
+                if not _is_http_ok(full) or full.get("total_messages") != total:
+                    return False, True
+                if space and not spaces_match(space, extract_thread_space_id(full)):
+                    return False, True
+                existing_msgs = full.get("messages")
+                if not isinstance(existing_msgs, list) or len(existing_msgs) < min(total, len(messages)):
+                    return False, True
             if isinstance(existing_msgs, list):
                 for old_m, new_m in zip(existing_msgs, messages):
                     old_role = old_m.get("role") or old_m.get("sender")
@@ -1410,8 +1457,7 @@ def sync_thread_capture(
                     timeout=2.5,
                     include_error_response=True,
                 )
-                if _is_http_ok(rec_res):
-                    return True, True
+                return _is_http_ok(rec_res), True
 
             app_payload = {"messages": messages[matched_count:] if matched_count > 0 else messages}
             if space:
@@ -1536,7 +1582,8 @@ def retry_unsynced_sessions() -> None:
                 return
 
             updated_queue = dict(queue)
-            for conv_id, data in queue.items():
+            for queue_key, data in queue.items():
+                conv_id = data.get("conversation_id", queue_key)
                 if is_backend_unreachable():
                     break
 
@@ -1545,9 +1592,12 @@ def retry_unsynced_sessions() -> None:
                 space = data.get("space")
                 host_agent_id = data.get("host_agent_id")
 
-                success, _ = sync_thread_capture(conv_id, title, messages, space, host_agent_id)
+                with pin_capture_connection() as connection:
+                    if data.get("connection_scope") != _spaces_cache_scope_id(connection):
+                        continue
+                    success, _ = sync_thread_capture(conv_id, title, messages, space, host_agent_id)
                 if success:
-                    del updated_queue[conv_id]
+                    del updated_queue[queue_key]
 
             # Write back the remaining queue
             try:

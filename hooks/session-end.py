@@ -18,6 +18,11 @@ def main():
     artifact_directory_path = hook_input.get("artifactDirectoryPath")
     workspace_root = nmem_shared.activate_hook_workspace(hook_input)
 
+    with nmem_shared.pin_capture_connection():
+        capture(hook_input, conversation_id, transcript_path, artifact_directory_path, workspace_root)
+
+
+def capture(hook_input, conversation_id, transcript_path, artifact_directory_path, workspace_root):
     fully_idle = hook_input.get("fullyIdle")
     if fully_idle is False:
         if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
