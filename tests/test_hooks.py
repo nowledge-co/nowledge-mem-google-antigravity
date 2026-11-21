@@ -2203,3 +2203,22 @@ def test_offline_switch_disables_previous_mcp_transport(tmp_path, monkeypatch, n
     assert nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
     assert json.loads(config.read_text())["mcpServers"]["nowledge-mem"]["headers"]["X-Nmem-Space-Id"] == "new"
     assert json.loads(config.read_text())["mcpServers"]["other"] == {"command": "other"}
+
+
+def test_mcp_write_failure_reports_old_connection_without_credentials(tmp_path, monkeypatch, capsys):
+    config = tmp_path / "mcp.json"
+    monkeypatch.setenv("NMEM_SPACE", "default")
+    monkeypatch.setenv("NMEM_DEBUG", "1")
+    monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd: ("https://a.invalid", "first-key"))
+    assert nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
+    before = config.read_bytes()
+    monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd: ("https://b.invalid", "second-key"))
+    with patch("nmem_shared._write_mcp_config", side_effect=PermissionError("private-error-marker")):
+        with pytest.raises(
+            nmem_shared.SpaceResolutionError, match="previous MCP connection may still be active"
+        ) as err:
+            nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
+    assert config.read_bytes() == before
+    diagnostic = str(err.value) + capsys.readouterr().err
+    for private in ("first-key", "second-key", "private-error-marker"):
+        assert private not in diagnostic

@@ -706,7 +706,7 @@ def sync_mcp_config_file(mcp_config_path: str = None, cwd: str | Path | None = N
                 _write_mcp_config(p, current_data)
             except OSError as exc:
                 raise SpaceResolutionError(
-                    "Could not disable the previous MCP connection; check config file permissions"
+                    "Could not disable Mem: the previous MCP connection may still be active. Check config file permissions."
                 ) from exc
         raise
     if space_id is not None:
@@ -724,10 +724,10 @@ def sync_mcp_config_file(mcp_config_path: str = None, cwd: str | Path | None = N
     try:
         _write_mcp_config(p, target_data)
         return True
-    except Exception as e:
-        if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
-            sys.stderr.write(f"Warning: Failed to sync mcp_config.json: {e}\n")
-        return False
+    except OSError as exc:
+        raise SpaceResolutionError(
+            "Could not update Mem: the previous MCP connection may still be active. Check config file permissions."
+        ) from exc
 
 
 def sync_host_skills_async() -> None:
