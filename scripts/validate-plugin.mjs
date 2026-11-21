@@ -40,6 +40,9 @@ async function main() {
   assertString(manifest.name, 'manifest.name');
   assertString(manifest.version, 'manifest.version');
   assertString(manifest.description, 'manifest.description');
+  if (manifest.repository !== undefined) {
+    assertString(manifest.repository, 'manifest.repository');
+  }
 
   let isWorktree = pluginRoot.includes('/worktrees/') || pluginRoot.includes('\\worktrees\\');
   if (!isWorktree) {
@@ -63,8 +66,9 @@ async function main() {
   if (!server || typeof server !== 'object') {
     fail('mcp_config.json must define mcpServers.nowledge-mem');
   }
-  if (typeof server.serverUrl !== 'string' || !server.serverUrl.endsWith('/mcp/') || (!server.serverUrl.startsWith('http://') && !server.serverUrl.startsWith('https://'))) {
-    fail('mcp_config.json nowledge-mem.serverUrl must be a valid http(s) URL ending with /mcp/');
+  const endpoint = server.url;
+  if (typeof endpoint !== 'string' || !endpoint.endsWith('/mcp') || (!endpoint.startsWith('http://') && !endpoint.startsWith('https://'))) {
+    fail('mcp_config.json nowledge-mem.url must be a valid http(s) URL ending with /mcp');
   }
   if (server.headers?.APP !== 'Google Antigravity') {
     fail('mcp_config.json nowledge-mem.headers.APP must be "Google Antigravity"');
@@ -95,10 +99,10 @@ async function main() {
     'hooks/nmem_status.py',
     'hooks/post-invocation.py',
     'hooks/post-tool-use.py',
-    'sidecars/nowledge-mem-sync/sidecar.json',
     'skills/nmem-memory-working/SKILL.md',
     'skills/nmem-bridge-chat/SKILL.md',
     'skills/nmem-memory-search/SKILL.md',
+    'skills/nmem-graph-explore/SKILL.md',
     'skills/nmem-memory-distill/SKILL.md',
     'skills/nmem-thread-save/SKILL.md',
     'skills/nmem-thread-handoff/SKILL.md',

@@ -1,4 +1,5 @@
 {
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "nowledge-mem-google-antigravity",
   "version": "0.1.4",
   "description": "Google Antigravity plugin for Nowledge Mem with startup context, memory rules, and agent skills.",
@@ -6,6 +7,8 @@
     "name": "Nowledge Co",
     "email": "hello@nowledge.co"
   },
+  "homepage": "https://mem.nowledge.co/docs/integrations/google-antigravity",
+  "repository": "https://github.com/nowledge-co/nowledge-mem-google-antigravity.git",
   "license": "MIT",
   "keywords": [
     "google-antigravity",

@@ -87,7 +87,7 @@ Release packaging notes live in [`RELEASING.md`](./RELEASING.md).
 
 **Bundled MCP**
 
-- Local same-machine installs expose `nowledge-mem` MCP tools at `http://127.0.0.1:14242/mcp/` automatically.
+- Local same-machine installs expose `nowledge-mem` MCP tools at `http://127.0.0.1:14242/mcp` automatically.
 - The startup hook automatically synchronizes `mcp_config.json` with effective client settings (`~/.nowledge-mem/config.json` or `NMEM_API_URL`/`NMEM_API_KEY`). For remote Mem, `mcp_config.json` is updated dynamically with the remote server URL and authentication headers (`Authorization: Bearer` and `X-NMEM-API-Key`).
 - The committed `mcp_config.json` is a local placeholder template. Do not commit a real `nmem_...` API key.
 
@@ -99,6 +99,7 @@ Release packaging notes live in [`RELEASING.md`](./RELEASING.md).
 
 - `nmem-bridge-chat`
 - `nmem-fs-explore`
+- `nmem-graph-explore`
 - `nmem-memory-distill`
 - `nmem-memory-search`
 - `nmem-memory-working`
