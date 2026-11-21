@@ -759,7 +759,7 @@ def _mcp_space_id(cwd: str | Path | None, client_config: tuple[str, str | None])
     raise SpaceResolutionError(f"Cannot resolve MCP Space '{selected}' to a unique ID on the connected server")
 
 
-def _write_mcp_config(path: Path, data: dict) -> None:
+def _write_json_atomic(path: Path, data: dict) -> None:
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as staged:
         temporary = Path(staged.name)
         try:
@@ -800,7 +800,7 @@ def sync_mcp_config_file(mcp_config_path: str = None, cwd: str | Path | None = N
         if isinstance(servers, dict) and "nowledge-mem" in servers:
             del servers["nowledge-mem"]
             try:
-                _write_mcp_config(p, current_data)
+                _write_json_atomic(p, current_data)
             except OSError as exc:
                 raise SpaceResolutionError(
                     "Could not disable Mem: the previous MCP connection may still be active. Check config file permissions."
@@ -819,7 +819,7 @@ def sync_mcp_config_file(mcp_config_path: str = None, cwd: str | Path | None = N
         return False
 
     try:
-        _write_mcp_config(p, target_data)
+        _write_json_atomic(p, target_data)
         return True
     except OSError as exc:
         raise SpaceResolutionError(
@@ -1237,6 +1237,21 @@ class FileLock:
                 pass
 
 
+def _load_capture_queue(path: Path) -> dict:
+    """Read under the queue lock. Preserve undecodable records for manual recovery."""
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+        queue = json.loads(raw) if raw else {}
+        if not isinstance(queue, dict):
+            raise ValueError("invalid capture queue")
+        return queue
+    except FileNotFoundError:
+        return {}
+    except ValueError:
+        path.replace(path.with_name(f"{path.stem}.corrupt-{time.time_ns()}{path.suffix}"))
+        return {}
+
+
 def get_unsynced_queue_path() -> Path:
     """Return the Path to the unsynced sessions queue file, migrating any legacy files if needed.
 
@@ -1265,29 +1280,20 @@ def get_unsynced_queue_path() -> Path:
                 new_lock = new_path.with_suffix(".lock")
                 with FileLock(old_lock), FileLock(new_lock):
                     if old_path.exists():
-                        try:
-                            old_data = json.loads(old_path.read_text(encoding="utf-8"))
-                        except Exception:
-                            old_data = None
-
-                        if isinstance(old_data, dict) and old_data:
-                            merged = {}
-                            if new_path.exists():
-                                try:
-                                    merged = json.loads(new_path.read_text(encoding="utf-8"))
-                                    if not isinstance(merged, dict):
-                                        merged = {}
-                                except Exception:
-                                    merged = {}
-                            for k, v in old_data.items():
-                                if k not in merged:
-                                    merged[k] = v
-                            new_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
-
-                        try:
+                        old_data = _load_capture_queue(old_path)
+                        merged = _load_capture_queue(new_path)
+                        conflicts = False
+                        changed = False
+                        for key, value in old_data.items():
+                            if key not in merged:
+                                merged[key] = value
+                                changed = True
+                            elif merged[key] != value:
+                                conflicts = True
+                        if changed:
+                            _write_json_atomic(new_path, merged)
+                        if not conflicts:
                             old_path.unlink(missing_ok=True)
-                        except Exception:
-                            pass
             except Exception as e:
                 if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                     sys.stderr.write(f"Warning: Failed to migrate unsynced sessions queue from {old_path}: {e}\n")
@@ -1301,6 +1307,8 @@ def save_unsynced_session(
     conv_id: str, messages: list, title: str, space: str | None, host_agent_id: str | None
 ) -> None:
     """Save a failed session to the unsynced queue file."""
+    if not messages:
+        return
     if not space:
         space = resolve_space()
     queue_path = get_unsynced_queue_path()
@@ -1309,13 +1317,7 @@ def save_unsynced_session(
 
     try:
         with FileLock(lock_path):
-            # Load existing queue
-            queue = {}
-            if queue_path.exists():
-                try:
-                    queue = json.loads(queue_path.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+            queue = _load_capture_queue(queue_path)
 
             # Add/Update session
             scope = _spaces_cache_scope_id()
@@ -1331,11 +1333,7 @@ def save_unsynced_session(
                 "host_agent_id": host_agent_id,
             }
 
-            # Save back
-            try:
-                queue_path.write_text(json.dumps(queue, indent=2, ensure_ascii=False), encoding="utf-8")
-            except Exception:
-                pass
+            _write_json_atomic(queue_path, queue)
     except Exception as e:
         if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
             sys.stderr.write(f"Warning: Failed to write to unsynced sessions file: {e}\n")
@@ -1661,20 +1659,7 @@ def retry_unsynced_sessions() -> None:
 
     try:
         with FileLock(lock_path):
-            try:
-                raw_text = queue_path.read_text(encoding="utf-8").strip()
-                queue = json.loads(raw_text) if raw_text else {}
-            except Exception:
-                try:
-                    quarantine_path = queue_path.with_name(
-                        f"{queue_path.stem}.corrupt-{time.time_ns()}{queue_path.suffix}"
-                    )
-                    queue_path.replace(quarantine_path)
-                except Exception as error:
-                    if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
-                        sys.stderr.write(f"Warning: Failed to quarantine corrupt queue {queue_path}: {error}\n")
-                return
-
+            queue = _load_capture_queue(queue_path)
             if not queue:
                 try:
                     queue_path.unlink(missing_ok=True)
@@ -1700,14 +1685,12 @@ def retry_unsynced_sessions() -> None:
                 if success:
                     del updated_queue[queue_key]
 
-            # Write back the remaining queue
-            try:
-                if updated_queue:
-                    queue_path.write_text(json.dumps(updated_queue, indent=2, ensure_ascii=False), encoding="utf-8")
-                else:
-                    queue_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            if updated_queue == queue:
+                return
+            if updated_queue:
+                _write_json_atomic(queue_path, updated_queue)
+            else:
+                queue_path.unlink(missing_ok=True)
     except Exception as e:
         if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
             sys.stderr.write(f"Warning: Failed to lock unsynced sessions file for retry: {e}\n")

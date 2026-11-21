@@ -246,16 +246,11 @@ def test_spaces_cache_legacy_discard():
                 nmem_shared._SPACES_CACHE = saved_cache
 
 
-@patch("nmem_shared.FileLock")
-@patch("pathlib.Path.exists")
-@patch("pathlib.Path.mkdir")
-@patch("pathlib.Path.write_text")
-@patch("pathlib.Path.read_text")
-def test_save_unsynced_session(mock_read, mock_write, mock_mkdir, mock_exists, mock_lock):
-    mock_exists.return_value = False
+def test_save_unsynced_session(tmp_path, monkeypatch):
+    path = tmp_path / "data" / "unsynced.json"
+    monkeypatch.setattr(nmem_shared, "get_unsynced_queue_path", lambda: path)
     nmem_shared.save_unsynced_session("conv-1", [{"role": "user", "content": "hi"}], "title", "space", "host")
-    mock_mkdir.assert_called_once()
-    mock_write.assert_called_once()
+    assert json.loads(path.read_text())["conv-1"]["messages"] == [{"role": "user", "content": "hi"}]
 
 
 @patch("subprocess.Popen")
@@ -3122,7 +3117,7 @@ def test_mcp_write_failure_reports_old_connection_without_credentials(tmp_path, 
     before = config.read_bytes()
     monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd: ("https://b.invalid", "second-key"))
     with (
-        patch("nmem_shared._write_mcp_config", side_effect=PermissionError("private-error-marker")),
+        patch("nmem_shared._write_json_atomic", side_effect=PermissionError("private-error-marker")),
         pytest.raises(nmem_shared.SpaceResolutionError, match="previous MCP connection may still be active") as err,
     ):
         nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
@@ -3130,3 +3125,47 @@ def test_mcp_write_failure_reports_old_connection_without_credentials(tmp_path, 
     diagnostic = str(err.value) + capsys.readouterr().err
     for private in ("first-key", "second-key", "private-error-marker"):
         assert private not in diagnostic
+
+
+def test_queue_save_preserves_evidence_and_existing_capture_on_failures(tmp_path, monkeypatch):
+    path = tmp_path / "unsynced.json"
+    monkeypatch.setattr(nmem_shared, "get_unsynced_queue_path", lambda: path)
+    path.write_text("partial-json")
+
+    def save(messages):
+        nmem_shared.save_unsynced_session("conv", messages, "title", "default", None)
+
+    save([{"content": "original"}])
+    assert next(tmp_path.glob("unsynced.corrupt-*.json")).read_text() == "partial-json"
+    snapshot = path.read_bytes()
+    save([])
+    assert path.read_bytes() == snapshot
+    with patch.object(os, "replace", side_effect=OSError("disk error")):
+        save([{"content": "new"}])
+    assert path.read_bytes() == snapshot
+
+
+def test_failed_replay_does_not_replace_pending_queue(tmp_path, monkeypatch):
+    path = tmp_path / "unsynced.json"
+    monkeypatch.setattr(nmem_shared, "get_unsynced_queue_path", lambda: path)
+    path.write_text('{"legacy": {"messages":[]}}')
+    previous = path.read_bytes()
+    nmem_shared.retry_unsynced_sessions()
+    assert path.read_bytes() == previous
+
+
+def test_queue_migration_preserves_corrupt_or_unwritable_backlogs(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    target = nmem_shared.get_unsynced_queue_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    old = tmp_path / ".nowledge-mem" / "antigravity_unsynced.json"
+    old.write_text("corrupt")
+    nmem_shared.get_unsynced_queue_path()
+    assert next(old.parent.glob("antigravity_unsynced.corrupt-*.json")).read_text() == "corrupt"
+    old.write_text('{"old":{}}')
+    target.write_text('{"new":{}}')
+    with patch.object(nmem_shared, "_write_json_atomic", side_effect=OSError("full")):
+        nmem_shared.get_unsynced_queue_path()
+    assert old.read_text() == '{"old":{}}'
+    assert target.read_text() == '{"new":{}}'
