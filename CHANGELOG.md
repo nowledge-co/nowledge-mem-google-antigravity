@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-21
+
+### Fixed
+- Bridge chat now verifies the requested sending role before using a mailbox and follows contact pages across authorized Spaces.
+
 ## [0.1.4] - 2026-11-20
 
 ### Added
