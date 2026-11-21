@@ -129,6 +129,7 @@ def main():
     # conversation and injects the startup context. PreInvocation (--pre-invocation) fires
     # before every model call, so it only syncs approved learning proposals lazily and never injects.
     pre_invocation = "--pre-invocation" in sys.argv[1:]
+    inject_steps = []
 
     try:
         hook_input = nmem_shared.read_hook_input()
@@ -163,6 +164,8 @@ def main():
         # rather than from the plugin directory used as the hook process cwd.
         try:
             nmem_shared.sync_mcp_config_file(cwd=workspace_root)
+        except nmem_shared.SpaceResolutionError as error:
+            inject_steps.append({"ephemeralMessage": nmem_shared.format_space_resolution_error(error)})
         except Exception:
             pass
 
@@ -177,9 +180,7 @@ def main():
             pass
 
         startup_context = read_startup_context(workspace_root)
-        if not startup_context:
-            nmem_shared.emit({})
-        else:
+        if startup_context:
             msg = (
                 f"<{startup_context['tag']}>\n"
                 f"Use this as current user context from Nowledge Mem {startup_context['label']}. "
@@ -188,11 +189,12 @@ def main():
                 f"</{startup_context['tag']}>"
             )
             # systemMessage stays in the conversation; ephemeralMessage is dropped after one model call.
-            nmem_shared.emit({"injectSteps": [{"systemMessage": {"systemMessage": msg}}]})
+            inject_steps.append({"systemMessage": {"systemMessage": msg}})
+        nmem_shared.emit({"injectSteps": inject_steps} if inject_steps else {})
     except nmem_shared.SpaceResolutionError as error:
-        nmem_shared.emit(
-            {"injectSteps": [{"systemMessage": {"systemMessage": nmem_shared.format_space_resolution_error(error)}}]}
-        )
+        if not inject_steps:
+            inject_steps.append({"systemMessage": {"systemMessage": nmem_shared.format_space_resolution_error(error)}})
+        nmem_shared.emit({"injectSteps": inject_steps} if inject_steps else {})
     except Exception as e:
         if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
             sys.stderr.write(f"Startup hook failed: {e}\n")

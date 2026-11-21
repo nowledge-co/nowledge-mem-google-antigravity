@@ -91,6 +91,9 @@ Release packaging notes live in [`RELEASING.md`](./RELEASING.md).
 
 - Local same-machine installs expose `nowledge-mem` MCP tools at `http://127.0.0.1:14242/mcp` automatically.
 - The startup hook automatically synchronizes `mcp_config.json` with effective client settings (`~/.nowledge-mem/config.json` or `NMEM_API_URL`/`NMEM_API_KEY`). For remote Mem, `mcp_config.json` is updated dynamically with the remote server URL and authentication headers (`Authorization: Bearer` and `X-NMEM-API-Key`).
+
+If the selected Space cannot be verified, startup removes the Mem connection from the generated MCP configuration and reports the lookup failure. Other MCP servers stay configured. Start a new session once the Space catalog is reachable to restore the verified connection.
+
 - The committed `mcp_config.json` is a local placeholder template. Do not commit a real `nmem_...` API key.
 
 **Persistent context rules**
@@ -166,6 +169,8 @@ nmem config mcp show --host google-antigravity
 
 Paste the generated JSON into Antigravity's custom MCP config (`~/.gemini/config/mcp_config.json` or modified raw via the MCP Store).
 
+
+MCP connections use the resolved Space, just like startup context and automatic thread saving. Restart the Antigravity session after changing its Space so the MCP connection reloads.
 
 ## Direct `nmem` Use Is Always Allowed
 
