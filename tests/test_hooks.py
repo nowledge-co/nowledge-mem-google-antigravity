@@ -2026,3 +2026,36 @@ def test_mcp_catalog_failure_preserves_previous_inferred_header(tmp_path, monkey
     with pytest.raises(nmem_shared.SpaceResolutionError):
         nmem_shared.sync_mcp_config_file(str(config), cwd=workspace)
     assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize("initial", [False, True])
+def test_hook_mcp_sync_refusal_keeps_startup_context_and_skips_tool_rounds(initial):
+    hook_input = {"conversationId": "fixture", "invocationNum": 0 if initial else 2, "initialNumSteps": 5}
+    context = {"tag": "nowledge_working_memory", "label": "legacy Working Memory file", "content": "local context"}
+    with (
+        patch("nmem_shared.read_hook_input", return_value=hook_input),
+        patch("nmem_shared.activate_hook_workspace", return_value=None),
+        patch("nmem_shared.sync_host_skills_async"),
+        patch(
+            "nmem_shared.sync_mcp_config_file", side_effect=nmem_shared.SpaceResolutionError("catalog unavailable")
+        ) as sync,
+        patch("nmem_shared.resolve_space", return_value="default"),
+        patch("nmem_shared.sync_learnings_if_any"),
+        patch("session_start.read_startup_context", return_value=context) as read_context,
+        patch("subprocess.Popen") as retry,
+        patch("nmem_shared.emit") as emit,
+        patch.object(sys, "argv", ["session-start.py"]),
+    ):
+        session_start.main()
+    if initial:
+        sync.assert_called_once()
+        read_context.assert_called_once()
+        retry.assert_called_once()
+        steps = emit.call_args.args[0]["injectSteps"]
+        assert "catalog unavailable" in steps[0]["ephemeralMessage"]
+        assert "local context" in steps[1]["ephemeralMessage"]
+    else:
+        sync.assert_not_called()
+        read_context.assert_not_called()
+        retry.assert_not_called()
+        emit.assert_called_once_with({})
