@@ -119,7 +119,7 @@ def test_host_agent_fingerprint(mock_gethostname, mock_getnode):
     assert fp.startswith("antigravity-")
 
 
-@patch("nmem_shared.resolve_space", return_value="personal")
+@patch("nmem_shared._mcp_space_id", return_value="personal")
 @patch("nmem_shared.get_effective_config")
 def test_sync_mcp_config_file(mock_get_effective_config, mock_resolve_space):
     mock_get_effective_config.return_value = ("https://mem.example.com", "nmem_sec_123")
@@ -138,7 +138,7 @@ def test_sync_mcp_config_file(mock_get_effective_config, mock_resolve_space):
         headers = data["mcpServers"]["nowledge-mem"]["headers"]
         assert headers["X-Nmem-Space-Id"] == "personal"
         assert "x-nmem-space-protocol" not in headers
-        mock_resolve_space.assert_called_once_with(None, validate_explicit=True)
+        mock_resolve_space.assert_called_once_with(None, ("https://mem.example.com", "nmem_sec_123"))
 
         # Second call should return False (already up to date)
         updated_again = nmem_shared.sync_mcp_config_file(tf_path)
@@ -1947,6 +1947,7 @@ def load_tests(loader, tests, pattern):
 def test_sync_mcp_space_change_and_validation(tmp_path, monkeypatch):
     config = tmp_path / "mcp.json"
     monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd: ("https://mem.example.com", None))
+    monkeypatch.setattr(nmem_shared, "http_request", lambda *args, **kwargs: [{"id": "personal"}, {"id": "work"}])
     monkeypatch.setenv("NMEM_SPACE", "personal")
     assert nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
     monkeypatch.setenv("NMEM_SPACE", "work")
@@ -1965,4 +1966,63 @@ def test_sync_mcp_space_change_and_validation(tmp_path, monkeypatch):
     before = config.read_bytes()
     with pytest.raises(nmem_shared.SpaceResolutionError):
         nmem_shared.sync_mcp_config_file(str(config), cwd=tmp_path)
+    assert config.read_bytes() == before
+
+
+def test_mcp_space_header_uses_canonical_id_and_preserves_unbound_policy(tmp_path, monkeypatch):
+    config = tmp_path / "mcp.json"
+    workspace = tmp_path / "unbound-project"
+    workspace.mkdir()
+    monkeypatch.delenv("NMEM_SPACE", raising=False)
+    monkeypatch.delenv("NMEM_SPACE_ID", raising=False)
+    monkeypatch.setattr(nmem_shared, "get_plugin_config", lambda: {})
+    monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd: ("https://mem.example.com", None))
+    monkeypatch.setattr(
+        nmem_shared,
+        "http_request",
+        lambda *args, **kwargs: [
+            {"id": "space-42", "name": "Research", "aliases": ["work"]},
+            {"id": "default"},
+        ],
+    )
+
+    def headers():
+        nmem_shared.sync_mcp_config_file(str(config), cwd=workspace)
+        return json.loads(config.read_text())["mcpServers"]["nowledge-mem"]["headers"]
+
+    assert "X-Nmem-Space-Id" not in headers()
+    monkeypatch.setattr(nmem_shared, "get_existing_spaces", lambda: [])
+    assert nmem_shared.resolve_space(workspace) == "default"
+
+    binding = workspace / ".nmemspace"
+    binding.write_text("work")
+    assert headers()["X-Nmem-Space-Id"] == "space-42"
+    binding.write_text("default")
+    assert headers()["X-Nmem-Space-Id"] == "default"
+    binding.unlink()
+    assert "X-Nmem-Space-Id" not in headers()
+
+
+def test_mcp_catalog_failure_preserves_previous_inferred_header(tmp_path, monkeypatch):
+    config = tmp_path / "mcp.json"
+    workspace = tmp_path / "research"
+    workspace.mkdir()
+    monkeypatch.delenv("NMEM_SPACE", raising=False)
+    monkeypatch.delenv("NMEM_SPACE_ID", raising=False)
+    monkeypatch.setattr(nmem_shared, "get_plugin_config", lambda: {})
+    monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd: ("https://mem.example.com", "fixture-key"))
+
+    def catalog(endpoint, *, client_config):
+        assert endpoint == "/spaces"
+        assert client_config == ("https://mem.example.com", "fixture-key")
+        return {"spaces": [{"id": "space-42", "name": "Research"}]}
+
+    monkeypatch.setattr(nmem_shared, "http_request", catalog)
+    assert nmem_shared.sync_mcp_config_file(str(config), cwd=workspace)
+    before = config.read_bytes()
+    assert json.loads(before)["mcpServers"]["nowledge-mem"]["headers"]["X-Nmem-Space-Id"] == "space-42"
+
+    monkeypatch.setattr(nmem_shared, "http_request", lambda *args, **kwargs: None)
+    with pytest.raises(nmem_shared.SpaceResolutionError):
+        nmem_shared.sync_mcp_config_file(str(config), cwd=workspace)
     assert config.read_bytes() == before

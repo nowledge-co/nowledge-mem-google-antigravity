@@ -476,6 +476,24 @@ def _read_explicit_workspace_space(target_dir: Path) -> str | None:
     return None
 
 
+def _matching_space_ids(space: str, spaces: list[dict]) -> set[str]:
+    expected = space.lower()
+    matches = set()
+    for item in spaces:
+        if not isinstance(item, dict):
+            continue
+        space_id = item.get("id")
+        if not isinstance(space_id, str) or not space_id.strip():
+            continue
+        aliases = item.get("aliases")
+        identifiers = [space_id, item.get("key"), item.get("name")]
+        if isinstance(aliases, list):
+            identifiers.extend(aliases)
+        if any(isinstance(value, str) and value.strip().lower() == expected for value in identifiers):
+            matches.add(space_id.strip())
+    return matches
+
+
 def _validate_explicit_workspace_space(space: str, target_dir: Path) -> None:
     existing_spaces = get_existing_spaces()
     if existing_spaces is None:
@@ -510,6 +528,10 @@ def validate_workspace_space_configuration(cwd: str | Path | None) -> None:
 
 
 def resolve_space(cwd: str | Path | None = None, *, validate_explicit: bool = False) -> str:
+    return _resolve_space_selection(cwd, validate_explicit=validate_explicit) or "default"
+
+
+def _resolve_space_selection(cwd: str | Path | None, *, validate_explicit: bool = False, mcp_spaces=None) -> str | None:
     """Resolve active space following priority:
     1. Explicit environment variables (NMEM_SPACE or NMEM_SPACE_ID)
     2. Local workspace configuration (<workspace_root>/.config.json)
@@ -567,28 +589,76 @@ def resolve_space(cwd: str | Path | None = None, *, validate_explicit: bool = Fa
         except Exception:
             pass
 
-    # 7. Dynamic space auto-detection from workspace directory
+    if mcp_spaces is None:
+        # 7. Dynamic space auto-detection from workspace directory
+        candidate = target_dir.name.strip()
+        if not candidate or candidate.lower() == "default":
+            return None
+
+        # Check if candidate space exists on backend
+        existing_spaces = get_existing_spaces()
+        if existing_spaces is not None:
+            cand_lower = candidate.lower()
+            for space_obj in existing_spaces:
+                if not isinstance(space_obj, dict):
+                    continue
+                s_id = str(space_obj.get("id", "")).strip()
+                s_key = str(space_obj.get("key", "")).strip()
+                s_name = str(space_obj.get("name", "")).strip()
+                aliases = [str(a).strip().lower() for a in space_obj.get("aliases", []) if a]
+
+                if cand_lower in (s_id.lower(), s_key.lower(), s_name.lower()) or cand_lower in aliases:
+                    return s_id or s_key or candidate
+
+        # 6. Dynamically detected space does not exist on backend and user has not explicitly set project space -> fall back to default
+        return None
+
+    # 7. Infer a Space only when the workspace name matches the catalog.
     candidate = target_dir.name.strip()
     if not candidate or candidate.lower() == "default":
-        return "default"
+        return None
+    existing_spaces = mcp_spaces()
+    if existing_spaces is None:
+        raise SpaceResolutionError("Cannot verify the workspace's inferred MCP Space on the connected server")
+    if existing_spaces:
+        matches = _matching_space_ids(candidate, existing_spaces)
+        if len(matches) == 1:
+            return next(iter(matches))
+        if matches:
+            raise SpaceResolutionError(f"MCP Space '{candidate}' matches more than one ID")
+    return None
 
-    # Check if candidate space exists on backend
-    existing_spaces = get_existing_spaces()
-    if existing_spaces is not None:
-        cand_lower = candidate.lower()
-        for space_obj in existing_spaces:
-            if not isinstance(space_obj, dict):
-                continue
-            s_id = str(space_obj.get("id", "")).strip()
-            s_key = str(space_obj.get("key", "")).strip()
-            s_name = str(space_obj.get("name", "")).strip()
-            aliases = [str(a).strip().lower() for a in space_obj.get("aliases", []) if a]
 
-            if cand_lower in (s_id.lower(), s_key.lower(), s_name.lower()) or cand_lower in aliases:
-                return s_id or s_key or candidate
+def _mcp_space_id(cwd: str | Path | None, client_config: tuple[str, str | None]) -> str | None:
+    # Look up IDs on the same endpoint and credentials written into this file.
+    # The hook catalog cache is shared and can belong to a different workspace.
+    catalog = None
+    fetched = False
 
-    # 6. Dynamically detected space does not exist on backend and user has not explicitly set project space -> fall back to default
-    return "default"
+    def fetch_spaces():
+        nonlocal catalog, fetched
+        if not fetched:
+            fetched = True
+            result = http_request("/spaces", client_config=client_config)
+            if isinstance(result, dict):
+                result = result.get("spaces", result.get("items"))
+            if isinstance(result, list):
+                catalog = result
+        return catalog
+
+    selected = _resolve_space_selection(cwd, mcp_spaces=fetch_spaces)
+    if selected is None or selected == "default":
+        return selected
+
+    spaces = fetch_spaces()
+    if spaces is not None:
+        exact_ids = {item.get("id") for item in spaces if isinstance(item, dict) and isinstance(item.get("id"), str)}
+        if selected in exact_ids:
+            return selected
+        matches = _matching_space_ids(selected, spaces)
+        if len(matches) == 1:
+            return next(iter(matches))
+    raise SpaceResolutionError(f"Cannot resolve MCP Space '{selected}' to a unique ID on the connected server")
 
 
 def sync_mcp_config_file(mcp_config_path: str = None, cwd: str | Path | None = None) -> bool:
@@ -603,10 +673,10 @@ def sync_mcp_config_file(mcp_config_path: str = None, cwd: str | Path | None = N
     clean_url = api_url.rstrip("/")
     server_url = f"{clean_url}/mcp/"
 
-    headers = {
-        "APP": "Google Antigravity",
-        "X-Nmem-Space-Id": resolve_space(cwd, validate_explicit=True),
-    }
+    headers = {"APP": "Google Antigravity"}
+    space_id = _mcp_space_id(cwd, (api_url, api_key))
+    if space_id is not None:
+        headers["X-Nmem-Space-Id"] = space_id
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
         headers["X-NMEM-API-Key"] = api_key
@@ -662,6 +732,7 @@ def http_request(
     payload: dict | None = None,
     timeout: float = 1.5,
     skip_circuit_breaker: bool = False,
+    client_config: tuple[str, str | None] | None = None,
 ) -> dict | None:
     """Make a direct HTTP request to the Nowledge Mem backend using httpx prior to CLI fallback."""
     import urllib.error
@@ -675,8 +746,8 @@ def http_request(
     if not skip_circuit_breaker and is_backend_unreachable():
         return None
 
-    api_url, api_key = get_effective_config()
-    url = f"{api_url}{endpoint}"
+    api_url, api_key = client_config if client_config is not None else get_effective_config()
+    url = f"{api_url.rstrip('/')}{endpoint}"
 
     headers = {"Content-Type": "application/json", "APP": "Google Antigravity"}
     if api_key:
@@ -690,7 +761,7 @@ def http_request(
             if resp.status_code in (200, 201):
                 reset_backend_unreachable()
                 return resp.json() if resp.text else {}
-            elif resp.status_code in (401, 403):
+            elif resp.status_code in (401, 403) and client_config is None:
                 api_url, api_key = get_effective_config()
                 url = f"{api_url}{endpoint}"
                 if api_key:
@@ -714,7 +785,7 @@ def http_request(
                 body = resp.read().decode("utf-8")
                 return json.loads(body) if body else {}
     except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
+        if e.code in (401, 403) and client_config is None:
             if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                 sys.stderr.write("Authorization failure (401/403). Retrying with reloaded config...\n")
             api_url, api_key = get_effective_config()

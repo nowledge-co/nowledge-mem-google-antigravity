@@ -140,18 +140,22 @@ def main():
         initial_num_steps = hook_input.get("initialNumSteps")
         workspace_root = nmem_shared.activate_hook_workspace(hook_input)
 
-        # Synchronize the MCP transport from this workspace's configuration,
-        # rather than from the plugin directory used as the hook process cwd.
-        try:
-            nmem_shared.sync_mcp_config_file(cwd=workspace_root)
-        except Exception:
-            pass
-
         # Only run startup injection on the very first invocation.
         # Supports both 0-indexed and 1-indexed runtimes.
         is_first = (invocation_num == 0) or (
             invocation_num == 1 and (initial_num_steps is None or initial_num_steps <= 2)
         )
+
+        if is_first or invocation_num is None:
+            try:
+                nmem_shared.sync_mcp_config_file(cwd=workspace_root)
+            except nmem_shared.SpaceResolutionError as error:
+                nmem_shared.emit(
+                    {"injectSteps": [{"ephemeralMessage": nmem_shared.format_space_resolution_error(error)}]}
+                )
+                return
+            except OSError:
+                pass
 
         if is_first:
             try:
