@@ -359,6 +359,8 @@ def test_retry_unsynced_sessions_reconciles_existing_thread_prefix(mock_http, mo
         assert mock_http.call_args_list[1].args[0] == "/threads/conv-1/reconcile-tail"
         payload = mock_http.call_args_list[1].kwargs["payload"]
         assert payload["matched_count"] == 1
+        assert payload["space_id"] == "default"
+        assert "space" not in payload
         assert payload["messages"] == [{"role": "assistant", "content": "Saved."}]
         mock_run.assert_not_called()
         assert not queue_file.exists()
@@ -1034,6 +1036,8 @@ def test_session_end_reconciles_existing_thread_prefix(
     assert mock_http.call_args_list[1].args[0] == "/threads/conv-prefix/reconcile-tail"
     payload = mock_http.call_args_list[1].kwargs["payload"]
     assert payload["matched_count"] == 1
+    assert payload["space_id"] == "default"
+    assert "space" not in payload
     assert payload["messages"] == [{"role": "assistant", "content": "Saved."}]
     mock_run.assert_not_called()
     mock_save.assert_not_called()

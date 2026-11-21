@@ -1126,7 +1126,7 @@ def retry_unsynced_sessions() -> None:
                         elif matched_count > 0:
                             rec_payload = {"matched_count": matched_count, "messages": messages[matched_count:]}
                             if space:
-                                rec_payload["space"] = space
+                                rec_payload["space_id"] = space
                             rec_res = http_request(
                                 f"/threads/{conv_id}/reconcile-tail", method="POST", payload=rec_payload, timeout=2.5
                             )

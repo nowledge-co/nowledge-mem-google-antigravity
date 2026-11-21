@@ -129,7 +129,7 @@ def main():
                     if matched_count > 0:
                         rec_payload = {"matched_count": matched_count, "messages": messages[matched_count:]}
                         if space:
-                            rec_payload["space"] = space
+                            rec_payload["space_id"] = space
                         rec_res = nmem_shared.http_request(
                             f"/threads/{conversation_id}/reconcile-tail",
                             method="POST",
