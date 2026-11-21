@@ -187,8 +187,8 @@ async function main() {
 
       if (relPath === 'rules/nowledge-mem.md') {
         const fmMatch = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-        if (!fmMatch || !/^trigger:\s*(always_on|model_decision|glob|manual)\s*$/m.test(fmMatch[1])) {
-          fail('rules/nowledge-mem.md must include a valid frontmatter trigger (always_on, model_decision, glob, or manual)');
+        if (!fmMatch || !/^trigger:\s*always_on\s*$/m.test(fmMatch[1])) {
+          fail('rules/nowledge-mem.md must declare trigger: always_on in its frontmatter');
         }
       }
 
