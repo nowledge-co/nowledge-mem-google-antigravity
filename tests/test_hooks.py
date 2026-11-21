@@ -1772,8 +1772,14 @@ def test_bridge_skill_commands_keep_the_selected_inbox_scope():
     connect = [prefix[0], "--json", "bridge", "connections", "connect"]
     assert [*connect, "--space-id=$bridge_space_id", "--agent-id=$agent_id"] in examples
     for response_field in (
-        "messages[].message", "open_args", "reply_args_prefix", "incomplete",
-        "agent_context", "next_args", "spaces[].next_args", "spaces_next_args",
+        "messages[].message",
+        "open_args",
+        "reply_args_prefix",
+        "incomplete",
+        "agent_context",
+        "next_args",
+        "spaces[].next_args",
+        "spaces_next_args",
     ):
         assert f"`{response_field}`" in guide
 
