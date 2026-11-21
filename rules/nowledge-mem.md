@@ -1,4 +1,5 @@
 ---
+trigger: always_on
 description: Rules for using Nowledge Mem context, working memory, memories, threads, and skills.
 ---
 
