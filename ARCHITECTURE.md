@@ -8,6 +8,8 @@ This document details the internal architecture, execution dynamics, transport h
 
 The plugin bridges **Google Antigravity** with **Nowledge Mem** via a hybrid multi-layer transport architecture:
 
+`rules/nowledge-mem.md` declares `trigger: always_on`; rule activation is separate from lifecycle hook execution. Without a valid trigger, Antigravity does not apply the rule even when hooks and skills load.
+
 ```mermaid
 flowchart TD
     subgraph Antigravity Engine ["Google Antigravity 2.0 Engine"]

@@ -13,6 +13,8 @@ It is deliberately **hybrid**:
 
 The recommended setup is simple and stable: Google Antigravity on top, MCP for direct retrieval tools, and `nmem` for hooks, thread save, remote auth, and command fallback.
 
+The bundled memory rule uses `trigger: always_on` so Antigravity applies its guidance throughout the conversation.
+
 ## Requirements
 
 - [Google Antigravity 2.0](https://antigravity.google)

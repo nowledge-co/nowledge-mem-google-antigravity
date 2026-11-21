@@ -1,11 +1,19 @@
 {
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "nowledge-mem-google-antigravity",
+  "displayName": "Nowledge Mem",
   "version": "0.1.4",
-  "description": "Google Antigravity plugin for Nowledge Mem with startup context, memory rules, and agent skills.",
+  "description": "Persistent personal knowledge graph for Antigravity with startup context, distilled memories, thread capture, and skills.",
+  "logo": "assets/logo.png",
+  "suggestedPrompts": [
+    "Search my Nowledge Mem for recent decisions and context on this project",
+    "Check my Nowledge Mem connection status and active workspace space",
+    "Distill key insights from this session into Nowledge Mem"
+  ],
   "author": {
     "name": "Nowledge Co",
-    "email": "hello@nowledge.co"
+    "email": "hello@nowledge.co",
+    "url": "https://nowledge.co"
   },
   "homepage": "https://mem.nowledge.co/docs/integrations/google-antigravity",
   "repository": "https://github.com/nowledge-co/nowledge-mem-google-antigravity.git",

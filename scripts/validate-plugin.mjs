@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -19,9 +19,65 @@ async function readJson(filePath) {
   return JSON.parse(text);
 }
 
-function assertString(value, label) {
+function assertNonEmptyString(value, label) {
   if (typeof value !== 'string' || value.trim() === '') {
-    fail(`${label} must be a non-empty string`);
+    throw new Error(`${label} must be a non-empty string`);
+  }
+}
+
+export async function validateManifest(manifest, rootDir = pluginRoot) {
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error('manifest must be a JSON object');
+  }
+
+  assertNonEmptyString(manifest.name, 'manifest.name');
+  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(manifest.name)) {
+    throw new Error(`manifest.name (${manifest.name}) must be lowercase kebab-case matching ^[a-z0-9]+(-[a-z0-9]+)*$`);
+  }
+  assertNonEmptyString(manifest.displayName, 'manifest.displayName');
+  assertNonEmptyString(manifest.version, 'manifest.version');
+  assertNonEmptyString(manifest.description, 'manifest.description');
+  if (manifest.repository !== undefined) assertNonEmptyString(manifest.repository, 'manifest.repository');
+
+  if (
+    !Array.isArray(manifest.suggestedPrompts) ||
+    manifest.suggestedPrompts.length < 1 ||
+    manifest.suggestedPrompts.length > 3 ||
+    manifest.suggestedPrompts.some((p) => typeof p !== 'string' || p.trim() === '')
+  ) {
+    throw new Error('manifest.suggestedPrompts must be an array of 1 to 3 non-empty strings');
+  }
+
+  assertNonEmptyString(manifest.logo, 'manifest.logo');
+  if (manifest.logo.startsWith('/') || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(manifest.logo)) {
+    throw new Error('manifest.logo must be a relative path inside the plugin');
+  }
+  const resolvedRoot = path.resolve(rootDir);
+  const resolvedLogo = path.resolve(resolvedRoot, manifest.logo);
+  if (resolvedLogo !== resolvedRoot && !resolvedLogo.startsWith(resolvedRoot + path.sep)) {
+    throw new Error('manifest.logo must stay inside the plugin directory');
+  }
+  if (!/\.(png|svg|jpe?g|webp)$/i.test(manifest.logo)) {
+    throw new Error('manifest.logo must point to a .png, .svg, .jpg, .jpeg, or .webp file');
+  }
+  try {
+    await access(resolvedLogo);
+  } catch {
+    throw new Error(`manifest.logo file does not exist: ${manifest.logo}`);
+  }
+
+  if (typeof manifest.author === 'string') {
+    assertNonEmptyString(manifest.author, 'manifest.author');
+  } else if (manifest.author && typeof manifest.author === 'object' && !Array.isArray(manifest.author)) {
+    assertNonEmptyString(manifest.author.name, 'manifest.author.name');
+    if (manifest.author.email !== undefined) {
+      assertNonEmptyString(manifest.author.email, 'manifest.author.email');
+    }
+    if (manifest.author.url !== undefined) {
+      assertNonEmptyString(manifest.author.url, 'manifest.author.url');
+    }
+  } else {
+    throw new Error('manifest.author must be a non-empty string or an object with a non-empty name');
   }
 }
 
@@ -37,11 +93,10 @@ async function main() {
   const packageJson = await readJson(packageJsonPath);
   const pluginDirName = path.basename(pluginRoot);
 
-  assertString(manifest.name, 'manifest.name');
-  assertString(manifest.version, 'manifest.version');
-  assertString(manifest.description, 'manifest.description');
-  if (manifest.repository !== undefined) {
-    assertString(manifest.repository, 'manifest.repository');
+  try {
+    await validateManifest(manifest, pluginRoot);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
   }
 
   let isWorktree = pluginRoot.includes('/worktrees/') || pluginRoot.includes('\\worktrees\\');
@@ -84,6 +139,7 @@ async function main() {
 
   const requiredPaths = [
     'plugin.json',
+    'assets/logo.png',
     'mcp_config.json',
     'hooks.json',
     'package.json',
@@ -131,6 +187,13 @@ async function main() {
         fail(`${relPath} must not be empty`);
       }
 
+      if (relPath === 'rules/nowledge-mem.md') {
+        const fmMatch = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+        if (!fmMatch || !/^trigger:\s*always_on\s*$/m.test(fmMatch[1])) {
+          fail('rules/nowledge-mem.md must declare trigger: always_on in its frontmatter');
+        }
+      }
+
       if (relPath === 'hooks.json') {
         const hooksConfig = JSON.parse(text);
         if (
@@ -157,6 +220,34 @@ async function main() {
 
   console.log('Validated Google Antigravity plugin manifest, config files, and required release files.');
 
+  const agyCheck = spawnSync('agy', ['plugin', 'validate', '--json', '.'], {
+    cwd: pluginRoot,
+    encoding: 'utf8'
+  });
+  if (agyCheck.error) {
+    if (agyCheck.error.code !== 'ENOENT') {
+      fail(`agy plugin validate failed to run: ${agyCheck.error.message}`);
+    }
+  } else if (agyCheck.stdout) {
+    try {
+      const report = JSON.parse(agyCheck.stdout);
+      const unexpected = (report.findings || []).filter(
+        (f) => f.severity === 'error' || (f.severity === 'warning' && f.file !== 'AGENTS.md')
+      );
+      if (unexpected.length > 0) {
+        console.error(agyCheck.stdout);
+        fail(`agy plugin validate reported ${unexpected.length} error/warning finding(s)`);
+      }
+      console.log('agy plugin validate passed (ignoring expected repo-root AGENTS.md warning).');
+    } catch {
+      if (agyCheck.status !== 0) {
+        fail(`agy plugin validate failed: ${agyCheck.stderr || agyCheck.stdout}`);
+      }
+    }
+  } else if (agyCheck.status !== 0) {
+    fail(`agy plugin validate failed: ${agyCheck.stderr || `exit status ${agyCheck.status}`}`);
+  }
+
   console.log('Running pre-commit static analysis...');
   const precommitProc = spawnSync('uv', ['run', 'pre-commit', 'run', '--all-files'], {
     cwd: pluginRoot,
@@ -172,6 +263,15 @@ async function main() {
     }
   }
 
+
+  console.log('Running validator unit tests...');
+  const validatorTestProc = spawnSync(process.execPath, ['--test', 'tests/test_validate_plugin.mjs'], {
+    cwd: pluginRoot,
+    stdio: 'inherit'
+  });
+  if (validatorTestProc.status !== 0) {
+    fail('Validator unit tests failed.');
+  }
 
   console.log('Running hooks unit test suite...');
 
@@ -198,4 +298,6 @@ async function main() {
 
 }
 
-await main();
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await main();
+}
