@@ -89,7 +89,7 @@ Release packaging notes live in [`RELEASING.md`](./RELEASING.md).
 
 **Bundled MCP**
 
-- Local same-machine installs expose `nowledge-mem` MCP tools at `http://127.0.0.1:14242/mcp/` automatically.
+- Local same-machine installs expose `nowledge-mem` MCP tools at `http://127.0.0.1:14242/mcp` automatically.
 - The startup hook automatically synchronizes `mcp_config.json` with effective client settings (`~/.nowledge-mem/config.json` or `NMEM_API_URL`/`NMEM_API_KEY`). For remote Mem, `mcp_config.json` is updated dynamically with the remote server URL and authentication headers (`Authorization: Bearer` and `X-NMEM-API-Key`).
 
 If the selected Space cannot be verified, startup removes the Mem connection from the generated MCP configuration and reports the lookup failure. Other MCP servers stay configured. Start a new session once the Space catalog is reachable to restore the verified connection.
@@ -104,6 +104,7 @@ If the selected Space cannot be verified, startup removes the Mem connection fro
 
 - `nmem-bridge-chat`
 - `nmem-fs-explore`
+- `nmem-graph-explore`
 - `nmem-memory-distill`
 - `nmem-memory-search`
 - `nmem-memory-working`
@@ -230,3 +231,5 @@ make validate
 - [Nowledge Mem](https://mem.nowledge.co)
 - [Discord](https://nowled.ge/discord)
 - [GitHub](https://github.com/nowledge-co/nowledge-mem-google-antigravity)
+
+Pending captures are tied to the Mem endpoint and credentials used by the Stop hook. Restore that connection to resume automatic retries. Older queue entries without a recorded connection remain on disk in the plugin storage directory (`unsynced.json`). Inspect their destination before manually importing them.

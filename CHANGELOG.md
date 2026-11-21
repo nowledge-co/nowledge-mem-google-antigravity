@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-21
+
+- Adds the graph exploration skill and updates search and Space guidance.
+- Routes MCP through the configured Space on the selected server. Unresolved Space selections produce a diagnostic.
+- Checks the complete captured prefix before writing a transcript tail and keeps refused updates pending.
+- Keeps queued sessions with their originating connection and requests confirmation for ambiguous entity alias changes.
+
 ## [0.1.5] - 2026-11-21
 
 ### Fixed

@@ -138,6 +138,7 @@ When authoring or modifying skills under `skills/`, follow these principles:
   - **Memory Domain**: `nmem-memory-search`, `nmem-memory-distill`, `nmem-memory-working`
   - **Thread Domain**: `nmem-thread-save`, `nmem-thread-handoff`
   - **Filesystem Domain**: `nmem-fs-explore`
+  - **Graph Domain**: `nmem-graph-explore`
   - **System Domain**: `nmem-status`
   Slash command triggers must align with the skill name (e.g. `/nmem-skill-load <query>`, `/nmem-thread-save`).
 * **YAML Frontmatter Trigger Matching**: Every `SKILL.md` must start with a YAML frontmatter block containing:

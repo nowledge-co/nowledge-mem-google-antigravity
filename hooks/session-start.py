@@ -127,7 +127,7 @@ def main():
 
     # hooks.json runs this module for two events. SessionStart (no flag) fires once per
     # conversation and injects the startup context. PreInvocation (--pre-invocation) fires
-    # before every model call, so it only syncs and never injects.
+    # before every model call, so it only syncs approved learning proposals lazily and never injects.
     pre_invocation = "--pre-invocation" in sys.argv[1:]
     inject_steps = []
 
@@ -140,8 +140,9 @@ def main():
 
         if pre_invocation:
             try:
-                space = nmem_shared.resolve_space(workspace_root, validate_explicit=True)
-                nmem_shared.sync_learnings_if_any(conversation_id, transcript_path, artifact_directory_path, space)
+                nmem_shared.sync_learnings_if_any(
+                    conversation_id, transcript_path, artifact_directory_path, space=None, workspace_root=workspace_root
+                )
             except nmem_shared.SpaceResolutionError as error:
                 nmem_shared.emit(
                     {"injectSteps": [{"ephemeralMessage": nmem_shared.format_space_resolution_error(error)}]}
@@ -190,8 +191,9 @@ def main():
             # systemMessage stays in the conversation; ephemeralMessage is dropped after one model call.
             inject_steps.append({"systemMessage": {"systemMessage": msg}})
         nmem_shared.emit({"injectSteps": inject_steps} if inject_steps else {})
-    except nmem_shared.SpaceResolutionError:
-        # PreInvocation reports errors from its own Space resolution.
+    except nmem_shared.SpaceResolutionError as error:
+        if not inject_steps:
+            inject_steps.append({"systemMessage": {"systemMessage": nmem_shared.format_space_resolution_error(error)}})
         nmem_shared.emit({"injectSteps": inject_steps} if inject_steps else {})
     except Exception as e:
         if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
