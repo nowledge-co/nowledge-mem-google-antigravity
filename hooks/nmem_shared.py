@@ -1020,6 +1020,19 @@ def http_request(
 
 def _nmem_command() -> str | None:
     candidate = shutil.which("nmem") or shutil.which("nmem.cmd")
+    if os.name == "nt" and (not candidate or candidate.lower().endswith((".cmd", ".bat"))):
+        native = shutil.which("nmem.exe")
+        if not native and os.environ.get("LOCALAPPDATA"):
+            app = Path(os.environ["LOCALAPPDATA"]) / "Nowledge Mem"
+            for path in (
+                app / "_up_" / "rust-backend" / "nmem.exe",
+                app / "rust-backend" / "nmem.exe",
+                app / "nmem.exe",
+            ):
+                if path.is_file():
+                    native = str(path)
+                    break
+        candidate = native or candidate
     if candidate:
         try:
             resolved = Path(candidate).resolve()
@@ -1063,6 +1076,8 @@ def _cmd_exe_path(path: str) -> str:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     text=True,
+                    encoding="utf-8",
+                    errors="strict",
                     timeout=2,
                     check=False,
                 )
@@ -1077,15 +1092,25 @@ def _cmd_exe_path(path: str) -> str:
     return "nmem.cmd" if Path(path).name.lower() == "nmem.cmd" else path
 
 
-def _build_nmem_command(nmem: str, *args: str) -> list[str]:
-    if nmem.lower().endswith(".cmd"):
-        return [
-            "cmd.exe",
-            "/s",
-            "/c",
-            subprocess.list2cmdline([_cmd_exe_path(nmem), *args]),
-        ]
-    return [nmem, *args]
+def _build_nmem_command(nmem: str, *args: str) -> list[str] | str:
+    if nmem.lower().endswith((".cmd", ".bat")):
+        words = [_cmd_exe_path(nmem), *args]
+        # A batch wrapper reparses its arguments when it forwards %*. Avoid
+        # passing shell syntax or environment substitutions through either parse.
+        if any(re.search(r"[&|<>^%!()\r\n]", word) for word in words):
+            raise ValueError("This argument requires native nmem.exe")
+        line = '"' + subprocess.list2cmdline(words) + '"'
+        if len(line.encode("utf-16-le")) // 2 + 1 > 8191:
+            raise ValueError("Capture exceeds the Windows batch command limit")
+        if os.name == "nt":
+            # Pass /c its original quotation marks; Python would escape them a
+            # second time if it converted this final command from a list.
+            return "cmd.exe /d /v:off /s /c " + line
+        return ["cmd.exe", "/d", "/v:off", "/s", "/c", line]
+    command = [nmem, *args]
+    if os.name == "nt" and len(subprocess.list2cmdline(command).encode("utf-16-le")) // 2 >= 32767:
+        raise ValueError("Capture exceeds the Windows native command limit")
+    return command
 
 
 def run_nmem_command(
@@ -1104,7 +1129,7 @@ def run_nmem_command(
     if not nmem:
         raise FileNotFoundError("nowledge-mem: nmem command not found in PATH")
 
-    is_cmd = nmem.lower().endswith(".cmd")
+    is_cmd = nmem.lower().endswith((".cmd", ".bat"))
 
     processed_args = []
     for arg in args:
@@ -1153,6 +1178,8 @@ def run_nmem_command(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=run_env,
         cwd=cwd,
         timeout=timeout,
@@ -1353,7 +1380,7 @@ def get_unsynced_sessions() -> dict:
 
 def build_cli_thread_append_args(thread_id: str, messages: list[dict]) -> list[str]:
     """Build supported `nmem t append` CLI arguments (no `--space` flag on append)."""
-    return ["t", "append", thread_id, "-m", json.dumps(messages)]
+    return ["t", "append", thread_id, "-m", json.dumps(messages, ensure_ascii=False, separators=(",", ":"))]
 
 
 def build_cli_thread_create_args(
@@ -1368,7 +1395,7 @@ def build_cli_thread_create_args(
         "-t",
         title,
         "-m",
-        json.dumps(messages),
+        json.dumps(messages, ensure_ascii=False, separators=(",", ":")),
         "-s",
         "google-antigravity",
     ]
@@ -1476,6 +1503,27 @@ def spaces_match(expected_space: str, actual_space_id: str | None) -> bool:
     return False
 
 
+def _capture_prefix(detail, conv_id, messages, space):
+    """Count verified persisted messages, or return None on identity/scope/content conflict."""
+    if not _is_http_ok(detail):
+        return None
+    thread = detail.get("thread", detail)
+    if not isinstance(thread, dict) or (thread.get("thread_id") or thread.get("id")) != conv_id:
+        return None
+    if space and not spaces_match(space, extract_thread_space_id(detail)):
+        return None
+    rows = detail.get("messages", thread.get("messages"))
+    if not isinstance(rows, list):
+        return None
+    total = detail.get("total_messages", len(rows))
+    if not isinstance(total, int) or total < len(rows) or len(rows) < min(total, len(messages)):
+        return None
+    for old, new in zip(rows, messages):
+        if not isinstance(old, dict) or (old.get("role"), old.get("content")) != (new["role"], new["content"]):
+            return None
+    return min(len(messages), len(rows))
+
+
 def sync_thread_capture(
     conv_id: str,
     title: str,
@@ -1503,6 +1551,11 @@ def sync_thread_capture(
             check_res.get("id") or check_res.get("thread_id") or "messages" in check_res or "thread" in check_res
         ):
             http_handled = True
+            thread = check_res.get("thread", check_res)
+            if isinstance(thread, dict):
+                returned_id = thread.get("thread_id") or thread.get("id")
+                if returned_id is not None and returned_id != conv_id:
+                    return False, True
             res_space = extract_thread_space_id(check_res)
             if space and res_space is not None and not spaces_match(space, res_space):
                 return False, True
@@ -1582,7 +1635,11 @@ def sync_thread_capture(
                 include_error_response=True,
             )
             if _is_http_ok(create_res):
-                return True, True
+                separator = "&" if "?" in lookup_endpoint else "?"
+                persisted = http_request(
+                    f"{lookup_endpoint}{separator}limit={len(messages)}", method="GET", timeout=2.5
+                )
+                return _capture_prefix(persisted, conv_id, messages, space) == len(messages), True
             return False, True
         elif isinstance(check_res, dict):
             return False, True
@@ -1593,7 +1650,7 @@ def sync_thread_capture(
         return False, True
 
     # CLI Fallback (only when HTTP transport yielded None / could not complete)
-    check_args = ["t", "show", conv_id]
+    check_args = ["--json", "t", "show", conv_id, "--limit", str(len(messages))]
     if space:
         check_args.extend(["--space", space])
 
@@ -1602,6 +1659,12 @@ def sync_thread_capture(
     try:
         result = run_nmem_command(check_args, timeout=2.0)
         if result.returncode == 0:
+            prefix = _capture_prefix(json.loads(result.stdout), conv_id, messages, space)
+            if prefix is None:
+                return False, True
+            if prefix == len(messages):
+                return True, True
+            matched_count = prefix
             thread_exists = True
         elif is_cli_thread_not_found(result):
             thread_not_found = True
@@ -1641,7 +1704,11 @@ def sync_thread_capture(
                 else run_nmem_command(create_args, timeout=3.0)
             )
             if result.returncode == 0:
-                return True, True
+                verified = run_nmem_command(check_args, timeout=2.0)
+                return (
+                    verified.returncode == 0
+                    and _capture_prefix(json.loads(verified.stdout), conv_id, messages, space) == len(messages)
+                ), True
         except Exception as e:
             if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                 sys.stderr.write(f"nmem t create execution failed: {e}\n")
@@ -1670,8 +1737,11 @@ def retry_unsynced_sessions() -> None:
             updated_queue = dict(queue)
             for queue_key, data in queue.items():
                 conv_id = data.get("conversation_id", queue_key)
+                if data.get("messages") == []:
+                    del updated_queue[queue_key]
+                    continue
                 if is_backend_unreachable():
-                    break
+                    continue
 
                 messages = data.get("messages", [])
                 title = data.get("title", f"Antigravity Session {conv_id[:8]}")

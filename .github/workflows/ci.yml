@@ -88,3 +88,4 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install pytest httpx
       - run: python -m pytest -v tests/test_windows_cli.py tests/test_host_compat.py
+      - run: python -m pytest -v tests/test_hooks.py -k "loopback or readback or cli_replay"

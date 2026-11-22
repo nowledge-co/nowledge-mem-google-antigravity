@@ -94,9 +94,10 @@ def test_build_nmem_command(mock_cmd_path):
 
     # Windows cmd path
     cmd = nmem_shared._build_nmem_command("C:\\bin\\nmem.cmd", "t", "show")
-    assert cmd[0] == "cmd.exe"
-    assert cmd[1] == "/s"
-    assert cmd[2] == "/c"
+    if os.name == "nt":
+        assert cmd.startswith("cmd.exe /d /v:off /s /c ")
+    else:
+        assert cmd[:5] == ["cmd.exe", "/d", "/v:off", "/s", "/c"]
 
 
 @patch("nmem_shared._nmem_command")
@@ -317,6 +318,7 @@ def test_retry_unsynced_sessions_success_unlinks_queue(mock_http):
         mock_http.side_effect = [
             {"status": 404, "detail": "Thread not found"},
             {"id": "conv-1", "title": "Title"},
+            {"id": "conv-1", "space_id": "default", "messages": [{"role": "user", "content": "hi"}]},
         ]
         assert queue_file.exists()
         nmem_shared.retry_unsynced_sessions()
@@ -1083,7 +1085,15 @@ def test_session_end_captures_a_utf8_payload_whatever_the_stdin_encoding(
     )
     hook_input = {"conversationId": "conv-utf8", "transcriptPath": str(transcript), "fullyIdle": True}
     raw = json.dumps(hook_input, ensure_ascii=False).encode("utf-8")
-    mock_http.side_effect = [{"status": 404, "detail": "Thread not found"}, {"status": "ok"}]
+    mock_http.side_effect = [
+        {"status": 404, "detail": "Thread not found"},
+        {"status": "ok"},
+        {
+            "thread_id": "conv-utf8",
+            "space_id": "default",
+            "messages": [{"role": "user", "content": "Save this"}, {"role": "assistant", "content": "Saved."}],
+        },
+    ]
     with (
         patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(raw), encoding="gbk")),
         patch("sys.stdout.write"),
@@ -2217,11 +2227,11 @@ def test_session_end_and_retry_cli_append_omit_space_flag(tmp_path):
         patch.object(nmem_shared, "sync_learnings_if_any"),
         patch.object(nmem_shared, "emit"),
     ):
-        mock_run.return_value = MagicMock(returncode=0, stdout="{}")
+        mock_run.return_value = MagicMock(returncode=0, stdout='{"id":"conv-append-1","messages":[]}')
         session_end.main()
         show_call = mock_run.call_args_list[0].args[0]
         append_call = mock_run.call_args_list[1].args[0]
-        assert show_call == ["t", "show", "conv-append-1"]
+        assert show_call == ["--json", "t", "show", "conv-append-1", "--limit", "1"]
         assert append_call[:3] == ["t", "append", "conv-append-1"]
         assert "--space" not in append_call
 
@@ -2507,6 +2517,7 @@ def test_loopback_http_capture_404_create_and_identical_scope_guard(tmp_path, di
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
+                mode["state"] = "matching_space_identical"
                 self.wfile.write(json.dumps({"thread": {"thread_id": payload["thread_id"]}}).encode("utf-8"))
                 return
             self.send_response(404)
@@ -2554,6 +2565,7 @@ def test_loopback_http_capture_404_create_and_identical_scope_guard(tmp_path, di
             assert [r[:2] for r in recorded_requests] == [
                 ("GET", "/threads/conv%2F1?space_id=work%20space"),
                 ("POST", "/threads"),
+                ("GET", "/threads/conv%2F1?space_id=work%20space&limit=1"),
             ]
             post_payload = recorded_requests[1][2]
             assert post_payload is not None
@@ -2936,7 +2948,9 @@ def test_pending_capture_replays_only_for_original_account(tmp_path, monkeypatch
     monkeypatch.setattr(nmem_shared, "get_unsynced_queue_path", lambda: path)
     monkeypatch.setattr(nmem_shared, "is_backend_unreachable", lambda: False)
     monkeypatch.setenv("NMEM_API_URL", "https://test.invalid")
-    path.write_text(json.dumps({"legacy": {"messages": []}}))
+    path.write_text(
+        json.dumps({"legacy": {"messages": [{"role": "user", "content": "preserve"}]}, "empty": {"messages": []}})
+    )
     for key in ("first", "second"):
         monkeypatch.setenv("NMEM_API_KEY", key)
         nmem_shared.save_unsynced_session("same", [{"role": "user", "content": key}], "Title", "default", None)
@@ -3148,7 +3162,7 @@ def test_queue_save_preserves_evidence_and_existing_capture_on_failures(tmp_path
 def test_failed_replay_does_not_replace_pending_queue(tmp_path, monkeypatch):
     path = tmp_path / "unsynced.json"
     monkeypatch.setattr(nmem_shared, "get_unsynced_queue_path", lambda: path)
-    path.write_text('{"legacy": {"messages":[]}}')
+    path.write_text('{"legacy": {"messages":[{"role":"user","content":"preserve"}]}}')
     previous = path.read_bytes()
     nmem_shared.retry_unsynced_sessions()
     assert path.read_bytes() == previous
@@ -3169,3 +3183,50 @@ def test_queue_migration_preserves_corrupt_or_unwritable_backlogs(tmp_path, monk
         nmem_shared.get_unsynced_queue_path()
     assert old.read_text() == '{"old":{}}'
     assert target.read_text() == '{"new":{}}'
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"id": "other", "space_id": "project", "messages": [{"role": "user", "content": "hi"}]},
+        {"id": "conversation", "space_id": "other", "messages": [{"role": "user", "content": "hi"}]},
+        {"id": "conversation", "space_id": "project", "messages": []},
+    ],
+)
+def test_capture_never_acknowledges_unverified_creation(response):
+    with (
+        patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
+        patch.object(nmem_shared, "get_existing_spaces", return_value=[]),
+        patch.object(
+            nmem_shared,
+            "http_request",
+            side_effect=[
+                {"status": 404, "detail": "Thread not found"},
+                {"status": "ok"},
+                response,
+            ],
+        ),
+        patch.object(nmem_shared, "run_nmem_command") as cli,
+    ):
+        assert nmem_shared.sync_thread_capture(
+            "conversation", "title", [{"role": "user", "content": "hi"}], "project"
+        ) == (False, True)
+        cli.assert_not_called()
+
+
+def test_cli_replay_of_persisted_transcript_never_appends_twice():
+    rows = [{"role": "user", "content": "你好"}]
+    with (
+        patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
+        patch.object(nmem_shared, "http_request", return_value=None),
+        patch.object(
+            nmem_shared,
+            "run_nmem_command",
+            return_value=subprocess.CompletedProcess(
+                [], 0, json.dumps({"id": "conversation", "space_id": "project", "messages": rows}), ""
+            ),
+        ) as cli,
+    ):
+        assert nmem_shared.sync_thread_capture("conversation", "title", rows, "project") == (True, True)
+        assert cli.call_count == 1
+        assert cli.call_args.args[0] == ["--json", "t", "show", "conversation", "--limit", "1", "--space", "project"]
