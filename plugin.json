@@ -2,7 +2,7 @@
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "nowledge-mem-google-antigravity",
   "displayName": "Nowledge Mem",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Persistent personal knowledge graph for Antigravity with startup context, distilled memories, thread capture, and skills.",
   "logo": "assets/logo.png",
   "suggestedPrompts": [

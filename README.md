@@ -15,6 +15,8 @@ The recommended setup is simple and stable: Google Antigravity on top, MCP for d
 
 The bundled memory rule uses `trigger: always_on` so Antigravity applies its guidance throughout the conversation.
 
+On Windows, install the native Nowledge Mem CLI for long conversations. If capture cannot verify the saved conversation, the plugin keeps it in the offline queue for retry.
+
 ## Requirements
 
 - [Google Antigravity 2.0](https://antigravity.google)

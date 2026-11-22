@@ -221,6 +221,8 @@ def main():
 {nmem_status}
 ```
 """
+    if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print(report)
 
 

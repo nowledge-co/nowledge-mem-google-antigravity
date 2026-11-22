@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlencode
 
 # Add the hooks directory to sys.path to allow importing nmem_shared
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
@@ -14,36 +15,28 @@ def read_nmem(args, keys):
     if nmem_shared.is_backend_unreachable():
         return ""
 
-    # Try direct HTTP first for context or wm commands
-    if "context" in args:
-        endpoint = "/context?source_app=google-antigravity"
-        if "--space" in args:
-            idx = args.index("--space")
-            if idx + 1 < len(args):
-                endpoint += f"&space={args[idx + 1]}"
+    is_context = "context" in args
+    params = {}
+    for flag, name in (
+        ("--source-app", "source_app"),
+        ("--agent-id", "agent_id"),
+        ("--host-agent-id", "host_agent_id"),
+        ("--space", "space_id"),
+    ):
+        if flag in args:
+            params[name] = args[args.index(flag) + 1]
+    paths = ("/context/bundle", "/context") if is_context else ("/agent/working-memory", "/working-memory")
+    for index, path in enumerate(paths):
+        query = params.copy()
+        if index and "space_id" in query:
+            query["space"] = query.pop("space_id")
+        endpoint = path + ("?" + urlencode(query) if query else "")
         res = nmem_shared.http_request(endpoint, method="GET", timeout=1.5)
-        if isinstance(res, dict):
+        if isinstance(res, dict) and not res.get("error") and not res.get("_http_error"):
             for key in keys:
                 val = res.get(key)
                 if isinstance(val, str) and val.strip():
                     return val.strip()
-            return ""  # HTTP server responded cleanly; do not trigger redundant CLI fallback
-        if nmem_shared.is_backend_unreachable():
-            return ""
-
-    if "wm" in args or "working-memory" in args:
-        endpoint = "/working-memory"
-        if "--space" in args:
-            idx = args.index("--space")
-            if idx + 1 < len(args):
-                endpoint += f"?space={args[idx + 1]}"
-        res = nmem_shared.http_request(endpoint, method="GET", timeout=1.5)
-        if isinstance(res, dict):
-            for key in keys:
-                val = res.get(key)
-                if isinstance(val, str) and val.strip():
-                    return val.strip()
-            return ""  # HTTP server responded cleanly; do not trigger redundant CLI fallback
         if nmem_shared.is_backend_unreachable():
             return ""
 
@@ -178,6 +171,10 @@ def main():
             )
         except Exception:
             pass
+
+        if hook_input.get("parentConversationId") or hook_input.get("isSubagent") is True:
+            nmem_shared.emit({"injectSteps": inject_steps} if inject_steps else {})
+            return
 
         startup_context = read_startup_context(workspace_root)
         if startup_context:

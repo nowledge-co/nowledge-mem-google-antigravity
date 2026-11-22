@@ -77,3 +77,14 @@ jobs:
 
       - name: Run hook unit tests
         run: python -m pytest -v tests/test_hooks.py
+
+  windows-hooks:
+    name: Windows CLI, encoding and hook fallbacks
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pytest httpx
+      - run: python -m pytest -v tests/test_windows_cli.py tests/test_host_compat.py

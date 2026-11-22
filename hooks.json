@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 hooks/nmem_entrypoint.py gate || python hooks/nmem_entrypoint.py gate || echo '{\"decision\":\"force_ask\"}'",
+            "command": "python3 hooks/nmem_entrypoint.py gate || python hooks/nmem_entrypoint.py gate || (read -r decision < hooks/force-ask.json && echo \"$decision\") || type hooks\\force-ask.json",
             "timeout": 10
           }
         ]
