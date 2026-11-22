@@ -4,6 +4,8 @@ This document details the internal architecture, execution dynamics, transport h
 
 ---
 
+Startup reads the scoped context bundle and working memory through their current HTTP routes, with legacy and CLI fallbacks. Child sessions marked by the host skip parent context injection.
+
 ## 🏛️ System Architecture Overview
 
 The plugin bridges **Google Antigravity** with **Nowledge Mem** via a hybrid multi-layer transport architecture:

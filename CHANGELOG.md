@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7]
+
+- Fix Windows CLI fallback and UTF-8 status output, verify scoped capture readback, and use the current startup context routes.
+
 ## [0.1.6] - 2026-11-21
 
 - Adds the graph exploration skill and updates search and Space guidance.
