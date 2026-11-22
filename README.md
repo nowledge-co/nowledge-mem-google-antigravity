@@ -15,7 +15,7 @@ The recommended setup is simple and stable: Google Antigravity on top, MCP for d
 
 The bundled memory rule uses `trigger: always_on` so Antigravity applies its guidance throughout the conversation.
 
-On Windows, install the native Nowledge Mem CLI for long conversations. If capture cannot verify the saved conversation, the plugin keeps it in the offline queue for retry.
+On Windows, the plugin uses HTTP first. If it needs the CLI, the native `nmem.exe` supports longer transcripts than the `nmem.cmd` launcher. If a transcript exceeds the Windows process command-line limit or its saved identity cannot be verified, it stays in the offline queue. Restore the original Mem connection to retry it over HTTP.
 
 ## Requirements
 

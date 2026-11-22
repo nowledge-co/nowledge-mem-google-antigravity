@@ -95,7 +95,7 @@ def test_build_nmem_command(mock_cmd_path):
     # Windows cmd path
     cmd = nmem_shared._build_nmem_command("C:\\bin\\nmem.cmd", "t", "show")
     if os.name == "nt":
-        assert cmd.startswith("cmd.exe /d /v:off /s /c ")
+        assert "cmd.exe /d /v:off /s /c " in cmd
     else:
         assert cmd[:5] == ["cmd.exe", "/d", "/v:off", "/s", "/c"]
 

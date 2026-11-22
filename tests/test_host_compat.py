@@ -16,7 +16,7 @@ def test_scoped_context_uses_supported_api_and_falls_back_on_legacy_error():
         patch.object(nmem_shared, "http_request", side_effect=[{"error": "not_found"}, {"markdown": "legacy"}]) as get,
     ):
         assert session_start.read_nmem(args, ["markdown"]) == "legacy"
-    current, legacy = [urlsplit(call.args[0]) for call in get.call_args_list]
+    current, legacy = (urlsplit(call.args[0]) for call in get.call_args_list)
     assert current.path == "/context/bundle"
     assert parse_qs(current.query)["space_id"] == ["研发 & QA"]
     assert legacy.path == "/context"

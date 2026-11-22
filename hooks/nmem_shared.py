@@ -1094,18 +1094,19 @@ def _cmd_exe_path(path: str) -> str:
 
 def _build_nmem_command(nmem: str, *args: str) -> list[str] | str:
     if nmem.lower().endswith((".cmd", ".bat")):
-        words = [_cmd_exe_path(nmem), *args]
+        launcher = _cmd_exe_path(nmem)
         # A batch wrapper reparses its arguments when it forwards %*. Avoid
         # passing shell syntax or environment substitutions through either parse.
-        if any(re.search(r"[&|<>^%!()\r\n]", word) for word in words):
+        if re.search(r'["%!\r\n]', launcher) or any(re.search(r"[&|<>^%!()\r\n]", arg) for arg in args):
             raise ValueError("This argument requires native nmem.exe")
-        line = '"' + subprocess.list2cmdline(words) + '"'
+        line = '""' + launcher + '" ' + subprocess.list2cmdline(args) + '"'
         if len(line.encode("utf-16-le")) // 2 + 1 > 8191:
             raise ValueError("Capture exceeds the Windows batch command limit")
         if os.name == "nt":
             # Pass /c its original quotation marks; Python would escape them a
             # second time if it converted this final command from a list.
-            return "cmd.exe /d /v:off /s /c " + line
+            interpreter = str(Path(os.environ["SYSTEMROOT"]) / "System32" / "cmd.exe")
+            return subprocess.list2cmdline([interpreter]) + " /d /v:off /s /c " + line
         return ["cmd.exe", "/d", "/v:off", "/s", "/c", line]
     command = [nmem, *args]
     if os.name == "nt" and len(subprocess.list2cmdline(command).encode("utf-16-le")) // 2 >= 32767:
