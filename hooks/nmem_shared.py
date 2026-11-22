@@ -1545,8 +1545,16 @@ def sync_thread_capture(
     http_handled = False
     encoded_id = urllib.parse.quote(conv_id, safe="")
 
+    lookup_endpoint = build_http_thread_lookup_endpoint(conv_id, space)
+
+    def http_persisted(response):
+        if not _is_http_ok(response) or response.get("success") is False:
+            return False
+        separator = "&" if "?" in lookup_endpoint else "?"
+        persisted = http_request(f"{lookup_endpoint}{separator}limit={len(messages)}", method="GET", timeout=2.5)
+        return _capture_prefix(persisted, conv_id, messages, space) == len(messages)
+
     try:
-        lookup_endpoint = build_http_thread_lookup_endpoint(conv_id, space)
         check_res = http_request(lookup_endpoint, method="GET", timeout=1.5, include_error_response=True)
         if _is_http_ok(check_res) and (
             check_res.get("id") or check_res.get("thread_id") or "messages" in check_res or "thread" in check_res
@@ -1610,8 +1618,10 @@ def sync_thread_capture(
                     timeout=2.5,
                     include_error_response=True,
                 )
-                return _is_http_ok(rec_res), True
+                return http_persisted(rec_res), True
 
+            if existing_msgs:
+                return False, True  # Divergent history cannot be repaired by appending it again.
             app_payload = {"messages": messages[matched_count:] if matched_count > 0 else messages}
             if space:
                 app_payload["space_id"] = space
@@ -1622,9 +1632,7 @@ def sync_thread_capture(
                 timeout=2.5,
                 include_error_response=True,
             )
-            if _is_http_ok(app_res):
-                return True, True
-            return False, True
+            return http_persisted(app_res), True
         elif is_http_thread_not_found(check_res):
             http_handled = True
             create_payload = build_http_thread_create_payload(conv_id, title, messages, space)
@@ -1635,13 +1643,7 @@ def sync_thread_capture(
                 timeout=2.5,
                 include_error_response=True,
             )
-            if _is_http_ok(create_res):
-                separator = "&" if "?" in lookup_endpoint else "?"
-                persisted = http_request(
-                    f"{lookup_endpoint}{separator}limit={len(messages)}", method="GET", timeout=2.5
-                )
-                return _capture_prefix(persisted, conv_id, messages, space) == len(messages), True
-            return False, True
+            return http_persisted(create_res), True
         elif isinstance(check_res, dict):
             return False, True
     except Exception:
@@ -1654,6 +1656,14 @@ def sync_thread_capture(
     check_args = ["--json", "t", "show", conv_id, "--limit", str(len(messages))]
     if space:
         check_args.extend(["--space", space])
+
+    def cli_persisted(result):
+        if result.returncode != 0:
+            return False
+        verified = run_nmem_command(check_args, timeout=2.0)
+        return verified.returncode == 0 and _capture_prefix(
+            json.loads(verified.stdout), conv_id, messages, space
+        ) == len(messages)
 
     thread_exists = False
     thread_not_found = False
@@ -1687,8 +1697,7 @@ def sync_thread_capture(
                     if env
                     else run_nmem_command(append_args, timeout=3.0)
                 )
-                if result.returncode == 0:
-                    return True, True
+                return cli_persisted(result), True
             except Exception as e:
                 if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                     sys.stderr.write(f"nmem t append execution failed: {e}\n")
@@ -1704,12 +1713,7 @@ def sync_thread_capture(
                 if env
                 else run_nmem_command(create_args, timeout=3.0)
             )
-            if result.returncode == 0:
-                verified = run_nmem_command(check_args, timeout=2.0)
-                return (
-                    verified.returncode == 0
-                    and _capture_prefix(json.loads(verified.stdout), conv_id, messages, space) == len(messages)
-                ), True
+            return cli_persisted(result), True
         except Exception as e:
             if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                 sys.stderr.write(f"nmem t create execution failed: {e}\n")

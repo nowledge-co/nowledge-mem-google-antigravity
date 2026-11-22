@@ -357,10 +357,15 @@ def test_retry_unsynced_sessions_reconciles_existing_thread_prefix(mock_http, mo
         mock_http.side_effect = [
             {"id": "conv-1", "messages": [{"role": "user", "content": "Save this"}]},
             {"status": "ok"},
+            {
+                "id": "conv-1",
+                "space_id": "default",
+                "messages": [{"role": "user", "content": "Save this"}, {"role": "assistant", "content": "Saved."}],
+            },
         ]
         nmem_shared.retry_unsynced_sessions()
 
-        assert mock_http.call_count == 2
+        assert mock_http.call_count == 3
         assert mock_http.call_args_list[1].args[0] == "/threads/conv-1/reconcile-tail"
         payload = mock_http.call_args_list[1].kwargs["payload"]
         assert payload["matched_count"] == 1
@@ -1028,6 +1033,11 @@ def test_session_end_reconciles_existing_thread_prefix(
     mock_http.side_effect = [
         {"id": "conv-prefix", "messages": [{"role": "user", "content": "Save this"}]},
         {"status": "ok"},
+        {
+            "id": "conv-prefix",
+            "space_id": "default",
+            "messages": [{"role": "user", "content": "Save this"}, {"role": "assistant", "content": "Saved."}],
+        },
     ]
     hook_input = {"conversationId": "conv-prefix", "transcriptPath": str(transcript), "fullyIdle": True}
     with (
@@ -1037,7 +1047,7 @@ def test_session_end_reconciles_existing_thread_prefix(
     ):
         session_end.main()
 
-    assert mock_http.call_count == 2
+    assert mock_http.call_count == 3
     assert mock_http.call_args_list[1].args[0] == "/threads/conv-prefix/reconcile-tail"
     payload = mock_http.call_args_list[1].kwargs["payload"]
     assert payload["matched_count"] == 1
@@ -3230,3 +3240,28 @@ def test_cli_replay_of_persisted_transcript_never_appends_twice():
         assert nmem_shared.sync_thread_capture("conversation", "title", rows, "project") == (True, True)
         assert cli.call_count == 1
         assert cli.call_args.args[0] == ["--json", "t", "show", "conversation", "--limit", "1", "--space", "project"]
+
+
+@pytest.mark.parametrize("existing", [[], [{"role": "user", "content": "first"}]])
+def test_successful_mutation_without_persisted_tail_stays_pending(existing):
+    rows = [{"role": "user", "content": "first"}, {"role": "assistant", "content": "second"}]
+    detail = {"id": "c", "space_id": "work", "messages": existing}
+    with (
+        patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
+        patch.object(nmem_shared, "http_request", side_effect=[detail, {"status": "ok"}, detail]) as http,
+        patch.object(nmem_shared, "run_nmem_command") as cli,
+    ):
+        assert nmem_shared.sync_thread_capture("c", "Title", rows, "work") == (False, True)
+        assert http.call_count == 3
+        cli.assert_not_called()
+
+
+def test_cli_successful_append_without_persisted_tail_stays_pending():
+    rows = [{"role": "user", "content": "first"}, {"role": "assistant", "content": "second"}]
+    detail = subprocess.CompletedProcess([], 0, json.dumps({"id": "c", "messages": rows[:1]}), "")
+    with (
+        patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
+        patch.object(nmem_shared, "http_request", return_value=None),
+        patch.object(nmem_shared, "run_nmem_command", side_effect=[detail, subprocess.CompletedProcess([], 0), detail]),
+    ):
+        assert nmem_shared.sync_thread_capture("c", "Title", rows) == (False, True)
