@@ -85,7 +85,7 @@ flowchart TD
 - **Execution Flow**:
   1. Reads `conversationId`, `transcriptPath`, and `fullyIdle` from stdin.
   2. If `fullyIdle: false` (background tasks still running), skips thread capture and defers to the final idle stop.
-  3. Extracts user prompts (`USER_EXPLICIT`) and model responses (`MODEL`).
+  3. Extracts user prompts (`USER_EXPLICIT`) and model responses (`MODEL`). Derives the title from the first prompt, unwrapping Antigravity and T3 Code metadata before collapsing whitespace and taking up to 60 characters.
   4. Checks thread existence via `HTTP GET /threads/<id>` or `nmem t show <id>`. If all transcript messages match server thread messages, returns success immediately.
   5. If leading messages match, uses `POST /threads/<id>/reconcile-tail` to append only missing trailing messages incrementally. If `reconcile-tail` fails (e.g. 400 Bad Request due to divergent message prefixes), it falls back directly to `POST /threads/<id>/append`.
   6. If backend calls fail, saves the session to `~/.nowledge-mem/plugins/antigravity/unsynced.json` via file-locked append for automatic background retry.
