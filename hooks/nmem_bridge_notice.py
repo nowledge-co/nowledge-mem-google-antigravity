@@ -161,8 +161,8 @@ def _reply_hints(directory, host, session, session_key, fence, now, name, rate_k
     saved, expires = snapshot.get("saved_ms"), snapshot.get("expires_ms")
     replies = snapshot.get("replies")
     if (
-        type(saved) is not int
-        or type(expires) is not int
+        (not isinstance(saved, int) or isinstance(saved, bool))
+        or (not isinstance(expires, int) or isinstance(expires, bool))
         or not saved <= now < expires <= saved + 45_000
         or not isinstance(replies, list)
         or len(replies) > 8
@@ -173,7 +173,7 @@ def _reply_hints(directory, host, session, session_key, fence, now, name, rate_k
         if not isinstance(entry, dict):
             continue
         expiry = entry.get("expires_ms")
-        if type(expiry) is not int or not now < expiry <= saved + 45_000:
+        if (not isinstance(expiry, int) or isinstance(expiry, bool)) or not now < expiry <= saved + 45_000:
             continue
         token = entry.get("token")
         if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64}", token):
@@ -204,7 +204,10 @@ def response(event: dict, *, host: str, root: Path | None = None, environ=None, 
         return {}
     if not isinstance(session, str) or not session or len(session) > 1024:
         return {}
-    root = root or Path(env.get("NMEM_CLI_CONFIG_DIR") or Path.home() / ".nowledge-mem")
+    try:
+        root = root or Path(env.get("NMEM_CLI_CONFIG_DIR") or Path.home() / ".nowledge-mem")
+    except (OSError, RuntimeError):
+        return {}
     directory = root / "bridge-notices-v1"
     now = int(time.time() * 1000) if now_ms is None else now_ms
     started = time.monotonic()
@@ -257,7 +260,11 @@ def response(event: dict, *, host: str, root: Path | None = None, environ=None, 
             if value.get("context") != context or value.get("host") != host or value.get("session_id") != session:
                 continue
             saved, expires = value.get("saved_ms"), value.get("expires_ms")
-            if type(saved) is not int or type(expires) is not int or not saved <= now < expires <= saved + 45_000:
+            if (
+                (not isinstance(saved, int) or isinstance(saved, bool))
+                or (not isinstance(expires, int) or isinstance(expires, bool))
+                or not saved <= now < expires <= saved + 45_000
+            ):
                 continue
             fence = value.get("config_fence")
             if not isinstance(fence, str) or not re.fullmatch(r"[0-9a-f]{64}", fence):
