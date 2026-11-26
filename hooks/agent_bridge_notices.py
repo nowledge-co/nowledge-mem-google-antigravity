@@ -10,9 +10,13 @@ import subprocess
 
 def valid_bridge_session(session):
     try:
-        return (isinstance(session, str) and bool(session.strip()) and session != "unknown"
-                and len(session.encode("utf-8")) <= 1024
-                and not any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in session))
+        return (
+            isinstance(session, str)
+            and bool(session.strip())
+            and session != "unknown"
+            and len(session.encode("utf-8")) <= 1024
+            and not any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in session)
+        )
     except UnicodeError:
         return False
 
@@ -47,8 +51,7 @@ def bridge_notice_hint(host, session, env=None):
 def close_bridge_session(host, session, runner=None):
     if not host or not valid_bridge_session(session):
         return
-    args = ["--json", "bridge", "notices", "unsubscribe", "--host=" + host,
-            "--session-id=" + session, "--ended"]
+    args = ["--json", "bridge", "notices", "unsubscribe", "--host=" + host, "--session-id=" + session, "--ended"]
     try:
         if runner is not None:
             runner(args, timeout=0.5)
@@ -56,10 +59,16 @@ def close_bridge_session(host, session, runner=None):
             env = os.environ.copy()
             for key in ("NMEM_AGENT_CONTEXT", "NMEM_AGENT_ID", "NMEM_SPACE", "NMEM_SPACE_ID", "NMEM_HOST_AGENT_ID"):
                 env.pop(key, None)
-            subprocess.run(_cleanup_command(args, env), env=env,
-                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=0.5, check=False,
-                           **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
+            subprocess.run(
+                _cleanup_command(args, env),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=0.5,
+                check=False,
+                **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
+            )
     except (OSError, ValueError, subprocess.TimeoutExpired):
         pass
 

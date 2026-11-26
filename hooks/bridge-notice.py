@@ -10,6 +10,8 @@ def main():
     if payload.get("invocationNum") != 0:
         nmem_shared.emit({})
         return
-    notice = response({"hook_event_name": "UserPromptSubmit", "session_id": payload.get("conversationId")}, host="antigravity")
+    notice = response(
+        {"hook_event_name": "UserPromptSubmit", "session_id": payload.get("conversationId")}, host="antigravity"
+    )
     hint = notice.get("hookSpecificOutput", {}).get("additionalContext")
     nmem_shared.emit({"injectSteps": [{"systemMessage": hint}]} if hint else {})
