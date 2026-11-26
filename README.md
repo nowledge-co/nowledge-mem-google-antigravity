@@ -235,3 +235,9 @@ make validate
 - [GitHub](https://github.com/nowledge-co/nowledge-mem-google-antigravity)
 
 Pending captures are tied to the Mem endpoint and credentials used by the Stop hook. Restore that connection to resume automatic retries. Older queue entries without a recorded connection remain on disk in the plugin storage directory (`unsynced.json`). Inspect their destination before manually importing them.
+
+### Active-session Bridge notices
+
+After you explicitly subscribe an approved Agent Context for this actual conversation, the first `PreInvocation` hook in a turn can add a local pending-mail hint to model context. It does not read or acknowledge mail or wake an idle conversation. Startup inbox opt-in alone does not subscribe. Native-session delivery and precise reply routing are separate capabilities.
+
+There is no true session-end cleanup hook in this adapter. Before retiring a subscribed conversation, use `nmem bridge notices unsubscribe --host=antigravity --session-id=<conversationId> --ended`. Stop ends a turn, so it does not remove a live conversation subscription.

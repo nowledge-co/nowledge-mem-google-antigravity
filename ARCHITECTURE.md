@@ -215,3 +215,7 @@ python3 -m pytest -v tests/integration/
 # Validate manifest, configuration files, and release assets
 node scripts/validate-plugin.mjs
 ```
+
+## Local Bridge notice consumer
+
+`bridge-notice.py` runs only for `PreInvocation` with `invocationNum == 0` and an actual `conversationId`. It reuses the shared bounded Python observer-cache consumer and injects its hint as `systemMessage`. No CLI subprocess or mailbox network request runs on this path. The local ledger deduplicates observer tokens; stale, disabled, missing or differently bound snapshots remain silent. Host correlation does not grant identity authority. `bridge-start.py` offers conditional subscription guidance only under the existing startup opt-in and approved Context gate.
