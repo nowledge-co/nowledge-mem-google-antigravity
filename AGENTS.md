@@ -169,3 +169,7 @@ Whenever adding, modifying, or refactoring features, lifecycle hooks, transport 
 4. **Validation Enforcement ([`scripts/validate-plugin.mjs`](./scripts/validate-plugin.mjs))**:
    - When adding new skills, scripts, or core documentation files, agents **must** register the new file paths in the `requiredPaths` array inside `scripts/validate-plugin.mjs`.
    - Run `npm run validate` or `make validate` to verify that all documentation and code assets pass validation cleanly before completing the turn.
+
+## Bridge notice maintenance
+
+Keep `bridge-notice.py` local-only and first-invocation-only. Use the real `conversationId`; do not synthesize session IDs. Preserve the shared observer cache/ledger contract and emit model-facing hints via `systemMessage`. Stop is not a true session end and must not remove a live subscription. Test missing IDs, later invocations, and passive cache delivery without a CLI process.

@@ -1777,7 +1777,7 @@ def test_bridge_start_requires_opt_in_and_configured_context(monkeypatch, capsys
 
     output = json.loads(capsys.readouterr().out)
     if expects_hint:
-        hint = output["injectSteps"][0]["ephemeralMessage"]
+        hint = output["injectSteps"][0]["systemMessage"]
         assert "nmem-bridge-chat" in hint
         assert "NMEM_AGENT_CONTEXT" in hint
         assert "check one page" in hint
@@ -3265,3 +3265,38 @@ def test_cli_successful_append_without_persisted_tail_stays_pending():
         patch.object(nmem_shared, "run_nmem_command", side_effect=[detail, subprocess.CompletedProcess([], 0), detail]),
     ):
         assert nmem_shared.sync_thread_capture("c", "Title", rows) == (False, True)
+
+
+@pytest.mark.parametrize("invocation,expected", [(0, True), (1, False), (None, False)])
+def test_bridge_notice_uses_actual_session_without_network(monkeypatch, capsys, invocation, expected):
+    hook = import_module_from_path("bridge_notice", str(HOOKS_DIR / "bridge-notice.py"))
+    monkeypatch.setattr(
+        nmem_shared, "read_hook_input", lambda: {"conversationId": "actual-conversation", "invocationNum": invocation}
+    )
+    notice = MagicMock(return_value={"hookSpecificOutput": {"additionalContext": "Fresh local notice"}})
+    monkeypatch.setattr(hook, "response", notice)
+    monkeypatch.setattr(
+        nmem_shared, "run_nmem_command", MagicMock(side_effect=AssertionError("No CLI or network in notice hook"))
+    )
+    hook.main()
+    result = json.loads(capsys.readouterr().out)
+    if expected:
+        assert result == {"injectSteps": [{"systemMessage": "Fresh local notice"}]}
+        notice.assert_called_once_with(
+            {"hook_event_name": "UserPromptSubmit", "session_id": "actual-conversation"}, host="antigravity"
+        )
+    else:
+        assert result == {}
+        notice.assert_not_called()
+
+
+def test_bridge_start_correlates_actual_conversation(monkeypatch, capsys):
+    hook = import_module_from_path("bridge_start", str(HOOKS_DIR / "bridge-start.py"))
+    monkeypatch.setenv("NMEM_BRIDGE_INBOX_ON_START", "1")
+    monkeypatch.setenv("NMEM_AGENT_CONTEXT", "approved")
+    monkeypatch.setattr(nmem_shared, "read_hook_input", lambda: {"conversationId": "actual-conversation"})
+    hook.main()
+    hint = json.loads(capsys.readouterr().out)["injectSteps"][0]["systemMessage"]
+    assert '"session_id": "actual-conversation"' in hint
+    assert "notices subscribe" in hint
+    assert "not native sessions" in hint

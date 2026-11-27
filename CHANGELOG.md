@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.8 - 2026-11-26
+
+- Offer Agent-mailbox subscriptions using the actual Antigravity conversation ID.
+- Consume bounded local notice hints on the first model call of an active user turn with a compatible CLI. Older CLIs keep the existing inbox path; no native session or wakeup is enabled.
+
 All notable changes to the Nowledge Mem Google Antigravity plugin will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
