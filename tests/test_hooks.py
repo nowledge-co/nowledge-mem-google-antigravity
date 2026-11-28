@@ -52,8 +52,12 @@ propose_skill = import_module_from_path(
 
 
 @pytest.fixture(autouse=True)
-def reset_active_workspace_root():
+def reset_active_workspace_root(tmp_path, monkeypatch):
     nmem_shared.activate_workspace_root(None)
+    # Keep unit tests isolated from any real ~/.gemini/config/mcp_config.json on the developer host
+    # unless a test explicitly creates one under its own HOME/USERPROFILE.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     yield
     nmem_shared.activate_workspace_root(None)
 
@@ -3593,3 +3597,123 @@ def test_nmem_status_reports_dead_letter_sessions(mock_run_cmd, tmp_path, monkey
     assert "dead_letter.json" in output
     assert "conv-dead" in output
     assert "divergent_history" in output
+
+
+def test_sync_mcp_config_defers_to_host_global_config(tmp_path, monkeypatch):
+    host_cfg = tmp_path / ".gemini" / "config" / "mcp_config.json"
+    host_cfg.parent.mkdir(parents=True)
+    host_cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "nowledge-mem": {
+                        "url": "http://127.0.0.1:14242/mcp",
+                        "disabledTools": ["memory_delete"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    plugin_cfg = tmp_path / "plugin" / "mcp_config.json"
+    plugin_cfg.parent.mkdir(parents=True)
+
+    monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd=None: ("https://mem.example.com", "key"))
+    monkeypatch.setattr(nmem_shared, "_mcp_space_id", lambda cwd, cfg: "personal")
+
+    # 1. Missing plugin mcp_config.json must not be recreated when host already defines nowledge-mem.
+    assert nmem_shared.sync_mcp_config_file(str(plugin_cfg), cwd=tmp_path) is False
+    assert not plugin_cfg.exists()
+
+    # 2. Existing plugin mcp_config.json removes only nowledge-mem and preserves other servers.
+    plugin_cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "nowledge-mem": {"url": "http://127.0.0.1:14242/mcp"},
+                    "other-server": {"command": "other"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert nmem_shared.sync_mcp_config_file(str(plugin_cfg), cwd=tmp_path) is True
+    assert json.loads(plugin_cfg.read_text(encoding="utf-8")) == {"mcpServers": {"other-server": {"command": "other"}}}
+    # Second call is a no-op.
+    assert nmem_shared.sync_mcp_config_file(str(plugin_cfg), cwd=tmp_path) is False
+
+    # 3. Managed mode explicitly overrides deferral and syncs plugin mcp_config.json.
+    monkeypatch.setenv("NMEM_MCP_SYNC_MODE", "managed")
+    assert nmem_shared.sync_mcp_config_file(str(plugin_cfg), cwd=tmp_path) is True
+    managed_data = json.loads(plugin_cfg.read_text(encoding="utf-8"))
+    assert managed_data["mcpServers"]["nowledge-mem"]["url"] == "https://mem.example.com/mcp"
+    assert managed_data["mcpServers"]["other-server"] == {"command": "other"}
+
+
+def test_sync_mcp_config_defers_to_workspace_agents_config(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace_mcp = workspace / ".agents" / "mcp_config.json"
+    workspace_mcp.parent.mkdir(parents=True)
+    workspace_mcp.write_text(
+        json.dumps({"mcpServers": {"nowledge-mem": {"url": "http://127.0.0.1:14242/mcp"}}}),
+        encoding="utf-8",
+    )
+    plugin_cfg = tmp_path / "plugin_mcp_config.json"
+    monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd=None: ("http://127.0.0.1:14242", None))
+    monkeypatch.setattr(nmem_shared, "_mcp_space_id", lambda cwd, cfg: None)
+
+    assert nmem_shared.sync_mcp_config_file(str(plugin_cfg), cwd=workspace) is False
+    assert not plugin_cfg.exists()
+
+
+def test_sync_mcp_config_mode_off_and_ignore_host_config(tmp_path, monkeypatch):
+    host_cfg = tmp_path / ".gemini" / "config" / "mcp_config.json"
+    host_cfg.parent.mkdir(parents=True)
+    host_cfg.write_text(
+        json.dumps({"mcpServers": {"nowledge-mem": {"url": "http://127.0.0.1:14242/mcp"}}}),
+        encoding="utf-8",
+    )
+    plugin_cfg = tmp_path / "plugin_mcp_config.json"
+    plugin_cfg.write_text('{"mcpServers":{"nowledge-mem":{"url":"http://custom/mcp"}}}', encoding="utf-8")
+    before = plugin_cfg.read_text(encoding="utf-8")
+
+    # Mode 'off' via plugin storage config leaves plugin_cfg completely untouched.
+    storage_cfg = tmp_path / ".nowledge-mem" / "plugins" / "antigravity" / "config.json"
+    storage_cfg.parent.mkdir(parents=True)
+    storage_cfg.write_text(json.dumps({"mcpSyncMode": "off"}), encoding="utf-8")
+    assert nmem_shared.sync_mcp_config_file(str(plugin_cfg), cwd=tmp_path) is False
+    assert plugin_cfg.read_text(encoding="utf-8") == before
+
+    # NMEM_IGNORE_HOST_CONFIG ignores host global ~/.gemini/config/mcp_config.json and storage config.
+    monkeypatch.setenv("NMEM_IGNORE_HOST_CONFIG", "1")
+    monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd=None: ("http://127.0.0.1:14242", None))
+    monkeypatch.setattr(nmem_shared, "_mcp_space_id", lambda cwd, cfg: None)
+    assert nmem_shared.sync_mcp_config_file(str(plugin_cfg), cwd=tmp_path) is True
+    assert json.loads(plugin_cfg.read_text(encoding="utf-8"))["mcpServers"]["nowledge-mem"]["url"] == (
+        "http://127.0.0.1:14242/mcp"
+    )
+
+
+def test_sync_mcp_config_ignores_malformed_host_config_and_self_path(tmp_path, monkeypatch):
+    host_cfg = tmp_path / ".gemini" / "config" / "mcp_config.json"
+    host_cfg.parent.mkdir(parents=True)
+    host_cfg.write_text("{not valid json", encoding="utf-8")
+    plugin_cfg = tmp_path / "plugin_mcp_config.json"
+
+    monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd=None: ("http://127.0.0.1:14242", None))
+    monkeypatch.setattr(nmem_shared, "_mcp_space_id", lambda cwd, cfg: None)
+
+    assert nmem_shared.sync_mcp_config_file(str(plugin_cfg), cwd=tmp_path) is True
+    assert json.loads(plugin_cfg.read_text(encoding="utf-8"))["mcpServers"]["nowledge-mem"]["url"] == (
+        "http://127.0.0.1:14242/mcp"
+    )
+
+    # Syncing the host config file path directly must never treat itself as an external host override.
+    host_cfg.write_text(
+        json.dumps({"mcpServers": {"nowledge-mem": {"url": "http://old/mcp"}}}),
+        encoding="utf-8",
+    )
+    assert nmem_shared.sync_mcp_config_file(str(host_cfg), cwd=tmp_path) is True
+    assert json.loads(host_cfg.read_text(encoding="utf-8"))["mcpServers"]["nowledge-mem"]["url"] == (
+        "http://127.0.0.1:14242/mcp"
+    )

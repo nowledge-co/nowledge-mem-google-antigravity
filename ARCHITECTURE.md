@@ -163,7 +163,7 @@ intended destination. Environment Space overrides still take precedence.
 
 ---
 
-MCP configuration synchronization resolves and validates the active Space, then emits `X-Nmem-Space-Id`. Explicit invalid Spaces must not overwrite the connection with Default. The generated plugin configuration is shared on disk; simultaneous workspaces using different Spaces require host-level per-session connections and are not isolated by this file.
+MCP configuration synchronization resolves and validates the active Space, then emits `X-Nmem-Space-Id`. Explicit invalid Spaces must not overwrite the connection with Default. In the default `auto` mode (`NMEM_MCP_SYNC_MODE` / `mcpSyncMode`: `auto` | `managed` | `off`), `sync_mcp_config_file()` checks Antigravity's host global (`~/.gemini/config/mcp_config.json`, skipped when `NMEM_IGNORE_HOST_CONFIG=1`) and workspace (`.agents/mcp_config.json`) MCP configs first; when a distinct host config already defines `mcpServers.nowledge-mem`, the plugin defers without recreating a deleted plugin `mcp_config.json` and removes `nowledge-mem` from an existing plugin `mcp_config.json` (preserving other servers) to avoid duplicate loading or overriding host policies such as `disabledTools`. The generated plugin configuration is shared on disk; simultaneous workspaces using different Spaces require host-level per-session connections and are not isolated by this file.
 
 Do not opt into the `exact-v1` protocol without backend capability negotiation: local backends requiring migration reject it. The Space header selects the existing configured retrieval policy, which may include shared Default memories.
 

@@ -770,19 +770,130 @@ def _write_json_atomic(path: Path, data: dict) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def sync_mcp_config_file(mcp_config_path: str = None, cwd: str | Path | None = None) -> bool:
+_MCP_SYNC_MODE_ALIASES = {
+    "auto": "auto",
+    "managed": "managed",
+    "force": "managed",
+    "off": "off",
+    "disabled": "off",
+    "skip": "off",
+}
+
+
+def _resolve_mcp_sync_mode(cwd: str | Path | None = None) -> str:
+    """Resolve plugin mcp_config.json sync policy: 'auto' (default), 'managed', or 'off'."""
+    ignore_host = os.environ.get("NMEM_IGNORE_HOST_CONFIG", "").strip().lower() in ("1", "true", "yes")
+    candidates: list[object] = [os.environ.get("NMEM_MCP_SYNC_MODE")]
+    local_cfg = get_local_config(cwd)
+    candidates.extend([local_cfg.get("mcpSyncMode"), local_cfg.get("mcp_sync_mode")])
+    if not ignore_host:
+        plugin_cfg = get_plugin_config()
+        candidates.extend([plugin_cfg.get("mcpSyncMode"), plugin_cfg.get("mcp_sync_mode")])
+
+    for raw in candidates:
+        if isinstance(raw, str):
+            normalized = _MCP_SYNC_MODE_ALIASES.get(raw.strip().lower())
+            if normalized:
+                return normalized
+    return "auto"
+
+
+def _find_host_mcp_config_defining_nmem(
+    target_path: Path,
+    cwd: str | Path | None = None,
+    host_mcp_config_paths: list[str | Path] | None = None,
+) -> Path | None:
+    """Return a distinct host/workspace MCP config path that already defines `nowledge-mem`, or None."""
+    if host_mcp_config_paths is not None:
+        candidates = [Path(p).expanduser() for p in host_mcp_config_paths]
+    else:
+        candidates = []
+        effective_cwd = _effective_cwd(cwd)
+        if effective_cwd is not None:
+            try:
+                candidates.append(Path(effective_cwd).expanduser().resolve() / ".agents" / "mcp_config.json")
+            except (OSError, RuntimeError):
+                pass
+        ignore_host = os.environ.get("NMEM_IGNORE_HOST_CONFIG", "").strip().lower() in ("1", "true", "yes")
+        if not ignore_host:
+            candidates.append(Path("~/.gemini/config/mcp_config.json").expanduser())
+
+    try:
+        resolved_target = target_path.expanduser().resolve()
+    except (OSError, RuntimeError):
+        resolved_target = target_path
+
+    for candidate in candidates:
+        try:
+            resolved_candidate = candidate.resolve()
+        except (OSError, RuntimeError):
+            resolved_candidate = candidate
+        if resolved_candidate == resolved_target:
+            continue
+        if not resolved_candidate.is_file():
+            continue
+        try:
+            data = json.loads(resolved_candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        servers = data.get("mcpServers") if isinstance(data, dict) else None
+        if isinstance(servers, dict) and isinstance(servers.get("nowledge-mem"), dict):
+            return resolved_candidate
+    return None
+
+
+def sync_mcp_config_file(
+    mcp_config_path: str | None = None,
+    cwd: str | Path | None = None,
+    host_mcp_config_paths: list[str | Path] | None = None,
+) -> bool:
     """Synchronize plugin mcp_config.json with effective client configuration
     (~/.nowledge-mem/config.json or NMEM_API_URL/NMEM_API_KEY env vars).
-    Returns True if mcp_config.json was updated, False if already up to date.
+
+    In the default `auto` mode, defers when Antigravity's host global
+    (`~/.gemini/config/mcp_config.json`) or workspace (`.agents/mcp_config.json`)
+    MCP config already defines `nowledge-mem`, avoiding duplicate loads or
+    overriding custom host settings (such as `disabledTools`).
+    Returns True if mcp_config.json was updated, False if already up to date or deferred.
     """
     if mcp_config_path is None:
         mcp_config_path = str(Path(__file__).parent.parent / "mcp_config.json")
+
+    p = Path(mcp_config_path)
+    mode = _resolve_mcp_sync_mode(cwd)
+    if mode == "off":
+        return False
+
+    if mode == "auto":
+        host_override = _find_host_mcp_config_defining_nmem(p, cwd=cwd, host_mcp_config_paths=host_mcp_config_paths)
+        if host_override is not None:
+            if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+                sys.stderr.write(f"Deferring plugin mcp_config.json to host MCP config: {host_override}\n")
+            if not p.exists():
+                return False
+            try:
+                existing_data = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return False
+            existing_servers = existing_data.get("mcpServers") if isinstance(existing_data, dict) else None
+            if isinstance(existing_servers, dict) and "nowledge-mem" in existing_servers:
+                updated_data = dict(existing_data)
+                updated_servers = dict(existing_servers)
+                del updated_servers["nowledge-mem"]
+                updated_data["mcpServers"] = updated_servers
+                try:
+                    _write_json_atomic(p, updated_data)
+                    return True
+                except OSError as exc:
+                    if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+                        sys.stderr.write(f"Could not remove deferred nowledge-mem entry from {p}: {exc}\n")
+                    return False
+            return False
 
     api_url, api_key = get_effective_config(cwd)
     clean_url = api_url.rstrip("/")
     server_url = f"{clean_url}/mcp"
 
-    p = Path(mcp_config_path)
     try:
         current_data = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):

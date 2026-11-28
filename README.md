@@ -93,6 +93,7 @@ Release packaging notes live in [`RELEASING.md`](./RELEASING.md).
 
 - Local same-machine installs expose `nowledge-mem` MCP tools at `http://127.0.0.1:14242/mcp` automatically.
 - The startup hook automatically synchronizes `mcp_config.json` with effective client settings (`~/.nowledge-mem/config.json` or `NMEM_API_URL`/`NMEM_API_KEY`). For remote Mem, `mcp_config.json` is updated dynamically with the remote server URL and authentication headers (`Authorization: Bearer` and `X-NMEM-API-Key`).
+- **Host MCP Avoidance**: When Antigravity's global `~/.gemini/config/mcp_config.json` or workspace `.agents/mcp_config.json` already defines a `nowledge-mem` server (for example, with custom `disabledTools`), `sync_mcp_config_file()` automatically defers to the host config: it does not recreate a missing plugin `mcp_config.json`, and removes any duplicate `nowledge-mem` entry from an existing plugin `mcp_config.json` while keeping other servers intact. Override this behavior with `NMEM_MCP_SYNC_MODE` or `mcpSyncMode` in `.config.json` / `~/.nowledge-mem/plugins/antigravity/config.json` (`auto` default, `managed` to always sync the plugin file, or `off` to disable plugin MCP sync completely).
 
 If the selected Space cannot be verified, startup removes the Mem connection from the generated MCP configuration and reports the lookup failure. Other MCP servers stay configured. Start a new session once the Space catalog is reachable to restore the verified connection.
 
