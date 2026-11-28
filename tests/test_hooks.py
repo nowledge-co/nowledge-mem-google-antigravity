@@ -3378,9 +3378,12 @@ def test_long_thread_divergent_history_fails_without_full_fetch():
     ]
 
 
-def test_long_thread_mid_history_divergence_binary_searches_bounded_windows():
+@pytest.mark.parametrize("single_edit", [False, True], ids=["rewritten-suffix", "unchanged-tail"])
+def test_long_thread_mid_history_divergence_uses_first_differing_row(single_edit):
     stored = [{"role": "user", "content": f"m-{i}"} for i in range(150)]
     local = [*stored[:60], *[{"role": "user", "content": f"edited-{i}"} for i in range(60, 150)]]
+    if single_edit:
+        local[61:] = stored[61:]
 
     def fake_http(endpoint, method="GET", payload=None, **kwargs):
         if method == "GET":
@@ -3399,7 +3402,7 @@ def test_long_thread_mid_history_divergence_binary_searches_bounded_windows():
         if endpoint == "/threads/mid-conv/reconcile-tail":
             assert payload["matched_count"] == 60
             assert payload["messages"] == local[60:]
-            stored[:] = local
+            stored[payload["matched_count"] :] = payload["messages"]
             return {"success": True}
         raise AssertionError(f"Unexpected call: {method} {endpoint}")
 
@@ -3409,6 +3412,7 @@ def test_long_thread_mid_history_divergence_binary_searches_bounded_windows():
     ):
         assert nmem_shared.sync_thread_capture("mid-conv", "Mid Edit", local, "work") == (True, True)
     assert any(c.args[0] == "/threads/mid-conv/reconcile-tail" for c in mock_http.call_args_list)
+    assert stored == local
 
 
 def test_cli_long_thread_append_uses_bounded_show_and_idempotency_key():
