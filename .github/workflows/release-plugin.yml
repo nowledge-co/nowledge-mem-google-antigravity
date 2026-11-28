@@ -33,7 +33,12 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "expected_tag=${EXPECTED_TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Validate plugin package
+      - name: Install uv for validation
+        uses: astral-sh/setup-uv@v5
+
+      - name: Validate tagged source with the locked dependencies
+        env:
+          UV_FROZEN: "1"
         run: npm run validate
 
       - name: Build release archive
