@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.9 - 2026-11-28
+
+- Sync long conversations in bounded pages and detect edits before an unchanged tail.
+- Back off failed retries and preserve quarantined transcripts for recovery.
+- Respect existing host MCP settings, including disabled tools.
+
 ## 0.1.8 - 2026-11-26
 
 - Offer Agent-mailbox subscriptions using the actual Antigravity conversation ID.
