@@ -366,9 +366,12 @@ def test_retry_unsynced_sessions_reconciles_existing_thread_prefix(mock_http, mo
         nmem_shared.retry_unsynced_sessions()
 
         assert mock_http.call_count == 3
-        assert mock_http.call_args_list[1].args[0] == "/threads/conv-1/reconcile-tail"
+        assert mock_http.call_args_list[1].args[0] == "/threads/conv-1/append"
         payload = mock_http.call_args_list[1].kwargs["payload"]
-        assert payload["matched_count"] == 1
+        assert payload["expected_message_count"] == 1
+        assert payload["idempotency_key"] == nmem_shared.build_append_idempotency_key(
+            "conv-1", 1, [{"role": "assistant", "content": "Saved."}]
+        )
         assert payload["space_id"] == "default"
         assert "space" not in payload
         assert payload["messages"] == [{"role": "assistant", "content": "Saved."}]
@@ -1048,9 +1051,12 @@ def test_session_end_reconciles_existing_thread_prefix(
         session_end.main()
 
     assert mock_http.call_count == 3
-    assert mock_http.call_args_list[1].args[0] == "/threads/conv-prefix/reconcile-tail"
+    assert mock_http.call_args_list[1].args[0] == "/threads/conv-prefix/append"
     payload = mock_http.call_args_list[1].kwargs["payload"]
-    assert payload["matched_count"] == 1
+    assert payload["expected_message_count"] == 1
+    assert payload["idempotency_key"] == nmem_shared.build_append_idempotency_key(
+        "conv-prefix", 1, [{"role": "assistant", "content": "Saved."}]
+    )
     assert payload["space_id"] == "default"
     assert "space" not in payload
     assert payload["messages"] == [{"role": "assistant", "content": "Saved."}]
@@ -2977,20 +2983,24 @@ def test_pending_capture_replays_only_for_original_account(tmp_path, monkeypatch
 def test_paginated_capture_requires_complete_prefix_and_honors_reconcile_refusal(changed):
     rows = [{"role": "user", "content": str(i)} for i in range(501)]
     local = [*rows[:-1], {"role": "user", "content": "changed"}] if changed else rows
-    page = {"space_id": "project", "total_messages": 501, "messages": rows[:500]}
+    meta = {"id": "c", "space_id": "project", "total_messages": 501, "messages": []}
+    tail = {"id": "c", "space_id": "project", "total_messages": 501, "messages": rows[469:501]}
     with (
         patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
         patch.object(
             nmem_shared,
             "http_request",
-            side_effect=[page, {**page, "messages": rows}, {"status": 409, "error": "linked"}],
+            side_effect=[meta, tail, {"status": 409, "error": "linked"}],
         ) as request,
     ):
         assert nmem_shared.sync_thread_capture("c", "Title", local, "project") == (not changed, True)
-    assert request.call_args_list[1].args == ("/threads/c?space_id=project&limit=501",)
+    assert request.call_args_list[0].args == ("/threads/c?space_id=project&limit=0",)
+    assert request.call_args_list[1].args == ("/threads/c?space_id=project&offset=469&limit=32",)
     assert request.call_count == (3 if changed else 2)
     if changed:
         assert request.call_args.args == ("/threads/c/reconcile-tail",)
+        assert request.call_args.kwargs["payload"]["matched_count"] == 500
+        assert request.call_args.kwargs["payload"]["messages"] == [{"role": "user", "content": "changed"}]
 
 
 def test_sync_mcp_space_change_and_validation(tmp_path, monkeypatch):
@@ -3300,3 +3310,130 @@ def test_bridge_start_correlates_actual_conversation(monkeypatch, capsys):
     assert '"session_id": "actual-conversation"' in hint
     assert "notices subscribe" in hint
     assert "not native sessions" in hint
+
+
+def test_long_thread_incremental_append_uses_bounded_cursor_and_idempotency_key():
+    stored = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg-{i}"} for i in range(1351)]
+    delta = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg-{i}"} for i in range(1351, 1359)]
+    local = stored + delta
+
+    responses = [
+        {"id": "long-conv", "space_id": "work", "total_messages": 1351, "messages": []},
+        {"id": "long-conv", "space_id": "work", "total_messages": 1351, "messages": stored[1319:1351]},
+        {"success": True, "messages_added": 8, "total_messages": 1359},
+        {"id": "long-conv", "space_id": "work", "total_messages": 1359, "messages": local[1327:1359]},
+    ]
+    with (
+        patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
+        patch.object(nmem_shared, "http_request", side_effect=responses) as mock_http,
+        patch.object(nmem_shared, "run_nmem_command") as mock_cli,
+    ):
+        assert nmem_shared.sync_thread_capture("long-conv", "Long Thread", local, "work") == (True, True)
+        mock_cli.assert_not_called()
+
+    endpoints = [c.args[0] for c in mock_http.call_args_list]
+    assert endpoints == [
+        "/threads/long-conv?space_id=work&limit=0",
+        "/threads/long-conv?space_id=work&offset=1319&limit=32",
+        "/threads/long-conv/append",
+        "/threads/long-conv?space_id=work&offset=1327&limit=32",
+    ]
+    assert all("limit=1359" not in ep for ep in endpoints)
+    append_call = mock_http.call_args_list[2]
+    assert append_call.kwargs["timeout"] >= nmem_shared.THREAD_SYNC_WRITE_TIMEOUT
+    assert mock_http.call_args_list[0].kwargs["timeout"] >= nmem_shared.THREAD_SYNC_READ_TIMEOUT
+    assert mock_http.call_args_list[3].kwargs["timeout"] >= nmem_shared.THREAD_SYNC_READ_TIMEOUT
+    payload = append_call.kwargs["payload"]
+    assert payload["messages"] == delta
+    assert payload["expected_message_count"] == 1351
+    assert payload["space_id"] == "work"
+    assert payload["idempotency_key"] == nmem_shared.build_append_idempotency_key("long-conv", 1351, delta)
+
+
+def test_long_thread_divergent_history_fails_without_full_fetch():
+    stored = [{"role": "user", "content": f"remote-{i}"} for i in range(1351)]
+    local = [{"role": "user", "content": f"local-{i}"} for i in range(1359)]
+
+    responses = [
+        {"id": "div-conv", "space_id": "work", "total_messages": 1351, "messages": []},
+        {"id": "div-conv", "space_id": "work", "total_messages": 1351, "messages": stored[1319:1351]},
+        {"id": "div-conv", "space_id": "work", "total_messages": 1351, "messages": stored[0:32]},
+    ]
+    with (
+        patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
+        patch.object(nmem_shared, "http_request", side_effect=responses) as mock_http,
+    ):
+        assert nmem_shared.sync_thread_capture("div-conv", "Divergent", local, "work") == (False, True)
+        assert nmem_shared.get_last_sync_failure_reason() == "divergent_history"
+
+    endpoints = [c.args[0] for c in mock_http.call_args_list]
+    assert endpoints == [
+        "/threads/div-conv?space_id=work&limit=0",
+        "/threads/div-conv?space_id=work&offset=1319&limit=32",
+        "/threads/div-conv?space_id=work&limit=32",
+    ]
+
+
+def test_long_thread_mid_history_divergence_binary_searches_bounded_windows():
+    stored = [{"role": "user", "content": f"m-{i}"} for i in range(150)]
+    local = [*stored[:60], *[{"role": "user", "content": f"edited-{i}"} for i in range(60, 150)]]
+
+    def fake_http(endpoint, method="GET", payload=None, **kwargs):
+        if method == "GET":
+            from urllib.parse import parse_qs, urlparse
+
+            qs = parse_qs(urlparse(endpoint).query)
+            offset = int(qs.get("offset", ["0"])[0])
+            limit = int(qs.get("limit", ["500"])[0])
+            assert limit <= nmem_shared.THREAD_SYNC_TAIL_WINDOW
+            return {
+                "id": "mid-conv",
+                "space_id": "work",
+                "total_messages": len(stored),
+                "messages": stored[offset : offset + limit],
+            }
+        if endpoint == "/threads/mid-conv/reconcile-tail":
+            assert payload["matched_count"] == 60
+            assert payload["messages"] == local[60:]
+            stored[:] = local
+            return {"success": True}
+        raise AssertionError(f"Unexpected call: {method} {endpoint}")
+
+    with (
+        patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
+        patch.object(nmem_shared, "http_request", side_effect=fake_http) as mock_http,
+    ):
+        assert nmem_shared.sync_thread_capture("mid-conv", "Mid Edit", local, "work") == (True, True)
+    assert any(c.args[0] == "/threads/mid-conv/reconcile-tail" for c in mock_http.call_args_list)
+
+
+def test_cli_long_thread_append_uses_bounded_show_and_idempotency_key():
+    stored = [{"role": "user", "content": f"m-{i}"} for i in range(95)]
+    delta = [{"role": "user", "content": f"m-{i}"} for i in range(95, 100)]
+    local = stored + delta
+
+    cli_responses = [
+        subprocess.CompletedProcess([], 0, json.dumps({"id": "cli-long", "total_messages": 95, "messages": []}), ""),
+        subprocess.CompletedProcess(
+            [], 0, json.dumps({"id": "cli-long", "total_messages": 95, "messages": stored[63:95]}), ""
+        ),
+        subprocess.CompletedProcess([], 0, '{"success": true}', ""),
+        subprocess.CompletedProcess(
+            [], 0, json.dumps({"id": "cli-long", "total_messages": 100, "messages": local[68:100]}), ""
+        ),
+    ]
+    with (
+        patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
+        patch.object(nmem_shared, "http_request", return_value=None),
+        patch.object(nmem_shared, "run_nmem_command", side_effect=cli_responses) as mock_cli,
+    ):
+        assert nmem_shared.sync_thread_capture("cli-long", "Long CLI", local) == (True, True)
+
+    calls = [c.args[0] for c in mock_cli.call_args_list]
+    assert calls[0] == ["--json", "t", "show", "cli-long", "--limit", "0"]
+    assert calls[1] == ["--json", "t", "show", "cli-long", "--limit", "32", "--offset", "63"]
+    assert calls[2][:3] == ["t", "append", "cli-long"]
+    assert "--idempotency-key" in calls[2]
+    key_idx = calls[2].index("--idempotency-key")
+    assert calls[2][key_idx + 1] == nmem_shared.build_append_idempotency_key("cli-long", 95, delta)
+    assert calls[3] == ["--json", "t", "show", "cli-long", "--limit", "32", "--offset", "68"]

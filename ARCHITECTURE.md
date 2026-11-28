@@ -86,8 +86,8 @@ flowchart TD
   1. Reads `conversationId`, `transcriptPath`, and `fullyIdle` from stdin.
   2. If `fullyIdle: false` (background tasks still running), skips thread capture and defers to the final idle stop.
   3. Extracts user prompts (`USER_EXPLICIT`) and model responses (`MODEL`).
-  4. Checks thread existence via `HTTP GET /threads/<id>` or `nmem t show <id>`. If all transcript messages match server thread messages, returns success immediately.
-  5. If leading messages match, uses `POST /threads/<id>/reconcile-tail` to append only missing trailing messages incrementally. If `reconcile-tail` fails (e.g. 400 Bad Request due to divergent message prefixes), it falls back directly to `POST /threads/<id>/append`.
+  4. Checks thread existence via `HTTP GET /threads/<id>` (or `limit=0` metadata lookup + bounded `offset`/`limit` 32-message tail window for long threads) or `nmem t show`. If the stored tail and count already match the transcript, returns success immediately without downloading the full thread.
+  5. For pure suffix growth (`matched_count == total_messages`), sends only the new messages via `POST /threads/<id>/append` with `expected_message_count` and a deterministic `idempotency_key` (or `nmem t append --idempotency-key` in CLI fallback), then verifies persistence using a bounded 32-message tail readback. When a stored tail diverges after a matching prefix, uses `POST /threads/<id>/reconcile-tail` to replace only the differing suffix; divergent histories with no matching prefix fail closed without appending duplicates.
   6. If backend calls fail, saves the session to `~/.nowledge-mem/plugins/antigravity/unsynced.json` via file-locked append for automatic background retry.
   7. Scans for approved `learning_proposal.md` artifacts and syncs them to rules (`nmem rules upsert`), skills (`nmem skills enroll`), or memories (`nmem memories add`).
 
