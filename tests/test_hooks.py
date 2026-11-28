@@ -3717,3 +3717,14 @@ def test_sync_mcp_config_ignores_malformed_host_config_and_self_path(tmp_path, m
     assert json.loads(host_cfg.read_text(encoding="utf-8"))["mcpServers"]["nowledge-mem"]["url"] == (
         "http://127.0.0.1:14242/mcp"
     )
+
+
+def test_stop_hook_timeout_covers_thread_sync_budget():
+    hooks_cfg = json.loads((HOOKS_DIR.parent / "hooks.json").read_text(encoding="utf-8"))
+    stop_timeout = hooks_cfg["nowledge-mem-hooks"]["Stop"][0]["timeout"]
+    worst_case_sync = (
+        nmem_shared.THREAD_SYNC_READ_TIMEOUT
+        + nmem_shared.THREAD_SYNC_MAX_WRITE_TIMEOUT
+        + nmem_shared.THREAD_SYNC_READ_TIMEOUT
+    )
+    assert stop_timeout > worst_case_sync
