@@ -17,6 +17,7 @@ MIN_PYTHON = (3, 9)
 # still prompts when the user chose Always Allow.
 HOOKS = {
     "bridge-start": ("bridge-start", {}),
+    "bridge-notice": ("bridge-notice", {}),
     "session-start": ("session-start", {}),
     "session-end": ("session-end", {}),
     "gate": ("nmem-gate", {"decision": "force_ask"}),

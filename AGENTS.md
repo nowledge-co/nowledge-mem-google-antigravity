@@ -54,7 +54,7 @@ When modifying or adding hook scripts under `hooks/` and configuring them in `ho
 
 ---
 
-MCP synchronization must propagate the resolved Space with `X-Nmem-Space-Id`, validate explicit workspace declarations, and preserve the existing configuration on validation failure. Test header routing, Space changes, and invalid declarations.
+MCP synchronization must propagate the resolved Space with `X-Nmem-Space-Id`, validate explicit workspace declarations, and preserve the existing configuration on validation failure. In default `auto` mode (`NMEM_MCP_SYNC_MODE` / `mcpSyncMode`), defer plugin `mcp_config.json` whenever a distinct host global (`~/.gemini/config/mcp_config.json`) or workspace (`.agents/mcp_config.json`) config already defines `nowledge-mem` so custom host policies (such as `disabledTools`) are not duplicated or overridden. Test header routing, host avoidance modes, Space changes, and invalid declarations.
 
 Do not opt into the `exact-v1` protocol without backend capability negotiation: local backends requiring migration reject it. The Space header selects the existing configured retrieval policy, which may include shared Default memories.
 
@@ -170,3 +170,7 @@ Whenever adding, modifying, or refactoring features, lifecycle hooks, transport 
 4. **Validation Enforcement ([`scripts/validate-plugin.mjs`](./scripts/validate-plugin.mjs))**:
    - When adding new skills, scripts, or core documentation files, agents **must** register the new file paths in the `requiredPaths` array inside `scripts/validate-plugin.mjs`.
    - Run `npm run validate` or `make validate` to verify that all documentation and code assets pass validation cleanly before completing the turn.
+
+## Bridge notice maintenance
+
+Keep `bridge-notice.py` local-only and first-invocation-only. Use the real `conversationId`; do not synthesize session IDs. Preserve the shared observer cache/ledger contract and emit model-facing hints via `systemMessage`. Stop is not a true session end and must not remove a live subscription. Test missing IDs, later invocations, and passive cache delivery without a CLI process.

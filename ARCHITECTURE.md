@@ -77,7 +77,7 @@ flowchart TD
 - **Trigger**: Runs after each model invocation completes.
 - **Execution Flow**:
   1. Checks for pending unsynced offline sessions (`~/.nowledge-mem/plugins/antigravity/unsynced.json`) via `nmem_shared.get_unsynced_sessions()`.
-  2. If pending items exist, automatically spawns an asynchronous background worker (`nmem_shared.retry_unsynced_sessions_async()`) to drain the queue.
+  2. If at least one pending item is due (`has_due_unsynced_sessions`, i.e., past its `next_retry_at` exponential backoff deadline), spawns an asynchronous background worker (`nmem_shared.retry_unsynced_sessions_async()`) to drain due entries.
   3. Throttles warning notifications to at most once per conversation session (`should_emit_unsynced_warning`), emitting `injectSteps` with an informational message clarifying that background sync is in progress and `trigger_memory_catchup` is not required. Session warning state is tracked locally in `<session_dir>/.nmem/warning_history.json`.
 
 ### 4. Stop Hook (`hooks/session-end.py`)
@@ -86,8 +86,8 @@ flowchart TD
   1. Reads `conversationId`, `transcriptPath`, and `fullyIdle` from stdin.
   2. If `fullyIdle: false` (background tasks still running), skips thread capture and defers to the final idle stop.
   3. Extracts user prompts (`USER_EXPLICIT`) and model responses (`MODEL`). Derives the title from the first prompt, unwrapping Antigravity and T3 Code metadata before collapsing whitespace and taking up to 60 characters.
-  4. Checks thread existence via `HTTP GET /threads/<id>` or `nmem t show <id>`. If all transcript messages match server thread messages, returns success immediately.
-  5. If leading messages match, uses `POST /threads/<id>/reconcile-tail` to append only missing trailing messages incrementally. If `reconcile-tail` fails (e.g. 400 Bad Request due to divergent message prefixes), it falls back directly to `POST /threads/<id>/append`.
+  4. Checks thread existence via `HTTP GET /threads/<id>` (or `limit=0` metadata lookup for long threads) or `nmem t show`. When a verified local sync checkpoint (`~/.nowledge-mem/plugins/antigravity/cache/thread_sync_checkpoints.json`) matches the local prefix SHA-256 hash and server metadata (`total_messages`, `storage_id`, `created_at`, `space_id`), confirms the bounded 32-message tail window (content and recorded message IDs) in O(1). For unknown histories or any checkpoint mismatch, scans forward from `offset=0` in bounded 32-message pages (on both HTTP and CLI fallback) to locate the exact first differing row without single-request full-thread downloads.
+  5. For pure suffix growth (`matched_count == total_messages`), sends only the new messages via `POST /threads/<id>/append` with `expected_message_count` and a deterministic `idempotency_key` (or `nmem t append --idempotency-key` in CLI fallback), then verifies persistence across the bounded write-start and 32-message tail windows and updates the local checkpoint. When stored history diverges after a matching prefix, uses `POST /threads/<id>/reconcile-tail` on HTTP to replace from the exact first differing row (or fails closed on CLI fallback); divergent histories with no matching prefix fail closed without appending duplicates.
   6. If backend calls fail, saves the session to `~/.nowledge-mem/plugins/antigravity/unsynced.json` via file-locked append for automatic background retry.
   7. Scans for approved `learning_proposal.md` artifacts and syncs them to rules (`nmem rules upsert`), skills (`nmem skills enroll`), or memories (`nmem memories add`).
 
@@ -95,7 +95,7 @@ flowchart TD
 - Rather than persisting session-level state into the global `~/.nowledge-mem/` configuration folder, hooks isolate session-scoped metadata within `<session_dir>/.nmem/` (resolved from `artifactDirectoryPath` or `transcriptPath`):
   - `<session_dir>/.nmem/catchup_history.json`: Tracks per-horizon catchup executions within this session.
   - `<session_dir>/.nmem/warning_history.json`: Tracks notification emissions for offline sync warnings to prevent repeating alerts in active conversations.
-  - Empty `unsynced.json` markers are removed after retry. Malformed queue files are moved beside the queue as `unsynced.corrupt-<timestamp>.json` so user sessions remain recoverable rather than being discarded.
+  - Empty `unsynced.json` markers are removed after retry. Malformed queue files are moved beside the queue as `unsynced.corrupt-<timestamp>.json` so user sessions remain recoverable rather than being discarded. Repeated retry failures record `retry_count`, `next_retry_at` (exponential backoff starting at 30s, capped at 3600s), and `last_error`; sessions that exhaust `UNSYNCED_MAX_RETRIES` (5) or fail with permanent `divergent_history` are atomically isolated into `~/.nowledge-mem/plugins/antigravity/dead_letter.json` before removal from `unsynced.json`.
 
 ### 6. Interpreter Floor & Failure Fallbacks
 - Hooks run on whatever `python3` (then `python`) the host provides. On macOS that is the Command Line Tools Python 3.9, so hook and skill code stays compatible with Python 3.9: modules that use `X | None` annotations start with `from __future__ import annotations` (enforced by ruff `FA`), and 3.10+ APIs such as `zip(strict=)` are not used. CI runs `tests/test_hooks.py` on Python 3.9.
@@ -163,7 +163,7 @@ intended destination. Environment Space overrides still take precedence.
 
 ---
 
-MCP configuration synchronization resolves and validates the active Space, then emits `X-Nmem-Space-Id`. Explicit invalid Spaces must not overwrite the connection with Default. The generated plugin configuration is shared on disk; simultaneous workspaces using different Spaces require host-level per-session connections and are not isolated by this file.
+MCP configuration synchronization resolves and validates the active Space, then emits `X-Nmem-Space-Id`. Explicit invalid Spaces must not overwrite the connection with Default. In the default `auto` mode (`NMEM_MCP_SYNC_MODE` / `mcpSyncMode`: `auto` | `managed` | `off`), `sync_mcp_config_file()` checks Antigravity's host global (`~/.gemini/config/mcp_config.json`, skipped when `NMEM_IGNORE_HOST_CONFIG=1`) and workspace (`.agents/mcp_config.json`) MCP configs first; when a distinct host config already defines `mcpServers.nowledge-mem`, the plugin defers without recreating a deleted plugin `mcp_config.json` and removes `nowledge-mem` from an existing plugin `mcp_config.json` (preserving other servers) to avoid duplicate loading or overriding host policies such as `disabledTools`. The generated plugin configuration is shared on disk; simultaneous workspaces using different Spaces require host-level per-session connections and are not isolated by this file.
 
 Do not opt into the `exact-v1` protocol without backend capability negotiation: local backends requiring migration reject it. The Space header selects the existing configured retrieval policy, which may include shared Default memories.
 
@@ -215,3 +215,7 @@ python3 -m pytest -v tests/integration/
 # Validate manifest, configuration files, and release assets
 node scripts/validate-plugin.mjs
 ```
+
+## Local Bridge notice consumer
+
+`bridge-notice.py` runs only for `PreInvocation` with `invocationNum == 0` and an actual `conversationId`. It reuses the shared bounded Python observer-cache consumer and injects its hint as `systemMessage`. No CLI subprocess or mailbox network request runs on this path. The local ledger deduplicates observer tokens; stale, disabled, missing or differently bound snapshots remain silent. Host correlation does not grant identity authority. `bridge-start.py` offers conditional subscription guidance only under the existing startup opt-in and approved Context gate.

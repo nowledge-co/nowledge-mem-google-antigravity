@@ -25,8 +25,9 @@ def main():
         # that should be injected mid-turn.
         unsynced = nmem_shared.get_unsynced_sessions()
         if isinstance(unsynced, dict) and len(unsynced) > 0:
-            # Trigger asynchronous background retry
-            nmem_shared.retry_unsynced_sessions_async()
+            # Trigger asynchronous background retry only when at least one session is past its backoff window
+            if nmem_shared.has_due_unsynced_sessions(unsynced):
+                nmem_shared.retry_unsynced_sessions_async()
 
             # Throttle warning to at most once per conversation/session to prevent context nag loops
             if nmem_shared.should_emit_unsynced_warning(
