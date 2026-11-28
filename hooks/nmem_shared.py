@@ -1331,6 +1331,88 @@ def get_unsynced_queue_path() -> Path:
     return new_path
 
 
+UNSYNCED_MAX_RETRIES = 5
+UNSYNCED_BASE_BACKOFF_SECONDS = 30.0
+UNSYNCED_MAX_BACKOFF_SECONDS = 3600.0
+PERMANENT_SYNC_FAILURE_REASONS = frozenset({"divergent_history"})
+
+
+def get_dead_letter_queue_path() -> Path:
+    """Return the Path to the dead-letter queue file beside unsynced.json."""
+    return get_unsynced_queue_path().with_name("dead_letter.json")
+
+
+def get_dead_letter_sessions() -> dict:
+    """Return dict of dead-lettered sessions isolated from the active retry queue."""
+    dlq_path = get_dead_letter_queue_path()
+    if not dlq_path.exists():
+        return {}
+    try:
+        data = json.loads(dlq_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _append_dead_letter_entries(entries: dict[str, dict]) -> bool:
+    """Atomically merge dead-lettered sessions into dead_letter.json. Returns True on success."""
+    if not entries:
+        return True
+    dlq_path = get_dead_letter_queue_path()
+    dlq_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = dlq_path.with_suffix(".lock")
+    try:
+        with FileLock(lock_path):
+            dlq = _load_capture_queue(dlq_path)
+            dlq.update(entries)
+            _write_json_atomic(dlq_path, dlq)
+        return True
+    except Exception as e:
+        if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+            sys.stderr.write(f"Warning: Failed to write dead-letter sessions file: {e}\n")
+        return False
+
+
+def _unsynced_backoff_seconds(retry_count: int) -> float:
+    if retry_count <= 0:
+        return 0.0
+    delay = UNSYNCED_BASE_BACKOFF_SECONDS * (2 ** (retry_count - 1))
+    return min(float(delay), UNSYNCED_MAX_BACKOFF_SECONDS)
+
+
+def is_unsynced_session_due(entry: dict, now: float | None = None) -> bool:
+    """Return True when a queued session is eligible for retry at `now`."""
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("messages") == []:
+        return True
+    next_retry_at = entry.get("next_retry_at")
+    if not isinstance(next_retry_at, (int, float)) or next_retry_at <= 0:
+        return True
+    current_time = time.time() if now is None else float(now)
+    return current_time >= float(next_retry_at)
+
+
+def has_due_unsynced_sessions(unsynced: dict | None = None, now: float | None = None) -> bool:
+    """Return True when at least one session in unsynced.json is due for retry."""
+    sessions = get_unsynced_sessions() if unsynced is None else unsynced
+    if not isinstance(sessions, dict) or not sessions:
+        return False
+    current_time = time.time() if now is None else float(now)
+    return any(is_unsynced_session_due(entry, now=current_time) for entry in sessions.values())
+
+
+def _messages_fingerprint(messages: list) -> str:
+    digest = hashlib.sha256()
+    for msg in messages:
+        if isinstance(msg, dict):
+            role, content = _message_role_content(msg)
+            digest.update(f"{role or ''}\0{content or ''}\0".encode())
+        else:
+            digest.update(repr(msg).encode("utf-8"))
+    return digest.hexdigest()[:24]
+
+
 def save_unsynced_session(
     conv_id: str, messages: list, title: str, space: str | None, host_agent_id: str | None
 ) -> None:
@@ -1352,14 +1434,28 @@ def save_unsynced_session(
             key = conv_id
             if f"{scope}:{conv_id}" in queue or (key in queue and queue[key].get("connection_scope") != scope):
                 key = f"{scope}:{conv_id}"
-            queue[key] = {
+            fingerprint = _messages_fingerprint(messages)
+            existing = queue.get(key)
+            entry: dict = {
                 "connection_scope": scope,
                 "conversation_id": conv_id,
                 "messages": messages,
                 "title": title,
                 "space": space,
                 "host_agent_id": host_agent_id,
+                "content_fingerprint": fingerprint,
             }
+            # Preserve existing retry/backoff state when re-queuing the exact same snapshot.
+            if isinstance(existing, dict) and existing.get("space") == space:
+                existing_fp = existing.get("content_fingerprint")
+                same_snapshot = existing_fp == fingerprint or (
+                    existing_fp is None and existing.get("messages") == messages
+                )
+                if same_snapshot:
+                    for field in ("retry_count", "next_retry_at", "first_failed_at", "last_failed_at", "last_error"):
+                        if field in existing:
+                            entry[field] = existing[field]
+            queue[key] = entry
 
             _write_json_atomic(queue_path, queue)
     except Exception as e:
@@ -2029,13 +2125,15 @@ def sync_thread_capture(
     return False, False
 
 
-def retry_unsynced_sessions() -> None:
-    """Attempt to sync any unsynced sessions in the queue."""
+def retry_unsynced_sessions(*, now: float | None = None, ignore_backoff: bool = False) -> None:
+    """Attempt to sync due unsynced sessions with exponential backoff and dead-letter isolation."""
     queue_path = get_unsynced_queue_path()
     lock_path = queue_path.with_suffix(".lock")
 
     if not queue_path.exists():
         return
+
+    current_time = time.time() if now is None else float(now)
 
     try:
         with FileLock(lock_path):
@@ -2048,10 +2146,15 @@ def retry_unsynced_sessions() -> None:
                 return
 
             updated_queue = dict(queue)
+            dead_letter_batch: dict[str, dict] = {}
             for queue_key, data in queue.items():
+                if not isinstance(data, dict):
+                    continue
                 conv_id = data.get("conversation_id", queue_key)
                 if data.get("messages") == []:
                     del updated_queue[queue_key]
+                    continue
+                if not ignore_backoff and not is_unsynced_session_due(data, now=current_time):
                     continue
                 if is_backend_unreachable():
                     continue
@@ -2064,9 +2167,43 @@ def retry_unsynced_sessions() -> None:
                 with pin_capture_connection() as connection:
                     if data.get("connection_scope") != _spaces_cache_scope_id(connection):
                         continue
+                    _set_last_sync_failure_reason(None)
                     success, _ = sync_thread_capture(conv_id, title, messages, space, host_agent_id)
+                    failure_reason = get_last_sync_failure_reason() or (
+                        "backend_unreachable" if is_backend_unreachable() else "sync_failed"
+                    )
                 if success:
                     del updated_queue[queue_key]
+                    continue
+
+                updated_entry = dict(data)
+                prev_retries = updated_entry.get("retry_count")
+                retry_count = (prev_retries if isinstance(prev_retries, int) and prev_retries >= 0 else 0) + 1
+                updated_entry["retry_count"] = retry_count
+                updated_entry.setdefault("first_failed_at", current_time)
+                updated_entry["last_failed_at"] = current_time
+                updated_entry["last_error"] = failure_reason
+
+                if failure_reason in PERMANENT_SYNC_FAILURE_REASONS or retry_count >= UNSYNCED_MAX_RETRIES:
+                    dlq_entry = dict(updated_entry)
+                    dlq_entry["dead_lettered_at"] = current_time
+                    dlq_entry["dead_letter_reason"] = failure_reason
+                    dead_letter_batch[queue_key] = dlq_entry
+                else:
+                    updated_entry["next_retry_at"] = current_time + _unsynced_backoff_seconds(retry_count)
+                    updated_queue[queue_key] = updated_entry
+
+            if dead_letter_batch:
+                if _append_dead_letter_entries(dead_letter_batch):
+                    for queue_key in dead_letter_batch:
+                        updated_queue.pop(queue_key, None)
+                else:
+                    for queue_key, dlq_entry in dead_letter_batch.items():
+                        fallback_entry = dict(dlq_entry)
+                        fallback_entry.pop("dead_lettered_at", None)
+                        fallback_entry.pop("dead_letter_reason", None)
+                        fallback_entry["next_retry_at"] = current_time + UNSYNCED_MAX_BACKOFF_SECONDS
+                        updated_queue[queue_key] = fallback_entry
 
             if updated_queue == queue:
                 return

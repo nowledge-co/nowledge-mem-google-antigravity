@@ -77,7 +77,7 @@ flowchart TD
 - **Trigger**: Runs after each model invocation completes.
 - **Execution Flow**:
   1. Checks for pending unsynced offline sessions (`~/.nowledge-mem/plugins/antigravity/unsynced.json`) via `nmem_shared.get_unsynced_sessions()`.
-  2. If pending items exist, automatically spawns an asynchronous background worker (`nmem_shared.retry_unsynced_sessions_async()`) to drain the queue.
+  2. If at least one pending item is due (`has_due_unsynced_sessions`, i.e., past its `next_retry_at` exponential backoff deadline), spawns an asynchronous background worker (`nmem_shared.retry_unsynced_sessions_async()`) to drain due entries.
   3. Throttles warning notifications to at most once per conversation session (`should_emit_unsynced_warning`), emitting `injectSteps` with an informational message clarifying that background sync is in progress and `trigger_memory_catchup` is not required. Session warning state is tracked locally in `<session_dir>/.nmem/warning_history.json`.
 
 ### 4. Stop Hook (`hooks/session-end.py`)
@@ -95,7 +95,7 @@ flowchart TD
 - Rather than persisting session-level state into the global `~/.nowledge-mem/` configuration folder, hooks isolate session-scoped metadata within `<session_dir>/.nmem/` (resolved from `artifactDirectoryPath` or `transcriptPath`):
   - `<session_dir>/.nmem/catchup_history.json`: Tracks per-horizon catchup executions within this session.
   - `<session_dir>/.nmem/warning_history.json`: Tracks notification emissions for offline sync warnings to prevent repeating alerts in active conversations.
-  - Empty `unsynced.json` markers are removed after retry. Malformed queue files are moved beside the queue as `unsynced.corrupt-<timestamp>.json` so user sessions remain recoverable rather than being discarded.
+  - Empty `unsynced.json` markers are removed after retry. Malformed queue files are moved beside the queue as `unsynced.corrupt-<timestamp>.json` so user sessions remain recoverable rather than being discarded. Repeated retry failures record `retry_count`, `next_retry_at` (exponential backoff starting at 30s, capped at 3600s), and `last_error`; sessions that exhaust `UNSYNCED_MAX_RETRIES` (5) or fail with permanent `divergent_history` are atomically isolated into `~/.nowledge-mem/plugins/antigravity/dead_letter.json` before removal from `unsynced.json`.
 
 ### 6. Interpreter Floor & Failure Fallbacks
 - Hooks run on whatever `python3` (then `python`) the host provides. On macOS that is the Command Line Tools Python 3.9, so hook and skill code stays compatible with Python 3.9: modules that use `X | None` annotations start with `from __future__ import annotations` (enforced by ruff `FA`), and 3.10+ APIs such as `zip(strict=)` are not used. CI runs `tests/test_hooks.py` on Python 3.9.

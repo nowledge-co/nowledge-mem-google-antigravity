@@ -2394,7 +2394,7 @@ def test_scoped_capture_retains_queue_and_never_relocates_via_import(tmp_path):
                 return_value=MagicMock(returncode=1, stdout="", stderr="503 service unavailable"),
             ) as mock_run,
         ):
-            nmem_shared.retry_unsynced_sessions()
+            nmem_shared.retry_unsynced_sessions(ignore_backoff=True)
             assert all("import" not in c.args[0] and "create" not in c.args[0] for c in mock_run.call_args_list)
         assert queue_file.exists()
         assert "conv-replay-1" in json.loads(queue_file.read_text(encoding="utf-8"))
@@ -2624,7 +2624,7 @@ def test_loopback_http_capture_404_create_and_identical_scope_guard(tmp_path, di
             mode["state"] = "canonical_space_id_identical"
             recorded_requests.clear()
             nmem_shared.reset_backend_unreachable()
-            nmem_shared.retry_unsynced_sessions()
+            nmem_shared.retry_unsynced_sessions(ignore_backoff=True)
             assert [r[:2] for r in recorded_requests] == [("GET", "/threads/conv%2F1?space_id=work%20space")]
             assert not nmem_shared.get_unsynced_queue_path().exists()
 
@@ -3437,3 +3437,159 @@ def test_cli_long_thread_append_uses_bounded_show_and_idempotency_key():
     key_idx = calls[2].index("--idempotency-key")
     assert calls[2][key_idx + 1] == nmem_shared.build_append_idempotency_key("cli-long", 95, delta)
     assert calls[3] == ["--json", "t", "show", "cli-long", "--limit", "32", "--offset", "68"]
+
+
+def test_unsynced_retry_exponential_backoff_and_dead_letter_isolation(tmp_path, monkeypatch):
+    queue_path = tmp_path / "unsynced.json"
+    dlq_path = tmp_path / "dead_letter.json"
+    monkeypatch.setattr(nmem_shared, "get_unsynced_queue_path", lambda: queue_path)
+    monkeypatch.setattr(nmem_shared, "is_backend_unreachable", lambda: False)
+
+    nmem_shared.save_unsynced_session("conv-backoff", [{"role": "user", "content": "hi"}], "Title", "default", "host")
+    base_now = 1_700_000_000.0
+    expected_delays = [30.0, 60.0, 120.0, 240.0]
+
+    with patch.object(nmem_shared, "sync_thread_capture", return_value=(False, True)) as mock_sync:
+        current = base_now
+        for attempt, expected_delay in enumerate(expected_delays, start=1):
+            nmem_shared.retry_unsynced_sessions(now=current)
+            assert mock_sync.call_count == attempt
+            entry = json.loads(queue_path.read_text(encoding="utf-8"))["conv-backoff"]
+            assert entry["retry_count"] == attempt
+            assert entry["next_retry_at"] == current + expected_delay
+            assert not dlq_path.exists()
+
+            # Retrying before next_retry_at must skip without calling sync_thread_capture.
+            nmem_shared.retry_unsynced_sessions(now=current + expected_delay - 1.0)
+            assert mock_sync.call_count == attempt
+            current += expected_delay
+
+        # Final failure hits UNSYNCED_MAX_RETRIES -> moves to dead_letter.json and clears unsynced.json.
+        nmem_shared.retry_unsynced_sessions(now=current)
+        assert mock_sync.call_count == nmem_shared.UNSYNCED_MAX_RETRIES
+
+    assert not queue_path.exists()
+    dlq = json.loads(dlq_path.read_text(encoding="utf-8"))
+    assert "conv-backoff" in dlq
+    assert dlq["conv-backoff"]["retry_count"] == nmem_shared.UNSYNCED_MAX_RETRIES
+    assert dlq["conv-backoff"]["messages"] == [{"role": "user", "content": "hi"}]
+    assert dlq["conv-backoff"]["dead_letter_reason"] == "sync_failed"
+    assert dlq["conv-backoff"]["dead_lettered_at"] == current
+
+
+def test_unsynced_divergent_history_immediately_isolates_to_dead_letter(tmp_path, monkeypatch):
+    queue_path = tmp_path / "unsynced.json"
+    dlq_path = tmp_path / "dead_letter.json"
+    monkeypatch.setattr(nmem_shared, "get_unsynced_queue_path", lambda: queue_path)
+    monkeypatch.setattr(nmem_shared, "is_backend_unreachable", lambda: False)
+
+    nmem_shared.save_unsynced_session("conv-div", [{"role": "user", "content": "local"}], "Title", "default", "host")
+    with patch.object(
+        nmem_shared,
+        "http_request",
+        return_value={"id": "conv-div", "space_id": "default", "messages": [{"role": "user", "content": "remote"}]},
+    ):
+        nmem_shared.retry_unsynced_sessions(now=1_700_000_000.0)
+
+    assert not queue_path.exists()
+    dlq = json.loads(dlq_path.read_text(encoding="utf-8"))
+    assert dlq["conv-div"]["dead_letter_reason"] == "divergent_history"
+    assert dlq["conv-div"]["retry_count"] == 1
+
+
+def test_dead_letter_write_failure_preserves_unsynced_entry(tmp_path, monkeypatch):
+    queue_path = tmp_path / "unsynced.json"
+    monkeypatch.setattr(nmem_shared, "get_unsynced_queue_path", lambda: queue_path)
+    monkeypatch.setattr(nmem_shared, "is_backend_unreachable", lambda: False)
+
+    nmem_shared.save_unsynced_session("conv-keep", [{"role": "user", "content": "local"}], "Title", "default", "host")
+    with (
+        patch.object(
+            nmem_shared,
+            "http_request",
+            return_value={"id": "conv-keep", "space_id": "default", "messages": [{"role": "user", "content": "other"}]},
+        ),
+        patch.object(nmem_shared, "_append_dead_letter_entries", return_value=False),
+    ):
+        nmem_shared.retry_unsynced_sessions(now=1_700_000_000.0)
+
+    assert queue_path.exists()
+    preserved = json.loads(queue_path.read_text(encoding="utf-8"))["conv-keep"]
+    assert preserved["messages"] == [{"role": "user", "content": "local"}]
+    assert preserved["next_retry_at"] == 1_700_000_000.0 + nmem_shared.UNSYNCED_MAX_BACKOFF_SECONDS
+
+
+def test_save_unsynced_preserves_backoff_for_same_snapshot_and_resets_on_new_messages(tmp_path, monkeypatch):
+    queue_path = tmp_path / "unsynced.json"
+    monkeypatch.setattr(nmem_shared, "get_unsynced_queue_path", lambda: queue_path)
+    monkeypatch.setattr(nmem_shared, "is_backend_unreachable", lambda: False)
+
+    msgs = [{"role": "user", "content": "turn 1"}]
+    nmem_shared.save_unsynced_session("conv-fp", msgs, "Title", "default", "host")
+    with patch.object(nmem_shared, "sync_thread_capture", return_value=(False, True)):
+        nmem_shared.retry_unsynced_sessions(now=1_700_000_000.0)
+
+    # Re-saving identical snapshot keeps retry_count and next_retry_at intact.
+    nmem_shared.save_unsynced_session("conv-fp", msgs, "Title", "default", "host")
+    same_entry = json.loads(queue_path.read_text(encoding="utf-8"))["conv-fp"]
+    assert same_entry["retry_count"] == 1
+    assert same_entry["next_retry_at"] == 1_700_000_030.0
+
+    # Saving updated snapshot with new messages resets retry backoff.
+    nmem_shared.save_unsynced_session(
+        "conv-fp", [*msgs, {"role": "assistant", "content": "turn 2"}], "Title", "default", "host"
+    )
+    fresh_entry = json.loads(queue_path.read_text(encoding="utf-8"))["conv-fp"]
+    assert "retry_count" not in fresh_entry
+    assert "next_retry_at" not in fresh_entry
+
+
+@patch("nmem_shared.retry_unsynced_sessions_async")
+@patch("nmem_shared.should_emit_unsynced_warning", return_value=False)
+@patch("nmem_shared.get_unsynced_sessions")
+@patch("nmem_shared.read_hook_input")
+@patch("nmem_shared.emit")
+def test_post_invocation_skips_background_retry_when_all_sessions_in_backoff(
+    mock_emit, mock_input, mock_unsynced, mock_should_emit, mock_retry
+):
+    mock_input.return_value = {"invocationNum": 2, "conversationId": "conv-backoff-ui"}
+    mock_unsynced.return_value = {
+        "conv-1": {
+            "title": "Test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "retry_count": 2,
+            "next_retry_at": time.time() + 300.0,
+        }
+    }
+
+    with patch.object(sys, "argv", ["post-invocation.py"]):
+        post_invocation.main()
+
+    mock_retry.assert_not_called()
+    mock_emit.assert_called_once_with({})
+
+
+@patch("nmem_shared.run_nmem_command")
+def test_nmem_status_reports_dead_letter_sessions(mock_run_cmd, tmp_path, monkeypatch, capsys):
+    queue_path = tmp_path / "unsynced.json"
+    dlq_path = tmp_path / "dead_letter.json"
+    monkeypatch.setattr(nmem_shared, "get_unsynced_queue_path", lambda: queue_path)
+    dlq_path.write_text(
+        json.dumps({"conv-dead": {"conversation_id": "conv-dead", "dead_letter_reason": "divergent_history"}}),
+        encoding="utf-8",
+    )
+    mock_run_cmd.return_value = MagicMock(returncode=0, stdout="Connected", stderr="")
+    with (
+        patch("nmem_shared.resolve_space", return_value="default"),
+        patch("nmem_shared.is_backend_unreachable", return_value=False),
+        patch(
+            "nmem_shared.http_request",
+            return_value={"agent_running": True, "running": [], "queued": [], "scheduled_once": [], "recurring": []},
+        ),
+        patch.object(sys, "argv", ["nmem_status.py", "--conv-id", "conv-dead"]),
+    ):
+        nmem_status.main()
+    output = capsys.readouterr().out
+    assert "dead_letter.json" in output
+    assert "conv-dead" in output
+    assert "divergent_history" in output
