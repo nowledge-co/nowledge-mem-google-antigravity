@@ -964,6 +964,27 @@ def test_session_start_pre_invocation_never_injects_startup_context(invocation_n
     mock_sync_learnings.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (
+            "<USER_REQUEST><t3_code_instructions>host instructions</t3_code_instructions>\n"
+            "<user_request>Fix\n the parser</user_request><runtime_info>metadata</runtime_info>"
+            "</USER_REQUEST><ADDITIONAL_METADATA>ignored</ADDITIONAL_METADATA>",
+            "Fix the parser",
+        ),
+        ("<user_request>Inner only</user_request>", "Inner only"),
+        ("Explain <user_request>x</user_request> in prose", "Explain <user_request>x</user_request> in prose"),
+        ("<USER_REQUEST>Plain request</USER_REQUEST>", "Plain request"),
+        ("<runtime_info>metadata</runtime_info>", "Antigravity Session 12345678"),
+        ("a" * 60, "a" * 60),
+        ("a" * 61, "a" * 60 + "..."),
+    ],
+)
+def test_session_end_thread_title(content, expected):
+    assert session_end.thread_title(content, "123456789") == expected
+
+
 @patch("nmem_shared.http_request")
 @patch("nmem_shared.read_hook_input")
 @patch("nmem_shared.save_unsynced_session")

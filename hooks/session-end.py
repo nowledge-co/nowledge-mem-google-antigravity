@@ -11,6 +11,22 @@ sys.path.insert(0, str(Path(__file__).parent.resolve()))
 import nmem_shared
 
 
+def thread_title(content, conversation_id):
+    outer = re.search(r"<USER_REQUEST>(.*?)</USER_REQUEST>", content, re.DOTALL)
+    text = (outer.group(1) if outer else content).strip()
+    # Only strip host metadata at the envelope boundaries. Tags in prose are literal.
+    text = re.sub(r"^<t3_code_instructions>.*?</t3_code_instructions>", "", text, flags=re.DOTALL).strip()
+    if text.endswith("</runtime_info>"):
+        runtime = text.rfind("<runtime_info>")
+        if runtime >= 0:
+            text = text[:runtime].rstrip()
+    inner = re.fullmatch(r"<user_request>(.*)</user_request>", text, re.DOTALL)
+    title = " ".join((inner.group(1) if inner else text).split())
+    if len(title) > 60:
+        return title[:60] + "..."
+    return title or f"Antigravity Session {conversation_id[:8]}"
+
+
 def main():
     hook_input = nmem_shared.read_hook_input()
     conversation_id = hook_input.get("conversationId")
@@ -86,19 +102,8 @@ def capture(hook_input, conversation_id, transcript_path, artifact_directory_pat
             if not messages:
                 continue
 
-            # Generate clean title from first user request
-            title = f"Antigravity Session {conversation_id[:8]}"
-            first_user_msg = next((m for m in messages if m["role"] == "user"), None)
-            if first_user_msg and first_user_msg.get("content"):
-                clean_text = first_user_msg["content"]
-                match = re.search(r"<USER_REQUEST>([\s\S]*?)</USER_REQUEST>", clean_text)
-                if match:
-                    clean_text = match.group(1)
-                clean_text = " ".join(clean_text.strip().split())
-                if len(clean_text) > 60:
-                    title = clean_text[:60] + "..."
-                elif len(clean_text) > 0:
-                    title = clean_text
+            first_request = next((m["content"] for m in messages if m["role"] == "user"), "")
+            title = thread_title(first_request, conversation_id)
 
             success, stop_retrying = nmem_shared.sync_thread_capture(
                 conversation_id, title, messages, space, host_agent_id
