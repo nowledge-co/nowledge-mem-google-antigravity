@@ -3728,3 +3728,30 @@ def test_stop_hook_timeout_covers_thread_sync_budget():
         + nmem_shared.THREAD_SYNC_READ_TIMEOUT
     )
     assert stop_timeout > worst_case_sync
+
+
+def test_sync_mcp_config_defers_to_jsonc_bom_and_disabled_host_config(tmp_path, monkeypatch):
+    host_cfg = tmp_path / ".gemini" / "config" / "mcp_config.json"
+    host_cfg.parent.mkdir(parents=True)
+    host_cfg.write_bytes(
+        b"\xef\xbb\xbf{\n"
+        b"  // Host config written by `agy mcp add` + user JSONC comments\n"
+        b'  "mcpServers": {\n'
+        b"    /* Keep serverUrl http:// intact inside quoted string */\n"
+        b'    "nowledge-mem": {\n'
+        b'      "disabled": true,\n'
+        b'      "serverUrl": "http://127.0.0.1:14242/mcp",\n'
+        b'      "disabledTools": ["memory_delete",],\n'
+        b"    },\n"
+        b"  },\n"
+        b"}\n"
+    )
+    plugin_cfg = tmp_path / "plugin" / "mcp_config.json"
+    plugin_cfg.parent.mkdir(parents=True)
+    plugin_cfg.write_bytes(b'\xef\xbb\xbf{"mcpServers": {"nowledge-mem": {"url": "http://127.0.0.1:14242/mcp"}}}\n')
+
+    monkeypatch.setattr(nmem_shared, "get_effective_config", lambda cwd=None: ("http://127.0.0.1:14242", None))
+    monkeypatch.setattr(nmem_shared, "_mcp_space_id", lambda cwd, cfg: None)
+
+    assert nmem_shared.sync_mcp_config_file(str(plugin_cfg), cwd=tmp_path) is True
+    assert json.loads(plugin_cfg.read_text(encoding="utf-8")) == {"mcpServers": {}}

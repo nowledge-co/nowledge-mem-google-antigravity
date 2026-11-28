@@ -798,6 +798,89 @@ def _resolve_mcp_sync_mode(cwd: str | Path | None = None) -> str:
     return "auto"
 
 
+def _strip_jsonc_comments_and_trailing_commas(text: str) -> str:
+    """Strip JSONC comments and trailing commas outside string literals."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            i += 2
+            while i < n and text[i] not in ("\n", "\r"):
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            if i + 1 >= n:
+                raise ValueError("Unterminated block comment")
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+
+    without_comments = "".join(out)
+    # Remove trailing commas before closing '}' or ']' outside strings.
+    cleaned: list[str] = []
+    j = 0
+    m = len(without_comments)
+    in_string = False
+    while j < m:
+        ch = without_comments[j]
+        if in_string:
+            cleaned.append(ch)
+            if ch == "\\" and j + 1 < m:
+                cleaned.append(without_comments[j + 1])
+                j += 2
+                continue
+            if ch == '"':
+                in_string = False
+            j += 1
+            continue
+        if ch == '"':
+            in_string = True
+            cleaned.append(ch)
+            j += 1
+            continue
+        if ch == ",":
+            k = j + 1
+            while k < m and without_comments[k] in " \t\r\n":
+                k += 1
+            if k < m and without_comments[k] in "}]":
+                j += 1
+                continue
+        cleaned.append(ch)
+        j += 1
+    return "".join(cleaned)
+
+
+def _load_jsonc_file(path: Path) -> object:
+    """Parse a JSON or JSONC (BOM, //, /* */, trailing commas) config file."""
+    text = path.read_text(encoding="utf-8-sig")
+    try:
+        return json.loads(text)
+    except ValueError:
+        return json.loads(_strip_jsonc_comments_and_trailing_commas(text))
+
+
 def _find_host_mcp_config_defining_nmem(
     target_path: Path,
     cwd: str | Path | None = None,
@@ -833,7 +916,7 @@ def _find_host_mcp_config_defining_nmem(
         if not resolved_candidate.is_file():
             continue
         try:
-            data = json.loads(resolved_candidate.read_text(encoding="utf-8"))
+            data = _load_jsonc_file(resolved_candidate)
         except (OSError, ValueError):
             continue
         servers = data.get("mcpServers") if isinstance(data, dict) else None
@@ -872,7 +955,7 @@ def sync_mcp_config_file(
             if not p.exists():
                 return False
             try:
-                existing_data = json.loads(p.read_text(encoding="utf-8"))
+                existing_data = _load_jsonc_file(p)
             except (OSError, ValueError):
                 return False
             existing_servers = existing_data.get("mcpServers") if isinstance(existing_data, dict) else None
@@ -895,7 +978,7 @@ def sync_mcp_config_file(
     server_url = f"{clean_url}/mcp"
 
     try:
-        current_data = json.loads(p.read_text(encoding="utf-8"))
+        current_data = _load_jsonc_file(p)
     except (OSError, ValueError):
         current_data = None
 
