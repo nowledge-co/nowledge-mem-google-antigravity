@@ -70,22 +70,27 @@ def main():
         except Exception as e:
             thread_details = f"Error: {str(e)}"
 
-    # 4. Check local offline queue
+    # 4. Check local offline queue and dead-letter queue
     unsynced_path = nmem_shared.get_unsynced_queue_path()
     unsynced_count = 0
     is_current_pending = False
+    unsynced_data: dict = {}
     unsynced_sessions = []
 
     if unsynced_path.exists():
         try:
-            unsynced_data = json.loads(unsynced_path.read_text(encoding="utf-8"))
-            if isinstance(unsynced_data, dict):
+            loaded_unsynced = json.loads(unsynced_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_unsynced, dict):
+                unsynced_data = loaded_unsynced
                 unsynced_count = len(unsynced_data)
                 unsynced_sessions = list(unsynced_data.keys())
                 if conv_id in unsynced_data:
                     is_current_pending = True
         except Exception:
             pass
+
+    dead_letter_data = nmem_shared.get_dead_letter_sessions()
+    dead_letter_count = len(dead_letter_data) if isinstance(dead_letter_data, dict) else 0
 
     # 5. Check in-flight background tasks
     tasks_info = None
@@ -185,10 +190,27 @@ def main():
     if unsynced_count > 0:
         queue_info = f"There are **{unsynced_count}** unsynced session(s) pending in the local offline queue:\n"
         for q_id in unsynced_sessions:
+            entry = unsynced_data.get(q_id) if isinstance(unsynced_data.get(q_id), dict) else {}
+            retries = entry.get("retry_count")
+            retry_note = f" (retries: {retries})" if isinstance(retries, int) and retries > 0 else ""
             suffix = " (this conversation)" if q_id == conv_id else ""
-            queue_info += f"- `{q_id}`{suffix}\n"
+            queue_info += f"- `{q_id}`{retry_note}{suffix}\n"
     else:
         queue_info = "*No pending sessions in local queue.*"
+
+    if dead_letter_count > 0:
+        queue_info += (
+            f"\nThere are **{dead_letter_count}** quarantined session(s) in `dead_letter.json` "
+            "(exhausted retries or divergent history):\n"
+        )
+        for dlq_id, dlq_entry in dead_letter_data.items():
+            reason = ""
+            if isinstance(dlq_entry, dict):
+                raw_reason = dlq_entry.get("dead_letter_reason") or dlq_entry.get("last_error")
+                if isinstance(raw_reason, str) and raw_reason:
+                    reason = f" ({raw_reason})"
+            suffix = " (this conversation)" if dlq_id == conv_id else ""
+            queue_info += f"- `{dlq_id}`{reason}{suffix}\n"
 
     report = f"""### 🌐 Nowledge Mem Integration Status
 

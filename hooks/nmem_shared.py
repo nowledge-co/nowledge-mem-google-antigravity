@@ -770,21 +770,215 @@ def _write_json_atomic(path: Path, data: dict) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def sync_mcp_config_file(mcp_config_path: str = None, cwd: str | Path | None = None) -> bool:
+_MCP_SYNC_MODE_ALIASES = {
+    "auto": "auto",
+    "managed": "managed",
+    "force": "managed",
+    "off": "off",
+    "disabled": "off",
+    "skip": "off",
+}
+
+
+def _resolve_mcp_sync_mode(cwd: str | Path | None = None) -> str:
+    """Resolve plugin mcp_config.json sync policy: 'auto' (default), 'managed', or 'off'."""
+    ignore_host = os.environ.get("NMEM_IGNORE_HOST_CONFIG", "").strip().lower() in ("1", "true", "yes")
+    candidates: list[object] = [os.environ.get("NMEM_MCP_SYNC_MODE")]
+    local_cfg = get_local_config(cwd)
+    candidates.extend([local_cfg.get("mcpSyncMode"), local_cfg.get("mcp_sync_mode")])
+    if not ignore_host:
+        plugin_cfg = get_plugin_config()
+        candidates.extend([plugin_cfg.get("mcpSyncMode"), plugin_cfg.get("mcp_sync_mode")])
+
+    for raw in candidates:
+        if isinstance(raw, str):
+            normalized = _MCP_SYNC_MODE_ALIASES.get(raw.strip().lower())
+            if normalized:
+                return normalized
+    return "auto"
+
+
+def _strip_jsonc_comments_and_trailing_commas(text: str) -> str:
+    """Strip JSONC comments and trailing commas outside string literals."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            i += 2
+            while i < n and text[i] not in ("\n", "\r"):
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            if i + 1 >= n:
+                raise ValueError("Unterminated block comment")
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+
+    without_comments = "".join(out)
+    # Remove trailing commas before closing '}' or ']' outside strings.
+    cleaned: list[str] = []
+    j = 0
+    m = len(without_comments)
+    in_string = False
+    while j < m:
+        ch = without_comments[j]
+        if in_string:
+            cleaned.append(ch)
+            if ch == "\\" and j + 1 < m:
+                cleaned.append(without_comments[j + 1])
+                j += 2
+                continue
+            if ch == '"':
+                in_string = False
+            j += 1
+            continue
+        if ch == '"':
+            in_string = True
+            cleaned.append(ch)
+            j += 1
+            continue
+        if ch == ",":
+            k = j + 1
+            while k < m and without_comments[k] in " \t\r\n":
+                k += 1
+            if k < m and without_comments[k] in "}]":
+                j += 1
+                continue
+        cleaned.append(ch)
+        j += 1
+    return "".join(cleaned)
+
+
+def _load_jsonc_file(path: Path) -> object:
+    """Parse a JSON or JSONC (BOM, //, /* */, trailing commas) config file."""
+    text = path.read_text(encoding="utf-8-sig")
+    try:
+        return json.loads(text)
+    except ValueError:
+        return json.loads(_strip_jsonc_comments_and_trailing_commas(text))
+
+
+def _find_host_mcp_config_defining_nmem(
+    target_path: Path,
+    cwd: str | Path | None = None,
+    host_mcp_config_paths: list[str | Path] | None = None,
+) -> Path | None:
+    """Return a distinct host/workspace MCP config path that already defines `nowledge-mem`, or None."""
+    if host_mcp_config_paths is not None:
+        candidates = [Path(p).expanduser() for p in host_mcp_config_paths]
+    else:
+        candidates = []
+        effective_cwd = _effective_cwd(cwd)
+        if effective_cwd is not None:
+            try:
+                candidates.append(Path(effective_cwd).expanduser().resolve() / ".agents" / "mcp_config.json")
+            except (OSError, RuntimeError):
+                pass
+        ignore_host = os.environ.get("NMEM_IGNORE_HOST_CONFIG", "").strip().lower() in ("1", "true", "yes")
+        if not ignore_host:
+            candidates.append(Path("~/.gemini/config/mcp_config.json").expanduser())
+
+    try:
+        resolved_target = target_path.expanduser().resolve()
+    except (OSError, RuntimeError):
+        resolved_target = target_path
+
+    for candidate in candidates:
+        try:
+            resolved_candidate = candidate.resolve()
+        except (OSError, RuntimeError):
+            resolved_candidate = candidate
+        if resolved_candidate == resolved_target:
+            continue
+        if not resolved_candidate.is_file():
+            continue
+        try:
+            data = _load_jsonc_file(resolved_candidate)
+        except (OSError, ValueError):
+            continue
+        servers = data.get("mcpServers") if isinstance(data, dict) else None
+        if isinstance(servers, dict) and isinstance(servers.get("nowledge-mem"), dict):
+            return resolved_candidate
+    return None
+
+
+def sync_mcp_config_file(
+    mcp_config_path: str | None = None,
+    cwd: str | Path | None = None,
+    host_mcp_config_paths: list[str | Path] | None = None,
+) -> bool:
     """Synchronize plugin mcp_config.json with effective client configuration
     (~/.nowledge-mem/config.json or NMEM_API_URL/NMEM_API_KEY env vars).
-    Returns True if mcp_config.json was updated, False if already up to date.
+
+    In the default `auto` mode, defers when Antigravity's host global
+    (`~/.gemini/config/mcp_config.json`) or workspace (`.agents/mcp_config.json`)
+    MCP config already defines `nowledge-mem`, avoiding duplicate loads or
+    overriding custom host settings (such as `disabledTools`).
+    Returns True if mcp_config.json was updated, False if already up to date or deferred.
     """
     if mcp_config_path is None:
         mcp_config_path = str(Path(__file__).parent.parent / "mcp_config.json")
+
+    p = Path(mcp_config_path)
+    mode = _resolve_mcp_sync_mode(cwd)
+    if mode == "off":
+        return False
+
+    if mode == "auto":
+        host_override = _find_host_mcp_config_defining_nmem(p, cwd=cwd, host_mcp_config_paths=host_mcp_config_paths)
+        if host_override is not None:
+            if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+                sys.stderr.write(f"Deferring plugin mcp_config.json to host MCP config: {host_override}\n")
+            if not p.exists():
+                return False
+            try:
+                existing_data = _load_jsonc_file(p)
+            except (OSError, ValueError):
+                return False
+            existing_servers = existing_data.get("mcpServers") if isinstance(existing_data, dict) else None
+            if isinstance(existing_servers, dict) and "nowledge-mem" in existing_servers:
+                updated_data = dict(existing_data)
+                updated_servers = dict(existing_servers)
+                del updated_servers["nowledge-mem"]
+                updated_data["mcpServers"] = updated_servers
+                try:
+                    _write_json_atomic(p, updated_data)
+                    return True
+                except OSError as exc:
+                    if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+                        sys.stderr.write(f"Could not remove deferred nowledge-mem entry from {p}: {exc}\n")
+                    return False
+            return False
 
     api_url, api_key = get_effective_config(cwd)
     clean_url = api_url.rstrip("/")
     server_url = f"{clean_url}/mcp"
 
-    p = Path(mcp_config_path)
     try:
-        current_data = json.loads(p.read_text(encoding="utf-8"))
+        current_data = _load_jsonc_file(p)
     except (OSError, ValueError):
         current_data = None
 
@@ -1331,6 +1525,88 @@ def get_unsynced_queue_path() -> Path:
     return new_path
 
 
+UNSYNCED_MAX_RETRIES = 5
+UNSYNCED_BASE_BACKOFF_SECONDS = 30.0
+UNSYNCED_MAX_BACKOFF_SECONDS = 3600.0
+PERMANENT_SYNC_FAILURE_REASONS = frozenset({"divergent_history"})
+
+
+def get_dead_letter_queue_path() -> Path:
+    """Return the Path to the dead-letter queue file beside unsynced.json."""
+    return get_unsynced_queue_path().with_name("dead_letter.json")
+
+
+def get_dead_letter_sessions() -> dict:
+    """Return dict of dead-lettered sessions isolated from the active retry queue."""
+    dlq_path = get_dead_letter_queue_path()
+    if not dlq_path.exists():
+        return {}
+    try:
+        data = json.loads(dlq_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _append_dead_letter_entries(entries: dict[str, dict]) -> bool:
+    """Atomically merge dead-lettered sessions into dead_letter.json. Returns True on success."""
+    if not entries:
+        return True
+    dlq_path = get_dead_letter_queue_path()
+    dlq_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = dlq_path.with_suffix(".lock")
+    try:
+        with FileLock(lock_path):
+            dlq = _load_capture_queue(dlq_path)
+            dlq.update(entries)
+            _write_json_atomic(dlq_path, dlq)
+        return True
+    except Exception as e:
+        if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+            sys.stderr.write(f"Warning: Failed to write dead-letter sessions file: {e}\n")
+        return False
+
+
+def _unsynced_backoff_seconds(retry_count: int) -> float:
+    if retry_count <= 0:
+        return 0.0
+    delay = UNSYNCED_BASE_BACKOFF_SECONDS * (2 ** (retry_count - 1))
+    return min(float(delay), UNSYNCED_MAX_BACKOFF_SECONDS)
+
+
+def is_unsynced_session_due(entry: dict, now: float | None = None) -> bool:
+    """Return True when a queued session is eligible for retry at `now`."""
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("messages") == []:
+        return True
+    next_retry_at = entry.get("next_retry_at")
+    if not isinstance(next_retry_at, (int, float)) or next_retry_at <= 0:
+        return True
+    current_time = time.time() if now is None else float(now)
+    return current_time >= float(next_retry_at)
+
+
+def has_due_unsynced_sessions(unsynced: dict | None = None, now: float | None = None) -> bool:
+    """Return True when at least one session in unsynced.json is due for retry."""
+    sessions = get_unsynced_sessions() if unsynced is None else unsynced
+    if not isinstance(sessions, dict) or not sessions:
+        return False
+    current_time = time.time() if now is None else float(now)
+    return any(is_unsynced_session_due(entry, now=current_time) for entry in sessions.values())
+
+
+def _messages_fingerprint(messages: list) -> str:
+    digest = hashlib.sha256()
+    for msg in messages:
+        if isinstance(msg, dict):
+            role, content = _message_role_content(msg)
+            digest.update(f"{role or ''}\0{content or ''}\0".encode())
+        else:
+            digest.update(repr(msg).encode("utf-8"))
+    return digest.hexdigest()[:24]
+
+
 def save_unsynced_session(
     conv_id: str, messages: list, title: str, space: str | None, host_agent_id: str | None
 ) -> None:
@@ -1352,14 +1628,28 @@ def save_unsynced_session(
             key = conv_id
             if f"{scope}:{conv_id}" in queue or (key in queue and queue[key].get("connection_scope") != scope):
                 key = f"{scope}:{conv_id}"
-            queue[key] = {
+            fingerprint = _messages_fingerprint(messages)
+            existing = queue.get(key)
+            entry: dict = {
                 "connection_scope": scope,
                 "conversation_id": conv_id,
                 "messages": messages,
                 "title": title,
                 "space": space,
                 "host_agent_id": host_agent_id,
+                "content_fingerprint": fingerprint,
             }
+            # Preserve existing retry/backoff state when re-queuing the exact same snapshot.
+            if isinstance(existing, dict) and existing.get("space") == space:
+                existing_fp = existing.get("content_fingerprint")
+                same_snapshot = existing_fp == fingerprint or (
+                    existing_fp is None and existing.get("messages") == messages
+                )
+                if same_snapshot:
+                    for field in ("retry_count", "next_retry_at", "first_failed_at", "last_failed_at", "last_error"):
+                        if field in existing:
+                            entry[field] = existing[field]
+            queue[key] = entry
 
             _write_json_atomic(queue_path, queue)
     except Exception as e:
@@ -1379,9 +1669,204 @@ def get_unsynced_sessions() -> dict:
         return {}
 
 
-def build_cli_thread_append_args(thread_id: str, messages: list[dict]) -> list[str]:
+THREAD_SYNC_TAIL_WINDOW = 32
+THREAD_SYNC_CHECKPOINT_MAX_ENTRIES = 512
+THREAD_SYNC_READ_TIMEOUT = 10.0
+THREAD_SYNC_WRITE_TIMEOUT = 15.0
+THREAD_SYNC_MAX_WRITE_TIMEOUT = 30.0
+THREAD_SYNC_CLI_READ_TIMEOUT = 10.0
+THREAD_SYNC_CLI_WRITE_TIMEOUT = 15.0
+
+_last_sync_failure_reason: ContextVar[str | None] = ContextVar("last_sync_failure_reason", default=None)
+
+
+def get_thread_sync_checkpoints_path() -> Path:
+    """Return the Path to the verified thread sync checkpoint cache file."""
+    return get_plugin_storage_dir() / "cache" / "thread_sync_checkpoints.json"
+
+
+def _messages_prefix_hash(messages: list[dict]) -> str:
+    """Compute an injective SHA-256 digest of the exact `(role, content)` message sequence."""
+    digest = hashlib.sha256()
+    digest.update(f"v1:{len(messages)}:".encode())
+    for msg in messages:
+        role, content = _message_role_content(msg) if isinstance(msg, dict) else (None, repr(msg))
+        role_tag = b"N" if role is None else b"S"
+        content_tag = b"N" if content is None else b"S"
+        role_bytes = b"" if role is None else str(role).encode("utf-8")
+        content_bytes = b"" if content is None else str(content).encode("utf-8")
+        digest.update(role_tag + f"{len(role_bytes)}:".encode() + role_bytes)
+        digest.update(content_tag + f"{len(content_bytes)}:".encode() + content_bytes + b";")
+    return digest.hexdigest()
+
+
+def _thread_sync_checkpoint_key(scope: str, space: str | None, conv_id: str) -> str:
+    raw = f"{scope}\0{space or ''}\0{conv_id}".encode()
+    return hashlib.sha256(raw).hexdigest()[:32]
+
+
+def _extract_thread_storage_id(payload: dict | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    thread = payload.get("thread")
+    if isinstance(thread, dict):
+        for key in ("storage_id", "id"):
+            val = thread.get(key)
+            if isinstance(val, str) and val:
+                return val
+    val = payload.get("storage_id")
+    return val if isinstance(val, str) and val else None
+
+
+def _extract_thread_created_at(payload: dict | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    thread = payload.get("thread")
+    if isinstance(thread, dict):
+        val = thread.get("created_at")
+        if isinstance(val, str) and val:
+            return val
+    val = payload.get("created_at")
+    return val if isinstance(val, str) and val else None
+
+
+def _extract_row_ids(rows: list | None) -> list[str] | None:
+    if not isinstance(rows, list) or not rows:
+        return None
+    ids: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        row_id = row.get("id")
+        if not isinstance(row_id, str) or not row_id:
+            return None
+        ids.append(row_id)
+    return ids
+
+
+def _load_thread_sync_checkpoint(conv_id: str, space: str | None) -> dict | None:
+    cp_path = get_thread_sync_checkpoints_path()
+    if not cp_path.is_file():
+        return None
+    scope = _spaces_cache_scope_id()
+    key = _thread_sync_checkpoint_key(scope, space, conv_id)
+    try:
+        data = json.loads(cp_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    entry = data.get(key)
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("connection_scope") != scope or entry.get("space") != (space or "") or entry.get("conv_id") != conv_id:
+        return None
+    synced_count = entry.get("synced_count")
+    prefix_hash = entry.get("prefix_hash")
+    if not isinstance(synced_count, int) or synced_count <= 0 or not isinstance(prefix_hash, str) or not prefix_hash:
+        return None
+    return entry
+
+
+def _save_thread_sync_checkpoint(
+    conv_id: str,
+    space: str | None,
+    messages: list[dict],
+    detail: dict | None = None,
+    tail_message_ids: list[str] | None = None,
+) -> None:
+    if not messages:
+        return
+    cp_path = get_thread_sync_checkpoints_path()
+    scope = _spaces_cache_scope_id()
+    key = _thread_sync_checkpoint_key(scope, space, conv_id)
+    entry: dict = {
+        "connection_scope": scope,
+        "space": space or "",
+        "conv_id": conv_id,
+        "synced_count": len(messages),
+        "prefix_hash": _messages_prefix_hash(messages),
+        "server_space_id": extract_thread_space_id(detail) if isinstance(detail, dict) else None,
+        "server_storage_id": _extract_thread_storage_id(detail),
+        "created_at": _extract_thread_created_at(detail),
+        "tail_message_ids": tail_message_ids,
+        "updated_at": time.time(),
+    }
+    try:
+        cp_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = cp_path.with_suffix(".lock")
+        with FileLock(lock_path):
+            try:
+                existing = json.loads(cp_path.read_text(encoding="utf-8")) if cp_path.is_file() else {}
+                if not isinstance(existing, dict):
+                    existing = {}
+            except (OSError, ValueError):
+                existing = {}
+            existing[key] = entry
+            if len(existing) > THREAD_SYNC_CHECKPOINT_MAX_ENTRIES:
+                ordered = sorted(
+                    existing.items(),
+                    key=lambda kv: kv[1].get("updated_at", 0.0) if isinstance(kv[1], dict) else 0.0,
+                    reverse=True,
+                )
+                existing = dict(ordered[:THREAD_SYNC_CHECKPOINT_MAX_ENTRIES])
+            _write_json_atomic(cp_path, existing)
+    except Exception as e:
+        if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+            sys.stderr.write(f"Warning: Failed to save thread sync checkpoint: {e}\n")
+
+
+def get_last_sync_failure_reason() -> str | None:
+    """Return the failure category recorded by the most recent `sync_thread_capture` call."""
+    return _last_sync_failure_reason.get()
+
+
+def _set_last_sync_failure_reason(reason: str | None) -> None:
+    _last_sync_failure_reason.set(reason)
+
+
+def _message_role_content(msg: dict) -> tuple[str | None, str | None]:
+    role = msg.get("role") if msg.get("role") is not None else msg.get("sender")
+    content = msg.get("content") if msg.get("content") is not None else msg.get("text")
+    return role, content
+
+
+def _thread_write_timeout(messages: list[dict], base_timeout: float = THREAD_SYNC_WRITE_TIMEOUT) -> float:
+    """Scale write timeout gently for large multi-megabyte thread payloads."""
+    try:
+        payload_bytes = sum(len(str(_message_role_content(m)[1] or "").encode("utf-8")) for m in messages)
+    except Exception:
+        payload_bytes = 0
+    scaled = base_timeout + (payload_bytes / (256.0 * 1024.0))
+    return min(THREAD_SYNC_MAX_WRITE_TIMEOUT, max(base_timeout, scaled))
+
+
+def build_append_idempotency_key(thread_id: str, start_index: int, messages: list[dict]) -> str:
+    """Derive a deterministic idempotency key for a checkpointed append batch."""
+    digest = hashlib.sha256()
+    digest.update(f"{thread_id}\0{start_index}\0".encode())
+    for msg in messages:
+        role, content = _message_role_content(msg)
+        digest.update(f"{role or ''}\0{content or ''}\0".encode())
+    return f"antigravity:{start_index}:{digest.hexdigest()[:24]}"
+
+
+def build_cli_thread_append_args(thread_id: str, messages: list[dict], idempotency_key: str | None = None) -> list[str]:
     """Build supported `nmem t append` CLI arguments (no `--space` flag on append)."""
-    return ["t", "append", thread_id, "-m", json.dumps(messages, ensure_ascii=False, separators=(",", ":"))]
+    args = ["t", "append", thread_id, "-m", json.dumps(messages, ensure_ascii=False, separators=(",", ":"))]
+    if idempotency_key:
+        args.extend(["--idempotency-key", idempotency_key])
+    return args
+
+
+def build_cli_thread_show_args(thread_id: str, limit: int, offset: int = 0, space: str | None = None) -> list[str]:
+    """Build `nmem --json t show` arguments for a bounded message window."""
+    args = ["--json", "t", "show", thread_id, "--limit", str(limit)]
+    if offset > 0:
+        args.extend(["--offset", str(offset)])
+    if space:
+        args.extend(["--space", space])
+    return args
 
 
 def build_cli_thread_create_args(
@@ -1504,6 +1989,77 @@ def spaces_match(expected_space: str, actual_space_id: str | None) -> bool:
     return False
 
 
+def _build_thread_window_endpoint(lookup_endpoint: str, limit: int, offset: int = 0) -> str:
+    """Append bounded `offset` and `limit` query parameters to a thread lookup endpoint."""
+    separator = "&" if "?" in lookup_endpoint else "?"
+    if offset > 0:
+        return f"{lookup_endpoint}{separator}offset={offset}&limit={limit}"
+    return f"{lookup_endpoint}{separator}limit={limit}"
+
+
+def _extract_thread_messages(detail: dict) -> list | None:
+    rows = detail.get("messages")
+    if rows is None and isinstance(detail.get("thread"), dict):
+        rows = detail["thread"].get("messages")
+    return rows if isinstance(rows, list) else None
+
+
+def _slice_window_rows(rows: list, offset: int, expected_len: int, total: int) -> list | None:
+    """Normalize a window response from either paginated or legacy offset-ignoring servers."""
+    if offset > 0 and len(rows) >= offset + expected_len and (total == len(rows) or len(rows) > expected_len):
+        return rows[offset : offset + expected_len]
+    if len(rows) < expected_len:
+        return None
+    return rows[:expected_len]
+
+
+def _count_matching_prefix(rows: list, expected_messages: list[dict]) -> int:
+    matched = 0
+    for old_m, new_m in zip(rows, expected_messages):
+        if not isinstance(old_m, dict):
+            break
+        if _message_role_content(old_m) == _message_role_content(new_m):
+            matched += 1
+        else:
+            break
+    return matched
+
+
+def _verify_persisted_window(
+    detail: dict | None,
+    conv_id: str,
+    messages: list[dict],
+    space: str | None,
+    offset: int,
+    window_size: int | None = None,
+) -> bool:
+    """Verify thread identity, space, message count, and a persisted bounded message window."""
+    if not isinstance(detail, dict) or not _is_http_ok(detail):
+        return False
+    thread = detail.get("thread", detail)
+    if not isinstance(thread, dict) or (thread.get("thread_id") or thread.get("id")) != conv_id:
+        return False
+    if space and not spaces_match(space, extract_thread_space_id(detail)):
+        return False
+    rows = _extract_thread_messages(detail)
+    if rows is None:
+        return False
+    expected_slice = messages[offset:] if window_size is None else messages[offset : offset + window_size]
+    raw_total = detail.get("total_messages")
+    if offset > 0 or (window_size is not None and offset + len(expected_slice) < len(messages)):
+        if not isinstance(raw_total, int) or raw_total != len(messages):
+            return False
+        total = raw_total
+    else:
+        total = raw_total if isinstance(raw_total, int) else len(rows)
+        if total < len(messages) or total < len(rows):
+            return False
+    window_rows = _slice_window_rows(rows, offset, len(expected_slice), total)
+    if window_rows is None:
+        return False
+    return _count_matching_prefix(window_rows, expected_slice) == len(expected_slice)
+
+
 def _capture_prefix(detail, conv_id, messages, space):
     """Count verified persisted messages, or return None on identity/scope/content conflict."""
     if not _is_http_ok(detail):
@@ -1513,16 +2069,180 @@ def _capture_prefix(detail, conv_id, messages, space):
         return None
     if space and not spaces_match(space, extract_thread_space_id(detail)):
         return None
-    rows = detail.get("messages", thread.get("messages"))
-    if not isinstance(rows, list):
+    rows = _extract_thread_messages(detail)
+    if rows is None:
         return None
     total = detail.get("total_messages", len(rows))
     if not isinstance(total, int) or total < len(rows) or len(rows) < min(total, len(messages)):
         return None
     for old, new in zip(rows, messages):
-        if not isinstance(old, dict) or (old.get("role"), old.get("content")) != (new["role"], new["content"]):
+        if not isinstance(old, dict) or _message_role_content(old) != _message_role_content(new):
             return None
     return min(len(messages), len(rows))
+
+
+def _find_matched_count_with_checkpoint(
+    conv_id: str,
+    messages: list[dict],
+    space: str | None,
+    total: int,
+    initial_detail: dict,
+    fetch_window,
+) -> tuple[int | None, dict | None, list[str] | None, str | None]:
+    """Find the exact first differing index in `[0, min(total, len(messages)))`.
+
+    When a verified local checkpoint matches the local prefix hash and server
+    metadata (`total_messages`, `storage_id`, `created_at`, `space_id`), a
+    single bounded tail anchor fetch (checking both content and recorded tail
+    message IDs) proves prefix equality in O(1). For unknown histories or any
+    checkpoint mismatch, scans forward from offset 0 in bounded pages of size
+    `THREAD_SYNC_TAIL_WINDOW` so interior edits are never missed even when the
+    tail still matches.
+    """
+    min_len = min(total, len(messages))
+    if min_len == 0:
+        return 0, None, None, None
+
+    cp = _load_thread_sync_checkpoint(conv_id, space)
+    if cp is not None and cp.get("synced_count") == total and total <= len(messages):
+        res_space = extract_thread_space_id(initial_detail)
+        storage_id = _extract_thread_storage_id(initial_detail)
+        created_at = _extract_thread_created_at(initial_detail)
+        space_ok = not cp.get("server_space_id") or not res_space or cp.get("server_space_id") == res_space
+        storage_ok = not cp.get("server_storage_id") or not storage_id or cp.get("server_storage_id") == storage_id
+        created_ok = not cp.get("created_at") or not created_at or cp.get("created_at") == created_at
+        if space_ok and storage_ok and created_ok and _messages_prefix_hash(messages[:total]) == cp.get("prefix_hash"):
+            tail_w = min(total, THREAD_SYNC_TAIL_WINDOW)
+            tail_off = total - tail_w
+            tail_rows, tail_detail, err = fetch_window(tail_off, tail_w)
+            if tail_rows is None:
+                return None, None, None, err
+            tail_matched = _count_matching_prefix(tail_rows, messages[tail_off:total])
+            fetched_ids = _extract_row_ids(tail_rows)
+            cp_ids = cp.get("tail_message_ids")
+            ids_ok = cp_ids is None or fetched_ids == cp_ids
+            if tail_matched == tail_w and ids_ok:
+                return total, tail_detail, fetched_ids, None
+            if tail_off == 0:
+                if tail_matched == 0:
+                    return 0, None, None, "divergent_history"
+                return tail_matched, None, None, None
+
+    # Unknown history or invalidated checkpoint: bounded forward pagination from offset 0.
+    tail_w = min(min_len, THREAD_SYNC_TAIL_WINDOW)
+    tail_start = min_len - tail_w
+    collected_tail_ids: list[str] | None = []
+    last_detail: dict | None = None
+    offset = 0
+    while offset < min_len:
+        span = min(min_len - offset, THREAD_SYNC_TAIL_WINDOW)
+        page_rows, page_detail, err = fetch_window(offset, span)
+        if page_rows is None:
+            return None, None, None, err
+        last_detail = page_detail
+        page_matched = _count_matching_prefix(page_rows, messages[offset : offset + span])
+        if page_matched < span:
+            matched = offset + page_matched
+            if matched == 0:
+                return 0, None, None, "divergent_history"
+            return matched, None, None, None
+        if collected_tail_ids is not None and offset + span > tail_start:
+            overlap_start = max(offset, tail_start) - offset
+            for row in page_rows[overlap_start:]:
+                row_id = row.get("id") if isinstance(row, dict) else None
+                if isinstance(row_id, str) and row_id:
+                    collected_tail_ids.append(row_id)
+                else:
+                    collected_tail_ids = None
+                    break
+        offset += span
+
+    final_tail_ids = collected_tail_ids if (collected_tail_ids and len(collected_tail_ids) == tail_w) else None
+    return min_len, last_detail, final_tail_ids, None
+
+
+def _find_http_matched_count(
+    lookup_endpoint: str,
+    conv_id: str,
+    messages: list[dict],
+    space: str | None,
+    total: int,
+    initial_detail: dict | None = None,
+) -> tuple[int | None, dict | None, list[str] | None, str | None]:
+    """Find how many leading messages match the stored thread via HTTP using checkpoint or bounded pagination."""
+
+    def fetch_window(offset: int, window_size: int) -> tuple[list | None, dict | None, str | None]:
+        endpoint = _build_thread_window_endpoint(lookup_endpoint, limit=window_size, offset=offset)
+        res = http_request(
+            endpoint,
+            method="GET",
+            timeout=THREAD_SYNC_READ_TIMEOUT,
+            include_error_response=True,
+        )
+        if not isinstance(res, dict) or not _is_http_ok(res):
+            return None, None, "backend_unreachable" if is_backend_unreachable() else "http_read_failed"
+        thread = res.get("thread", res)
+        if isinstance(thread, dict):
+            returned_id = thread.get("thread_id") or thread.get("id")
+            if returned_id is not None and returned_id != conv_id:
+                return None, None, "thread_id_mismatch"
+        res_total = res.get("total_messages")
+        if res_total is not None and res_total != total:
+            return None, None, "concurrent_change"
+        if space and not spaces_match(space, extract_thread_space_id(res)):
+            return None, None, "space_mismatch"
+        rows = _extract_thread_messages(res)
+        if rows is None:
+            return None, None, "http_read_failed"
+        sliced = _slice_window_rows(rows, offset, window_size, total)
+        if sliced is None:
+            return None, None, "http_read_failed"
+        return sliced, res, None
+
+    return _find_matched_count_with_checkpoint(conv_id, messages, space, total, initial_detail or {}, fetch_window)
+
+
+def _find_cli_matched_count(
+    conv_id: str,
+    messages: list[dict],
+    space: str | None,
+    total: int,
+    initial_detail: dict,
+) -> tuple[int | None, dict | None, list[str] | None, str | None]:
+    """Find how many leading messages match the stored thread via CLI using checkpoint or bounded pagination."""
+
+    def fetch_window(offset: int, window_size: int) -> tuple[list | None, dict | None, str | None]:
+        res = run_nmem_command(
+            build_cli_thread_show_args(conv_id, limit=window_size, offset=offset, space=space),
+            timeout=THREAD_SYNC_CLI_READ_TIMEOUT,
+        )
+        if res.returncode != 0:
+            return None, None, "cli_read_failed"
+        try:
+            page_detail = json.loads(res.stdout)
+        except (TypeError, ValueError):
+            return None, None, "cli_read_failed"
+        if not isinstance(page_detail, dict):
+            return None, None, "cli_read_failed"
+        thread = page_detail.get("thread", page_detail)
+        if isinstance(thread, dict):
+            returned_id = thread.get("thread_id") or thread.get("id")
+            if returned_id is not None and returned_id != conv_id:
+                return None, None, "thread_id_mismatch"
+        res_total = page_detail.get("total_messages")
+        if res_total is not None and res_total != total:
+            return None, None, "concurrent_change"
+        if space and not spaces_match(space, extract_thread_space_id(page_detail)):
+            return None, None, "space_mismatch"
+        rows = _extract_thread_messages(page_detail)
+        if rows is None:
+            return None, None, "cli_read_failed"
+        sliced = _slice_window_rows(rows, offset, window_size, total)
+        if sliced is None:
+            return None, None, "cli_read_failed"
+        return sliced, page_detail, None
+
+    return _find_matched_count_with_checkpoint(conv_id, messages, space, total, initial_detail, fetch_window)
 
 
 def sync_thread_capture(
@@ -1538,7 +2258,10 @@ def sync_thread_capture(
     """
     import urllib.parse
 
+    _set_last_sync_failure_reason(None)
+
     if is_backend_unreachable():
+        _set_last_sync_failure_reason("backend_unreachable")
         return False, True
 
     matched_count = 0
@@ -1547,15 +2270,55 @@ def sync_thread_capture(
 
     lookup_endpoint = build_http_thread_lookup_endpoint(conv_id, space)
 
-    def http_persisted(response):
+    def http_persisted(response, write_start: int = 0) -> bool:
         if not _is_http_ok(response) or response.get("success") is False:
+            if isinstance(response, dict) and response.get("status") == 409:
+                _set_last_sync_failure_reason("write_conflict")
+            else:
+                _set_last_sync_failure_reason(
+                    "backend_unreachable" if is_backend_unreachable() else "http_write_failed"
+                )
             return False
-        separator = "&" if "?" in lookup_endpoint else "?"
-        persisted = http_request(f"{lookup_endpoint}{separator}limit={len(messages)}", method="GET", timeout=2.5)
-        return _capture_prefix(persisted, conv_id, messages, space) == len(messages)
+        verify_window = min(len(messages), THREAD_SYNC_TAIL_WINDOW)
+        verify_offset = len(messages) - verify_window
+        if write_start < verify_offset:
+            start_window = min(THREAD_SYNC_TAIL_WINDOW, len(messages) - write_start)
+            start_endpoint = _build_thread_window_endpoint(lookup_endpoint, limit=start_window, offset=write_start)
+            start_persisted = http_request(start_endpoint, method="GET", timeout=THREAD_SYNC_READ_TIMEOUT)
+            if not _verify_persisted_window(
+                start_persisted, conv_id, messages, space, write_start, window_size=start_window
+            ):
+                _set_last_sync_failure_reason("backend_unreachable" if is_backend_unreachable() else "readback_failed")
+                return False
+        verify_endpoint = _build_thread_window_endpoint(lookup_endpoint, limit=verify_window, offset=verify_offset)
+        persisted = http_request(verify_endpoint, method="GET", timeout=THREAD_SYNC_READ_TIMEOUT)
+        ok = _verify_persisted_window(persisted, conv_id, messages, space, verify_offset, window_size=verify_window)
+        if not ok:
+            _set_last_sync_failure_reason("backend_unreachable" if is_backend_unreachable() else "readback_failed")
+            return False
+        persisted_rows = _extract_thread_messages(persisted) if isinstance(persisted, dict) else None
+        raw_total = persisted.get("total_messages") if isinstance(persisted, dict) else None
+        total_for_slice = raw_total if isinstance(raw_total, int) else len(messages)
+        tail_rows = (
+            _slice_window_rows(persisted_rows, verify_offset, verify_window, total_for_slice)
+            if persisted_rows is not None
+            else None
+        )
+        _save_thread_sync_checkpoint(conv_id, space, messages, persisted, _extract_row_ids(tail_rows))
+        return True
 
     try:
-        check_res = http_request(lookup_endpoint, method="GET", timeout=1.5, include_error_response=True)
+        initial_endpoint = (
+            _build_thread_window_endpoint(lookup_endpoint, limit=0)
+            if len(messages) > THREAD_SYNC_TAIL_WINDOW
+            else lookup_endpoint
+        )
+        check_res = http_request(
+            initial_endpoint,
+            method="GET",
+            timeout=THREAD_SYNC_READ_TIMEOUT,
+            include_error_response=True,
+        )
         if _is_http_ok(check_res) and (
             check_res.get("id") or check_res.get("thread_id") or "messages" in check_res or "thread" in check_res
         ):
@@ -1564,75 +2327,85 @@ def sync_thread_capture(
             if isinstance(thread, dict):
                 returned_id = thread.get("thread_id") or thread.get("id")
                 if returned_id is not None and returned_id != conv_id:
+                    _set_last_sync_failure_reason("thread_id_mismatch")
                     return False, True
             res_space = extract_thread_space_id(check_res)
             if space and res_space is not None and not spaces_match(space, res_space):
+                _set_last_sync_failure_reason("space_mismatch")
                 return False, True
 
-            existing_msgs = check_res.get("messages")
-            if existing_msgs is None and isinstance(check_res.get("thread"), dict):
-                existing_msgs = check_res["thread"].get("messages")
-            existing_msgs = existing_msgs or []
+            existing_msgs = _extract_thread_messages(check_res)
+            if existing_msgs is None:
+                existing_msgs = []
             total = check_res.get("total_messages", len(existing_msgs))
-            if not isinstance(total, int) or not isinstance(existing_msgs, list):
+            if not isinstance(total, int) or total < 0:
+                _set_last_sync_failure_reason("http_read_failed")
                 return False, True
-            if len(existing_msgs) < min(total, len(messages)):
-                separator = "&" if "?" in lookup_endpoint else "?"
-                full = http_request(
-                    f"{lookup_endpoint}{separator}limit={len(messages)}",
-                    method="GET",
-                    timeout=2.5,
-                    include_error_response=True,
+
+            min_len = min(total, len(messages))
+            verified_detail: dict | None = check_res
+            verified_tail_ids: list[str] | None = None
+            if len(existing_msgs) >= min_len:
+                matched_count = _count_matching_prefix(existing_msgs, messages)
+                if matched_count == len(messages) == total:
+                    tail_w = min(total, THREAD_SYNC_TAIL_WINDOW)
+                    verified_tail_ids = _extract_row_ids(existing_msgs[total - tail_w : total])
+            else:
+                found_count, verified_detail, verified_tail_ids, find_err = _find_http_matched_count(
+                    lookup_endpoint, conv_id, messages, space, total, initial_detail=check_res
                 )
-                if not _is_http_ok(full) or full.get("total_messages") != total:
+                if found_count is None:
+                    _set_last_sync_failure_reason(find_err or "http_read_failed")
                     return False, True
-                if space and not spaces_match(space, extract_thread_space_id(full)):
-                    return False, True
-                existing_msgs = full.get("messages")
-                if not isinstance(existing_msgs, list) or len(existing_msgs) < min(total, len(messages)):
-                    return False, True
-            if isinstance(existing_msgs, list):
-                for old_m, new_m in zip(existing_msgs, messages):
-                    old_role = old_m.get("role") or old_m.get("sender")
-                    new_role = new_m.get("role") or new_m.get("sender")
-                    old_text = old_m.get("content") or old_m.get("text")
-                    new_text = new_m.get("content") or new_m.get("text")
-                    if old_role == new_role and old_text == new_text:
-                        matched_count += 1
-                    else:
-                        break
+                matched_count = found_count
 
             if matched_count == len(messages):
                 if not space or spaces_match(space, res_space):
+                    if total == len(messages):
+                        _save_thread_sync_checkpoint(
+                            conv_id, space, messages, verified_detail or check_res, verified_tail_ids
+                        )
                     return True, True
+                _set_last_sync_failure_reason("space_mismatch")
                 return False, True
 
-            if matched_count > 0:
-                rec_payload = {"matched_count": matched_count, "messages": messages[matched_count:]}
+            # Divergent stored history (index 0 mismatches a non-empty thread) cannot be repaired by appending.
+            if total > 0 and matched_count == 0:
+                _set_last_sync_failure_reason("divergent_history")
+                return False, True
+
+            # Pure suffix append: use checkpointed POST /threads/{id}/append with idempotency_key.
+            if matched_count == total:
+                delta = messages[matched_count:]
+                app_payload: dict = {
+                    "messages": delta,
+                    "idempotency_key": build_append_idempotency_key(conv_id, matched_count, delta),
+                    "expected_message_count": matched_count,
+                }
                 if space:
-                    rec_payload["space_id"] = space
-                rec_res = http_request(
-                    f"/threads/{encoded_id}/reconcile-tail",
+                    app_payload["space_id"] = space
+                app_res = http_request(
+                    f"/threads/{encoded_id}/append",
                     method="POST",
-                    payload=rec_payload,
-                    timeout=2.5,
+                    payload=app_payload,
+                    timeout=_thread_write_timeout(delta),
                     include_error_response=True,
                 )
-                return http_persisted(rec_res), True
+                return http_persisted(app_res, write_start=matched_count), True
 
-            if existing_msgs:
-                return False, True  # Divergent history cannot be repaired by appending it again.
-            app_payload = {"messages": messages[matched_count:] if matched_count > 0 else messages}
+            # Tail diverged after a matching prefix: reconcile only the differing tail.
+            tail_delta = messages[matched_count:]
+            rec_payload: dict = {"matched_count": matched_count, "messages": tail_delta}
             if space:
-                app_payload["space_id"] = space
-            app_res = http_request(
-                f"/threads/{encoded_id}/append",
+                rec_payload["space_id"] = space
+            rec_res = http_request(
+                f"/threads/{encoded_id}/reconcile-tail",
                 method="POST",
-                payload=app_payload,
-                timeout=2.5,
+                payload=rec_payload,
+                timeout=_thread_write_timeout(tail_delta),
                 include_error_response=True,
             )
-            return http_persisted(app_res), True
+            return http_persisted(rec_res, write_start=matched_count), True
         elif is_http_thread_not_found(check_res):
             http_handled = True
             create_payload = build_http_thread_create_payload(conv_id, title, messages, space)
@@ -1640,43 +2413,136 @@ def sync_thread_capture(
                 "/threads",
                 method="POST",
                 payload=create_payload,
-                timeout=2.5,
+                timeout=_thread_write_timeout(messages),
                 include_error_response=True,
             )
-            return http_persisted(create_res), True
+            return http_persisted(create_res, write_start=0), True
         elif isinstance(check_res, dict):
+            _set_last_sync_failure_reason("http_read_failed")
             return False, True
     except Exception:
         pass
 
     if is_backend_unreachable() or http_handled:
+        if not get_last_sync_failure_reason():
+            _set_last_sync_failure_reason("backend_unreachable" if is_backend_unreachable() else "http_failed")
         return False, True
 
     # CLI Fallback (only when HTTP transport yielded None / could not complete)
-    check_args = ["--json", "t", "show", conv_id, "--limit", str(len(messages))]
-    if space:
-        check_args.extend(["--space", space])
+    verify_window = min(len(messages), THREAD_SYNC_TAIL_WINDOW)
+    verify_offset = len(messages) - verify_window
+    verify_cli_args = build_cli_thread_show_args(conv_id, limit=verify_window, offset=verify_offset, space=space)
 
-    def cli_persisted(result):
+    def cli_persisted(result, write_start: int = 0) -> bool:
         if result.returncode != 0:
+            _set_last_sync_failure_reason("cli_write_failed")
             return False
-        verified = run_nmem_command(check_args, timeout=2.0)
-        return verified.returncode == 0 and _capture_prefix(
-            json.loads(verified.stdout), conv_id, messages, space
-        ) == len(messages)
+        if write_start < verify_offset:
+            start_window = min(THREAD_SYNC_TAIL_WINDOW, len(messages) - write_start)
+            start_res = run_nmem_command(
+                build_cli_thread_show_args(conv_id, limit=start_window, offset=write_start, space=space),
+                timeout=THREAD_SYNC_CLI_READ_TIMEOUT,
+            )
+            if start_res.returncode != 0:
+                _set_last_sync_failure_reason("readback_failed")
+                return False
+            try:
+                start_detail = json.loads(start_res.stdout)
+            except (TypeError, ValueError):
+                _set_last_sync_failure_reason("readback_failed")
+                return False
+            if not _verify_persisted_window(
+                start_detail, conv_id, messages, space, write_start, window_size=start_window
+            ):
+                _set_last_sync_failure_reason("readback_failed")
+                return False
+        verified = run_nmem_command(verify_cli_args, timeout=THREAD_SYNC_CLI_READ_TIMEOUT)
+        if verified.returncode != 0:
+            _set_last_sync_failure_reason("readback_failed")
+            return False
+        try:
+            verified_detail = json.loads(verified.stdout)
+        except (TypeError, ValueError):
+            _set_last_sync_failure_reason("readback_failed")
+            return False
+        ok = _verify_persisted_window(
+            verified_detail, conv_id, messages, space, verify_offset, window_size=verify_window
+        )
+        if not ok:
+            _set_last_sync_failure_reason("readback_failed")
+            return False
+        verified_rows = _extract_thread_messages(verified_detail) if isinstance(verified_detail, dict) else None
+        raw_total = verified_detail.get("total_messages") if isinstance(verified_detail, dict) else None
+        total_for_slice = raw_total if isinstance(raw_total, int) else len(messages)
+        tail_rows = (
+            _slice_window_rows(verified_rows, verify_offset, verify_window, total_for_slice)
+            if verified_rows is not None
+            else None
+        )
+        _save_thread_sync_checkpoint(conv_id, space, messages, verified_detail, _extract_row_ids(tail_rows))
+        return True
+
+    initial_cli_args = (
+        build_cli_thread_show_args(conv_id, limit=0, space=space)
+        if len(messages) > THREAD_SYNC_TAIL_WINDOW
+        else build_cli_thread_show_args(conv_id, limit=len(messages), space=space)
+    )
 
     thread_exists = False
     thread_not_found = False
     try:
-        result = run_nmem_command(check_args, timeout=2.0)
+        result = run_nmem_command(initial_cli_args, timeout=THREAD_SYNC_CLI_READ_TIMEOUT)
         if result.returncode == 0:
-            prefix = _capture_prefix(json.loads(result.stdout), conv_id, messages, space)
-            if prefix is None:
-                return False, True
-            if prefix == len(messages):
-                return True, True
-            matched_count = prefix
-            thread_exists = True
+            detail = json.loads(result.stdout)
+            if len(messages) <= THREAD_SYNC_TAIL_WINDOW:
+                prefix = _capture_prefix(detail, conv_id, messages, space)
+                if prefix is None:
+                    _set_last_sync_failure_reason("cli_conflict")
+                    return False, True
+                rows = _extract_thread_messages(detail) or []
+                total = detail.get("total_messages", len(rows)) if isinstance(detail, dict) else len(rows)
+                if prefix == len(messages):
+                    if isinstance(total, int) and total == len(messages):
+                        _save_thread_sync_checkpoint(conv_id, space, messages, detail, _extract_row_ids(rows[:total]))
+                    return True, True
+                matched_count = prefix
+                thread_exists = True
+            else:
+                thread = detail.get("thread", detail) if isinstance(detail, dict) else None
+                if not isinstance(thread, dict) or (thread.get("thread_id") or thread.get("id")) != conv_id:
+                    _set_last_sync_failure_reason("thread_id_mismatch")
+                    return False, True
+                if space and not spaces_match(space, extract_thread_space_id(detail)):
+                    _set_last_sync_failure_reason("space_mismatch")
+                    return False, True
+                rows = _extract_thread_messages(detail) or []
+                total = detail.get("total_messages", len(rows))
+                if not isinstance(total, int) or total < 0:
+                    _set_last_sync_failure_reason("cli_read_failed")
+                    return False, True
+                if total == 0:
+                    matched_count = 0
+                    thread_exists = True
+                else:
+                    found_count, verified_detail, verified_tail_ids, find_err = _find_cli_matched_count(
+                        conv_id, messages, space, total, detail
+                    )
+                    if found_count is None:
+                        _set_last_sync_failure_reason(find_err or "cli_read_failed")
+                        return False, True
+                    min_len = min(total, len(messages))
+                    if found_count < min_len:
+                        # CLI fallback has no reconcile-tail equivalent; fail closed on any interior divergence.
+                        _set_last_sync_failure_reason("divergent_history")
+                        return False, True
+                    if min_len == len(messages):
+                        if total == len(messages):
+                            _save_thread_sync_checkpoint(
+                                conv_id, space, messages, verified_detail or detail, verified_tail_ids
+                            )
+                        return True, True
+                    matched_count = total
+                    thread_exists = True
         elif is_cli_thread_not_found(result):
             thread_not_found = True
     except Exception as e:
@@ -1689,45 +2555,56 @@ def sync_thread_capture(
         cli_append_msgs = messages[matched_count:] if matched_count > 0 else messages
         if cli_append_msgs:
             if space:
+                _set_last_sync_failure_reason("scoped_cli_append_unsupported")
                 return False, True
-            append_args = build_cli_thread_append_args(conv_id, cli_append_msgs)
+            idem_key = build_append_idempotency_key(conv_id, matched_count, cli_append_msgs)
+            append_args = build_cli_thread_append_args(conv_id, cli_append_msgs, idempotency_key=idem_key)
             try:
+                cli_timeout = _thread_write_timeout(cli_append_msgs, base_timeout=THREAD_SYNC_CLI_WRITE_TIMEOUT)
                 result = (
-                    run_nmem_command(append_args, env=env, timeout=3.0)
+                    run_nmem_command(append_args, env=env, timeout=cli_timeout)
                     if env
-                    else run_nmem_command(append_args, timeout=3.0)
+                    else run_nmem_command(append_args, timeout=cli_timeout)
                 )
-                return cli_persisted(result), True
+                return cli_persisted(result, write_start=matched_count), True
             except Exception as e:
+                _set_last_sync_failure_reason("cli_write_failed")
                 if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                     sys.stderr.write(f"nmem t append execution failed: {e}\n")
         else:
             if not space:
                 return True, True
+            _set_last_sync_failure_reason("space_mismatch")
             return False, True
     elif thread_not_found:
         create_args = build_cli_thread_create_args(conv_id, title, messages, space)
         try:
+            cli_timeout = _thread_write_timeout(messages, base_timeout=THREAD_SYNC_CLI_WRITE_TIMEOUT)
             result = (
-                run_nmem_command(create_args, env=env, timeout=3.0)
+                run_nmem_command(create_args, env=env, timeout=cli_timeout)
                 if env
-                else run_nmem_command(create_args, timeout=3.0)
+                else run_nmem_command(create_args, timeout=cli_timeout)
             )
-            return cli_persisted(result), True
+            return cli_persisted(result, write_start=0), True
         except Exception as e:
+            _set_last_sync_failure_reason("cli_write_failed")
             if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
                 sys.stderr.write(f"nmem t create execution failed: {e}\n")
 
+    if not get_last_sync_failure_reason():
+        _set_last_sync_failure_reason("sync_failed")
     return False, False
 
 
-def retry_unsynced_sessions() -> None:
-    """Attempt to sync any unsynced sessions in the queue."""
+def retry_unsynced_sessions(*, now: float | None = None, ignore_backoff: bool = False) -> None:
+    """Attempt to sync due unsynced sessions with exponential backoff and dead-letter isolation."""
     queue_path = get_unsynced_queue_path()
     lock_path = queue_path.with_suffix(".lock")
 
     if not queue_path.exists():
         return
+
+    current_time = time.time() if now is None else float(now)
 
     try:
         with FileLock(lock_path):
@@ -1740,10 +2617,15 @@ def retry_unsynced_sessions() -> None:
                 return
 
             updated_queue = dict(queue)
+            dead_letter_batch: dict[str, dict] = {}
             for queue_key, data in queue.items():
+                if not isinstance(data, dict):
+                    continue
                 conv_id = data.get("conversation_id", queue_key)
                 if data.get("messages") == []:
                     del updated_queue[queue_key]
+                    continue
+                if not ignore_backoff and not is_unsynced_session_due(data, now=current_time):
                     continue
                 if is_backend_unreachable():
                     continue
@@ -1756,9 +2638,43 @@ def retry_unsynced_sessions() -> None:
                 with pin_capture_connection() as connection:
                     if data.get("connection_scope") != _spaces_cache_scope_id(connection):
                         continue
+                    _set_last_sync_failure_reason(None)
                     success, _ = sync_thread_capture(conv_id, title, messages, space, host_agent_id)
+                    failure_reason = get_last_sync_failure_reason() or (
+                        "backend_unreachable" if is_backend_unreachable() else "sync_failed"
+                    )
                 if success:
                     del updated_queue[queue_key]
+                    continue
+
+                updated_entry = dict(data)
+                prev_retries = updated_entry.get("retry_count")
+                retry_count = (prev_retries if isinstance(prev_retries, int) and prev_retries >= 0 else 0) + 1
+                updated_entry["retry_count"] = retry_count
+                updated_entry.setdefault("first_failed_at", current_time)
+                updated_entry["last_failed_at"] = current_time
+                updated_entry["last_error"] = failure_reason
+
+                if failure_reason in PERMANENT_SYNC_FAILURE_REASONS or retry_count >= UNSYNCED_MAX_RETRIES:
+                    dlq_entry = dict(updated_entry)
+                    dlq_entry["dead_lettered_at"] = current_time
+                    dlq_entry["dead_letter_reason"] = failure_reason
+                    dead_letter_batch[queue_key] = dlq_entry
+                else:
+                    updated_entry["next_retry_at"] = current_time + _unsynced_backoff_seconds(retry_count)
+                    updated_queue[queue_key] = updated_entry
+
+            if dead_letter_batch:
+                if _append_dead_letter_entries(dead_letter_batch):
+                    for queue_key in dead_letter_batch:
+                        updated_queue.pop(queue_key, None)
+                else:
+                    for queue_key, dlq_entry in dead_letter_batch.items():
+                        fallback_entry = dict(dlq_entry)
+                        fallback_entry.pop("dead_lettered_at", None)
+                        fallback_entry.pop("dead_letter_reason", None)
+                        fallback_entry["next_retry_at"] = current_time + UNSYNCED_MAX_BACKOFF_SECONDS
+                        updated_queue[queue_key] = fallback_entry
 
             if updated_queue == queue:
                 return
