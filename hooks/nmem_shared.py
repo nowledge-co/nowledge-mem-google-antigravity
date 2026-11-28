@@ -1670,6 +1670,7 @@ def get_unsynced_sessions() -> dict:
 
 
 THREAD_SYNC_TAIL_WINDOW = 32
+THREAD_SYNC_CHECKPOINT_MAX_ENTRIES = 512
 THREAD_SYNC_READ_TIMEOUT = 10.0
 THREAD_SYNC_WRITE_TIMEOUT = 15.0
 THREAD_SYNC_MAX_WRITE_TIMEOUT = 30.0
@@ -1677,6 +1678,142 @@ THREAD_SYNC_CLI_READ_TIMEOUT = 10.0
 THREAD_SYNC_CLI_WRITE_TIMEOUT = 15.0
 
 _last_sync_failure_reason: ContextVar[str | None] = ContextVar("last_sync_failure_reason", default=None)
+
+
+def get_thread_sync_checkpoints_path() -> Path:
+    """Return the Path to the verified thread sync checkpoint cache file."""
+    return get_plugin_storage_dir() / "cache" / "thread_sync_checkpoints.json"
+
+
+def _messages_prefix_hash(messages: list[dict]) -> str:
+    """Compute an injective SHA-256 digest of the exact `(role, content)` message sequence."""
+    digest = hashlib.sha256()
+    digest.update(f"v1:{len(messages)}:".encode())
+    for msg in messages:
+        role, content = _message_role_content(msg) if isinstance(msg, dict) else (None, repr(msg))
+        role_tag = b"N" if role is None else b"S"
+        content_tag = b"N" if content is None else b"S"
+        role_bytes = b"" if role is None else str(role).encode("utf-8")
+        content_bytes = b"" if content is None else str(content).encode("utf-8")
+        digest.update(role_tag + f"{len(role_bytes)}:".encode() + role_bytes)
+        digest.update(content_tag + f"{len(content_bytes)}:".encode() + content_bytes + b";")
+    return digest.hexdigest()
+
+
+def _thread_sync_checkpoint_key(scope: str, space: str | None, conv_id: str) -> str:
+    raw = f"{scope}\0{space or ''}\0{conv_id}".encode()
+    return hashlib.sha256(raw).hexdigest()[:32]
+
+
+def _extract_thread_storage_id(payload: dict | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    thread = payload.get("thread")
+    if isinstance(thread, dict):
+        for key in ("storage_id", "id"):
+            val = thread.get(key)
+            if isinstance(val, str) and val:
+                return val
+    val = payload.get("storage_id")
+    return val if isinstance(val, str) and val else None
+
+
+def _extract_thread_created_at(payload: dict | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    thread = payload.get("thread")
+    if isinstance(thread, dict):
+        val = thread.get("created_at")
+        if isinstance(val, str) and val:
+            return val
+    val = payload.get("created_at")
+    return val if isinstance(val, str) and val else None
+
+
+def _extract_row_ids(rows: list | None) -> list[str] | None:
+    if not isinstance(rows, list) or not rows:
+        return None
+    ids: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        row_id = row.get("id")
+        if not isinstance(row_id, str) or not row_id:
+            return None
+        ids.append(row_id)
+    return ids
+
+
+def _load_thread_sync_checkpoint(conv_id: str, space: str | None) -> dict | None:
+    cp_path = get_thread_sync_checkpoints_path()
+    if not cp_path.is_file():
+        return None
+    scope = _spaces_cache_scope_id()
+    key = _thread_sync_checkpoint_key(scope, space, conv_id)
+    try:
+        data = json.loads(cp_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    entry = data.get(key)
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("connection_scope") != scope or entry.get("space") != (space or "") or entry.get("conv_id") != conv_id:
+        return None
+    synced_count = entry.get("synced_count")
+    prefix_hash = entry.get("prefix_hash")
+    if not isinstance(synced_count, int) or synced_count <= 0 or not isinstance(prefix_hash, str) or not prefix_hash:
+        return None
+    return entry
+
+
+def _save_thread_sync_checkpoint(
+    conv_id: str,
+    space: str | None,
+    messages: list[dict],
+    detail: dict | None = None,
+    tail_message_ids: list[str] | None = None,
+) -> None:
+    if not messages:
+        return
+    cp_path = get_thread_sync_checkpoints_path()
+    scope = _spaces_cache_scope_id()
+    key = _thread_sync_checkpoint_key(scope, space, conv_id)
+    entry: dict = {
+        "connection_scope": scope,
+        "space": space or "",
+        "conv_id": conv_id,
+        "synced_count": len(messages),
+        "prefix_hash": _messages_prefix_hash(messages),
+        "server_space_id": extract_thread_space_id(detail) if isinstance(detail, dict) else None,
+        "server_storage_id": _extract_thread_storage_id(detail),
+        "created_at": _extract_thread_created_at(detail),
+        "tail_message_ids": tail_message_ids,
+        "updated_at": time.time(),
+    }
+    try:
+        cp_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = cp_path.with_suffix(".lock")
+        with FileLock(lock_path):
+            try:
+                existing = json.loads(cp_path.read_text(encoding="utf-8")) if cp_path.is_file() else {}
+                if not isinstance(existing, dict):
+                    existing = {}
+            except (OSError, ValueError):
+                existing = {}
+            existing[key] = entry
+            if len(existing) > THREAD_SYNC_CHECKPOINT_MAX_ENTRIES:
+                ordered = sorted(
+                    existing.items(),
+                    key=lambda kv: kv[1].get("updated_at", 0.0) if isinstance(kv[1], dict) else 0.0,
+                    reverse=True,
+                )
+                existing = dict(ordered[:THREAD_SYNC_CHECKPOINT_MAX_ENTRIES])
+            _write_json_atomic(cp_path, existing)
+    except Exception as e:
+        if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
+            sys.stderr.write(f"Warning: Failed to save thread sync checkpoint: {e}\n")
 
 
 def get_last_sync_failure_reason() -> str | None:
@@ -1894,8 +2031,9 @@ def _verify_persisted_window(
     messages: list[dict],
     space: str | None,
     offset: int,
+    window_size: int | None = None,
 ) -> bool:
-    """Verify thread identity, space, message count, and persisted tail window."""
+    """Verify thread identity, space, message count, and a persisted bounded message window."""
     if not isinstance(detail, dict) or not _is_http_ok(detail):
         return False
     thread = detail.get("thread", detail)
@@ -1906,8 +2044,9 @@ def _verify_persisted_window(
     rows = _extract_thread_messages(detail)
     if rows is None:
         return False
+    expected_slice = messages[offset:] if window_size is None else messages[offset : offset + window_size]
     raw_total = detail.get("total_messages")
-    if offset > 0:
+    if offset > 0 or (window_size is not None and offset + len(expected_slice) < len(messages)):
         if not isinstance(raw_total, int) or raw_total != len(messages):
             return False
         total = raw_total
@@ -1915,7 +2054,6 @@ def _verify_persisted_window(
         total = raw_total if isinstance(raw_total, int) else len(rows)
         if total < len(messages) or total < len(rows):
             return False
-    expected_slice = messages[offset:]
     window_rows = _slice_window_rows(rows, offset, len(expected_slice), total)
     if window_rows is None:
         return False
@@ -1943,23 +2081,97 @@ def _capture_prefix(detail, conv_id, messages, space):
     return min(len(messages), len(rows))
 
 
+def _find_matched_count_with_checkpoint(
+    conv_id: str,
+    messages: list[dict],
+    space: str | None,
+    total: int,
+    initial_detail: dict,
+    fetch_window,
+) -> tuple[int | None, dict | None, list[str] | None, str | None]:
+    """Find the exact first differing index in `[0, min(total, len(messages)))`.
+
+    When a verified local checkpoint matches the local prefix hash and server
+    metadata (`total_messages`, `storage_id`, `created_at`, `space_id`), a
+    single bounded tail anchor fetch (checking both content and recorded tail
+    message IDs) proves prefix equality in O(1). For unknown histories or any
+    checkpoint mismatch, scans forward from offset 0 in bounded pages of size
+    `THREAD_SYNC_TAIL_WINDOW` so interior edits are never missed even when the
+    tail still matches.
+    """
+    min_len = min(total, len(messages))
+    if min_len == 0:
+        return 0, None, None, None
+
+    cp = _load_thread_sync_checkpoint(conv_id, space)
+    if cp is not None and cp.get("synced_count") == total and total <= len(messages):
+        res_space = extract_thread_space_id(initial_detail)
+        storage_id = _extract_thread_storage_id(initial_detail)
+        created_at = _extract_thread_created_at(initial_detail)
+        space_ok = not cp.get("server_space_id") or not res_space or cp.get("server_space_id") == res_space
+        storage_ok = not cp.get("server_storage_id") or not storage_id or cp.get("server_storage_id") == storage_id
+        created_ok = not cp.get("created_at") or not created_at or cp.get("created_at") == created_at
+        if space_ok and storage_ok and created_ok and _messages_prefix_hash(messages[:total]) == cp.get("prefix_hash"):
+            tail_w = min(total, THREAD_SYNC_TAIL_WINDOW)
+            tail_off = total - tail_w
+            tail_rows, tail_detail, err = fetch_window(tail_off, tail_w)
+            if tail_rows is None:
+                return None, None, None, err
+            tail_matched = _count_matching_prefix(tail_rows, messages[tail_off:total])
+            fetched_ids = _extract_row_ids(tail_rows)
+            cp_ids = cp.get("tail_message_ids")
+            ids_ok = cp_ids is None or fetched_ids == cp_ids
+            if tail_matched == tail_w and ids_ok:
+                return total, tail_detail, fetched_ids, None
+            if tail_off == 0:
+                if tail_matched == 0:
+                    return 0, None, None, "divergent_history"
+                return tail_matched, None, None, None
+
+    # Unknown history or invalidated checkpoint: bounded forward pagination from offset 0.
+    tail_w = min(min_len, THREAD_SYNC_TAIL_WINDOW)
+    tail_start = min_len - tail_w
+    collected_tail_ids: list[str] | None = []
+    last_detail: dict | None = None
+    offset = 0
+    while offset < min_len:
+        span = min(min_len - offset, THREAD_SYNC_TAIL_WINDOW)
+        page_rows, page_detail, err = fetch_window(offset, span)
+        if page_rows is None:
+            return None, None, None, err
+        last_detail = page_detail
+        page_matched = _count_matching_prefix(page_rows, messages[offset : offset + span])
+        if page_matched < span:
+            matched = offset + page_matched
+            if matched == 0:
+                return 0, None, None, "divergent_history"
+            return matched, None, None, None
+        if collected_tail_ids is not None and offset + span > tail_start:
+            overlap_start = max(offset, tail_start) - offset
+            for row in page_rows[overlap_start:]:
+                row_id = row.get("id") if isinstance(row, dict) else None
+                if isinstance(row_id, str) and row_id:
+                    collected_tail_ids.append(row_id)
+                else:
+                    collected_tail_ids = None
+                    break
+        offset += span
+
+    final_tail_ids = collected_tail_ids if (collected_tail_ids and len(collected_tail_ids) == tail_w) else None
+    return min_len, last_detail, final_tail_ids, None
+
+
 def _find_http_matched_count(
     lookup_endpoint: str,
     conv_id: str,
     messages: list[dict],
     space: str | None,
     total: int,
-) -> tuple[int | None, str | None]:
-    """Find how many leading messages match the stored thread using bounded window reads.
+    initial_detail: dict | None = None,
+) -> tuple[int | None, dict | None, list[str] | None, str | None]:
+    """Find how many leading messages match the stored thread via HTTP using checkpoint or bounded pagination."""
 
-    Checks the tail window first so normal append-only growth on long threads needs
-    only one bounded GET instead of fetching all messages.
-    """
-    min_len = min(total, len(messages))
-    if min_len == 0:
-        return 0, None
-
-    def fetch_window(offset: int, window_size: int) -> tuple[list | None, str | None]:
+    def fetch_window(offset: int, window_size: int) -> tuple[list | None, dict | None, str | None]:
         endpoint = _build_thread_window_endpoint(lookup_endpoint, limit=window_size, offset=offset)
         res = http_request(
             endpoint,
@@ -1968,64 +2180,69 @@ def _find_http_matched_count(
             include_error_response=True,
         )
         if not isinstance(res, dict) or not _is_http_ok(res):
-            return None, "backend_unreachable" if is_backend_unreachable() else "http_read_failed"
+            return None, None, "backend_unreachable" if is_backend_unreachable() else "http_read_failed"
         thread = res.get("thread", res)
         if isinstance(thread, dict):
             returned_id = thread.get("thread_id") or thread.get("id")
             if returned_id is not None and returned_id != conv_id:
-                return None, "thread_id_mismatch"
+                return None, None, "thread_id_mismatch"
         res_total = res.get("total_messages")
         if res_total is not None and res_total != total:
-            return None, "concurrent_change"
+            return None, None, "concurrent_change"
         if space and not spaces_match(space, extract_thread_space_id(res)):
-            return None, "space_mismatch"
+            return None, None, "space_mismatch"
         rows = _extract_thread_messages(res)
         if rows is None:
-            return None, "http_read_failed"
+            return None, None, "http_read_failed"
         sliced = _slice_window_rows(rows, offset, window_size, total)
         if sliced is None:
-            return None, "http_read_failed"
-        return sliced, None
+            return None, None, "http_read_failed"
+        return sliced, res, None
 
-    tail_window = min(min_len, THREAD_SYNC_TAIL_WINDOW)
-    tail_offset = min_len - tail_window
-    tail_rows, err = fetch_window(tail_offset, tail_window)
-    if tail_rows is None:
-        return None, err
+    return _find_matched_count_with_checkpoint(conv_id, messages, space, total, initial_detail or {}, fetch_window)
 
-    tail_matched = _count_matching_prefix(tail_rows, messages[tail_offset:min_len])
-    if tail_matched > 0:
-        return tail_offset + tail_matched, None
-    if tail_offset == 0:
-        return 0, "divergent_history"
 
-    # Tail start itself diverged: check the head window before searching further.
-    head_window = min(tail_offset, THREAD_SYNC_TAIL_WINDOW)
-    head_rows, err = fetch_window(0, head_window)
-    if head_rows is None:
-        return None, err
-    head_matched = _count_matching_prefix(head_rows, messages[:head_window])
-    if head_matched == 0:
-        return 0, "divergent_history"
-    if head_matched < head_window:
-        return head_matched, None
+def _find_cli_matched_count(
+    conv_id: str,
+    messages: list[dict],
+    space: str | None,
+    total: int,
+    initial_detail: dict,
+) -> tuple[int | None, dict | None, list[str] | None, str | None]:
+    """Find how many leading messages match the stored thread via CLI using checkpoint or bounded pagination."""
 
-    lo = head_window
-    hi = tail_offset
-    while lo < hi:
-        mid = (lo + hi) // 2
-        span = min(hi - mid, THREAD_SYNC_TAIL_WINDOW)
-        mid_rows, err = fetch_window(mid, span)
-        if mid_rows is None:
-            return None, err
-        mid_matched = _count_matching_prefix(mid_rows, messages[mid : mid + span])
-        if mid_matched == 0:
-            hi = mid
-        elif mid_matched < span:
-            return mid + mid_matched, None
-        else:
-            lo = mid + mid_matched
-    return lo, None
+    def fetch_window(offset: int, window_size: int) -> tuple[list | None, dict | None, str | None]:
+        res = run_nmem_command(
+            build_cli_thread_show_args(conv_id, limit=window_size, offset=offset, space=space),
+            timeout=THREAD_SYNC_CLI_READ_TIMEOUT,
+        )
+        if res.returncode != 0:
+            return None, None, "cli_read_failed"
+        try:
+            page_detail = json.loads(res.stdout)
+        except (TypeError, ValueError):
+            return None, None, "cli_read_failed"
+        if not isinstance(page_detail, dict):
+            return None, None, "cli_read_failed"
+        thread = page_detail.get("thread", page_detail)
+        if isinstance(thread, dict):
+            returned_id = thread.get("thread_id") or thread.get("id")
+            if returned_id is not None and returned_id != conv_id:
+                return None, None, "thread_id_mismatch"
+        res_total = page_detail.get("total_messages")
+        if res_total is not None and res_total != total:
+            return None, None, "concurrent_change"
+        if space and not spaces_match(space, extract_thread_space_id(page_detail)):
+            return None, None, "space_mismatch"
+        rows = _extract_thread_messages(page_detail)
+        if rows is None:
+            return None, None, "cli_read_failed"
+        sliced = _slice_window_rows(rows, offset, window_size, total)
+        if sliced is None:
+            return None, None, "cli_read_failed"
+        return sliced, page_detail, None
+
+    return _find_matched_count_with_checkpoint(conv_id, messages, space, total, initial_detail, fetch_window)
 
 
 def sync_thread_capture(
@@ -2053,7 +2270,7 @@ def sync_thread_capture(
 
     lookup_endpoint = build_http_thread_lookup_endpoint(conv_id, space)
 
-    def http_persisted(response):
+    def http_persisted(response, write_start: int = 0) -> bool:
         if not _is_http_ok(response) or response.get("success") is False:
             if isinstance(response, dict) and response.get("status") == 409:
                 _set_last_sync_failure_reason("write_conflict")
@@ -2064,12 +2281,31 @@ def sync_thread_capture(
             return False
         verify_window = min(len(messages), THREAD_SYNC_TAIL_WINDOW)
         verify_offset = len(messages) - verify_window
+        if write_start < verify_offset:
+            start_window = min(THREAD_SYNC_TAIL_WINDOW, len(messages) - write_start)
+            start_endpoint = _build_thread_window_endpoint(lookup_endpoint, limit=start_window, offset=write_start)
+            start_persisted = http_request(start_endpoint, method="GET", timeout=THREAD_SYNC_READ_TIMEOUT)
+            if not _verify_persisted_window(
+                start_persisted, conv_id, messages, space, write_start, window_size=start_window
+            ):
+                _set_last_sync_failure_reason("backend_unreachable" if is_backend_unreachable() else "readback_failed")
+                return False
         verify_endpoint = _build_thread_window_endpoint(lookup_endpoint, limit=verify_window, offset=verify_offset)
         persisted = http_request(verify_endpoint, method="GET", timeout=THREAD_SYNC_READ_TIMEOUT)
-        ok = _verify_persisted_window(persisted, conv_id, messages, space, verify_offset)
+        ok = _verify_persisted_window(persisted, conv_id, messages, space, verify_offset, window_size=verify_window)
         if not ok:
             _set_last_sync_failure_reason("backend_unreachable" if is_backend_unreachable() else "readback_failed")
-        return ok
+            return False
+        persisted_rows = _extract_thread_messages(persisted) if isinstance(persisted, dict) else None
+        raw_total = persisted.get("total_messages") if isinstance(persisted, dict) else None
+        total_for_slice = raw_total if isinstance(raw_total, int) else len(messages)
+        tail_rows = (
+            _slice_window_rows(persisted_rows, verify_offset, verify_window, total_for_slice)
+            if persisted_rows is not None
+            else None
+        )
+        _save_thread_sync_checkpoint(conv_id, space, messages, persisted, _extract_row_ids(tail_rows))
+        return True
 
     try:
         initial_endpoint = (
@@ -2107,10 +2343,17 @@ def sync_thread_capture(
                 return False, True
 
             min_len = min(total, len(messages))
+            verified_detail: dict | None = check_res
+            verified_tail_ids: list[str] | None = None
             if len(existing_msgs) >= min_len:
                 matched_count = _count_matching_prefix(existing_msgs, messages)
+                if matched_count == len(messages) == total:
+                    tail_w = min(total, THREAD_SYNC_TAIL_WINDOW)
+                    verified_tail_ids = _extract_row_ids(existing_msgs[total - tail_w : total])
             else:
-                found_count, find_err = _find_http_matched_count(lookup_endpoint, conv_id, messages, space, total)
+                found_count, verified_detail, verified_tail_ids, find_err = _find_http_matched_count(
+                    lookup_endpoint, conv_id, messages, space, total, initial_detail=check_res
+                )
                 if found_count is None:
                     _set_last_sync_failure_reason(find_err or "http_read_failed")
                     return False, True
@@ -2118,6 +2361,10 @@ def sync_thread_capture(
 
             if matched_count == len(messages):
                 if not space or spaces_match(space, res_space):
+                    if total == len(messages):
+                        _save_thread_sync_checkpoint(
+                            conv_id, space, messages, verified_detail or check_res, verified_tail_ids
+                        )
                     return True, True
                 _set_last_sync_failure_reason("space_mismatch")
                 return False, True
@@ -2144,7 +2391,7 @@ def sync_thread_capture(
                     timeout=_thread_write_timeout(delta),
                     include_error_response=True,
                 )
-                return http_persisted(app_res), True
+                return http_persisted(app_res, write_start=matched_count), True
 
             # Tail diverged after a matching prefix: reconcile only the differing tail.
             tail_delta = messages[matched_count:]
@@ -2158,7 +2405,7 @@ def sync_thread_capture(
                 timeout=_thread_write_timeout(tail_delta),
                 include_error_response=True,
             )
-            return http_persisted(rec_res), True
+            return http_persisted(rec_res, write_start=matched_count), True
         elif is_http_thread_not_found(check_res):
             http_handled = True
             create_payload = build_http_thread_create_payload(conv_id, title, messages, space)
@@ -2169,7 +2416,7 @@ def sync_thread_capture(
                 timeout=_thread_write_timeout(messages),
                 include_error_response=True,
             )
-            return http_persisted(create_res), True
+            return http_persisted(create_res, write_start=0), True
         elif isinstance(check_res, dict):
             _set_last_sync_failure_reason("http_read_failed")
             return False, True
@@ -2186,17 +2433,54 @@ def sync_thread_capture(
     verify_offset = len(messages) - verify_window
     verify_cli_args = build_cli_thread_show_args(conv_id, limit=verify_window, offset=verify_offset, space=space)
 
-    def cli_persisted(result):
+    def cli_persisted(result, write_start: int = 0) -> bool:
         if result.returncode != 0:
             _set_last_sync_failure_reason("cli_write_failed")
             return False
+        if write_start < verify_offset:
+            start_window = min(THREAD_SYNC_TAIL_WINDOW, len(messages) - write_start)
+            start_res = run_nmem_command(
+                build_cli_thread_show_args(conv_id, limit=start_window, offset=write_start, space=space),
+                timeout=THREAD_SYNC_CLI_READ_TIMEOUT,
+            )
+            if start_res.returncode != 0:
+                _set_last_sync_failure_reason("readback_failed")
+                return False
+            try:
+                start_detail = json.loads(start_res.stdout)
+            except (TypeError, ValueError):
+                _set_last_sync_failure_reason("readback_failed")
+                return False
+            if not _verify_persisted_window(
+                start_detail, conv_id, messages, space, write_start, window_size=start_window
+            ):
+                _set_last_sync_failure_reason("readback_failed")
+                return False
         verified = run_nmem_command(verify_cli_args, timeout=THREAD_SYNC_CLI_READ_TIMEOUT)
-        ok = verified.returncode == 0 and _verify_persisted_window(
-            json.loads(verified.stdout), conv_id, messages, space, verify_offset
+        if verified.returncode != 0:
+            _set_last_sync_failure_reason("readback_failed")
+            return False
+        try:
+            verified_detail = json.loads(verified.stdout)
+        except (TypeError, ValueError):
+            _set_last_sync_failure_reason("readback_failed")
+            return False
+        ok = _verify_persisted_window(
+            verified_detail, conv_id, messages, space, verify_offset, window_size=verify_window
         )
         if not ok:
             _set_last_sync_failure_reason("readback_failed")
-        return ok
+            return False
+        verified_rows = _extract_thread_messages(verified_detail) if isinstance(verified_detail, dict) else None
+        raw_total = verified_detail.get("total_messages") if isinstance(verified_detail, dict) else None
+        total_for_slice = raw_total if isinstance(raw_total, int) else len(messages)
+        tail_rows = (
+            _slice_window_rows(verified_rows, verify_offset, verify_window, total_for_slice)
+            if verified_rows is not None
+            else None
+        )
+        _save_thread_sync_checkpoint(conv_id, space, messages, verified_detail, _extract_row_ids(tail_rows))
+        return True
 
     initial_cli_args = (
         build_cli_thread_show_args(conv_id, limit=0, space=space)
@@ -2215,7 +2499,11 @@ def sync_thread_capture(
                 if prefix is None:
                     _set_last_sync_failure_reason("cli_conflict")
                     return False, True
+                rows = _extract_thread_messages(detail) or []
+                total = detail.get("total_messages", len(rows)) if isinstance(detail, dict) else len(rows)
                 if prefix == len(messages):
+                    if isinstance(total, int) and total == len(messages):
+                        _save_thread_sync_checkpoint(conv_id, space, messages, detail, _extract_row_ids(rows[:total]))
                     return True, True
                 matched_count = prefix
                 thread_exists = True
@@ -2236,33 +2524,22 @@ def sync_thread_capture(
                     matched_count = 0
                     thread_exists = True
                 else:
-                    min_len = min(total, len(messages))
-                    tail_w = min(min_len, THREAD_SYNC_TAIL_WINDOW)
-                    tail_off = min_len - tail_w
-                    tail_res = run_nmem_command(
-                        build_cli_thread_show_args(conv_id, limit=tail_w, offset=tail_off, space=space),
-                        timeout=THREAD_SYNC_CLI_READ_TIMEOUT,
+                    found_count, verified_detail, verified_tail_ids, find_err = _find_cli_matched_count(
+                        conv_id, messages, space, total, detail
                     )
-                    if tail_res.returncode != 0:
-                        _set_last_sync_failure_reason("cli_read_failed")
+                    if found_count is None:
+                        _set_last_sync_failure_reason(find_err or "cli_read_failed")
                         return False, True
-                    tail_detail = json.loads(tail_res.stdout)
-                    if not isinstance(tail_detail, dict) or tail_detail.get("total_messages") != total:
-                        _set_last_sync_failure_reason("concurrent_change")
-                        return False, True
-                    if space and not spaces_match(space, extract_thread_space_id(tail_detail)):
-                        _set_last_sync_failure_reason("space_mismatch")
-                        return False, True
-                    tail_rows = _extract_thread_messages(tail_detail)
-                    sliced = _slice_window_rows(tail_rows, tail_off, tail_w, total) if tail_rows is not None else None
-                    if sliced is None:
-                        _set_last_sync_failure_reason("cli_read_failed")
-                        return False, True
-                    tail_matched = _count_matching_prefix(sliced, messages[tail_off:min_len])
-                    if tail_matched != tail_w:
+                    min_len = min(total, len(messages))
+                    if found_count < min_len:
+                        # CLI fallback has no reconcile-tail equivalent; fail closed on any interior divergence.
                         _set_last_sync_failure_reason("divergent_history")
                         return False, True
                     if min_len == len(messages):
+                        if total == len(messages):
+                            _save_thread_sync_checkpoint(
+                                conv_id, space, messages, verified_detail or detail, verified_tail_ids
+                            )
                         return True, True
                     matched_count = total
                     thread_exists = True
@@ -2289,7 +2566,7 @@ def sync_thread_capture(
                     if env
                     else run_nmem_command(append_args, timeout=cli_timeout)
                 )
-                return cli_persisted(result), True
+                return cli_persisted(result, write_start=matched_count), True
             except Exception as e:
                 _set_last_sync_failure_reason("cli_write_failed")
                 if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):
@@ -2308,7 +2585,7 @@ def sync_thread_capture(
                 if env
                 else run_nmem_command(create_args, timeout=cli_timeout)
             )
-            return cli_persisted(result), True
+            return cli_persisted(result, write_start=0), True
         except Exception as e:
             _set_last_sync_failure_reason("cli_write_failed")
             if os.environ.get("DEBUG") or os.environ.get("NMEM_DEBUG"):

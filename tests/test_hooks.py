@@ -2987,20 +2987,35 @@ def test_pending_capture_replays_only_for_original_account(tmp_path, monkeypatch
 def test_paginated_capture_requires_complete_prefix_and_honors_reconcile_refusal(changed):
     rows = [{"role": "user", "content": str(i)} for i in range(501)]
     local = [*rows[:-1], {"role": "user", "content": "changed"}] if changed else rows
-    meta = {"id": "c", "space_id": "project", "total_messages": 501, "messages": []}
-    tail = {"id": "c", "space_id": "project", "total_messages": 501, "messages": rows[469:501]}
+
+    def fake_http(endpoint, method="GET", payload=None, **kwargs):
+        if method == "GET":
+            from urllib.parse import parse_qs, urlparse
+
+            qs = parse_qs(urlparse(endpoint).query)
+            offset = int(qs.get("offset", ["0"])[0])
+            limit = int(qs.get("limit", ["500"])[0])
+            assert limit <= nmem_shared.THREAD_SYNC_TAIL_WINDOW
+            return {
+                "id": "c",
+                "space_id": "project",
+                "total_messages": len(rows),
+                "messages": rows[offset : offset + limit],
+            }
+        if endpoint == "/threads/c/reconcile-tail":
+            return {"status": 409, "error": "linked"}
+        raise AssertionError(f"Unexpected call: {method} {endpoint}")
+
     with (
         patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
-        patch.object(
-            nmem_shared,
-            "http_request",
-            side_effect=[meta, tail, {"status": 409, "error": "linked"}],
-        ) as request,
+        patch.object(nmem_shared, "http_request", side_effect=fake_http) as request,
     ):
         assert nmem_shared.sync_thread_capture("c", "Title", local, "project") == (not changed, True)
     assert request.call_args_list[0].args == ("/threads/c?space_id=project&limit=0",)
-    assert request.call_args_list[1].args == ("/threads/c?space_id=project&offset=469&limit=32",)
-    assert request.call_count == (3 if changed else 2)
+    assert request.call_args_list[1].args == ("/threads/c?space_id=project&limit=32",)
+    # Full unknown prefix (501 rows) must be verified across bounded <=32 pages (16 pages + 1 limit=0 metadata GET).
+    get_calls = [c for c in request.call_args_list if c.kwargs.get("method") == "GET"]
+    assert len(get_calls) == 17
     if changed:
         assert request.call_args.args == ("/threads/c/reconcile-tail",)
         assert request.call_args.kwargs["payload"]["matched_count"] == 500
@@ -3316,23 +3331,48 @@ def test_bridge_start_correlates_actual_conversation(monkeypatch, capsys):
     assert "not native sessions" in hint
 
 
-def test_long_thread_incremental_append_uses_bounded_cursor_and_idempotency_key():
-    stored = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg-{i}"} for i in range(1351)]
-    delta = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg-{i}"} for i in range(1351, 1359)]
-    local = stored + delta
-
-    responses = [
-        {"id": "long-conv", "space_id": "work", "total_messages": 1351, "messages": []},
-        {"id": "long-conv", "space_id": "work", "total_messages": 1351, "messages": stored[1319:1351]},
-        {"success": True, "messages_added": 8, "total_messages": 1359},
-        {"id": "long-conv", "space_id": "work", "total_messages": 1359, "messages": local[1327:1359]},
+def test_long_thread_incremental_append_uses_verified_checkpoint_and_idempotency_key():
+    stored = [
+        {"id": f"msgocc_{i}", "role": "user" if i % 2 == 0 else "assistant", "content": f"msg-{i}"} for i in range(1351)
     ]
+    delta = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg-{i}"} for i in range(1351, 1359)]
+    local_initial = [{"role": m["role"], "content": m["content"]} for m in stored]
+    local_grown = local_initial + delta
+
+    def fake_http(endpoint, method="GET", payload=None, **kwargs):
+        if method == "GET":
+            from urllib.parse import parse_qs, urlparse
+
+            qs = parse_qs(urlparse(endpoint).query)
+            offset = int(qs.get("offset", ["0"])[0])
+            limit = int(qs.get("limit", ["500"])[0])
+            assert limit <= nmem_shared.THREAD_SYNC_TAIL_WINDOW
+            return {
+                "id": "long-conv",
+                "space_id": "work",
+                "total_messages": len(stored),
+                "messages": stored[offset : offset + limit],
+            }
+        if endpoint == "/threads/long-conv/append":
+            assert payload["expected_message_count"] == len(stored)
+            start = len(stored)
+            for idx, msg in enumerate(payload["messages"]):
+                stored.append({"id": f"msgocc_{start + idx}", **msg})
+            return {"success": True, "messages_added": len(payload["messages"]), "total_messages": len(stored)}
+        raise AssertionError(f"Unexpected call: {method} {endpoint}")
+
     with (
         patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
-        patch.object(nmem_shared, "http_request", side_effect=responses) as mock_http,
+        patch.object(nmem_shared, "http_request", side_effect=fake_http) as mock_http,
         patch.object(nmem_shared, "run_nmem_command") as mock_cli,
     ):
-        assert nmem_shared.sync_thread_capture("long-conv", "Long Thread", local, "work") == (True, True)
+        # 1. Unknown history verifies the full prefix across bounded <=32 pages and saves a checkpoint.
+        assert nmem_shared.sync_thread_capture("long-conv", "Long Thread", local_initial, "work") == (True, True)
+        mock_cli.assert_not_called()
+
+        # 2. Subsequent turn with 8 new messages uses the verified checkpoint in O(1) without rescanning 1,351 rows.
+        mock_http.reset_mock()
+        assert nmem_shared.sync_thread_capture("long-conv", "Long Thread", local_grown, "work") == (True, True)
         mock_cli.assert_not_called()
 
     endpoints = [c.args[0] for c in mock_http.call_args_list]
@@ -3360,7 +3400,6 @@ def test_long_thread_divergent_history_fails_without_full_fetch():
 
     responses = [
         {"id": "div-conv", "space_id": "work", "total_messages": 1351, "messages": []},
-        {"id": "div-conv", "space_id": "work", "total_messages": 1351, "messages": stored[1319:1351]},
         {"id": "div-conv", "space_id": "work", "total_messages": 1351, "messages": stored[0:32]},
     ]
     with (
@@ -3373,14 +3412,16 @@ def test_long_thread_divergent_history_fails_without_full_fetch():
     endpoints = [c.args[0] for c in mock_http.call_args_list]
     assert endpoints == [
         "/threads/div-conv?space_id=work&limit=0",
-        "/threads/div-conv?space_id=work&offset=1319&limit=32",
         "/threads/div-conv?space_id=work&limit=32",
     ]
 
 
-def test_long_thread_mid_history_divergence_binary_searches_bounded_windows():
+@pytest.mark.parametrize("single_edit", [False, True], ids=["rewritten-suffix", "unchanged-tail"])
+def test_long_thread_mid_history_divergence_uses_first_differing_row(single_edit):
     stored = [{"role": "user", "content": f"m-{i}"} for i in range(150)]
     local = [*stored[:60], *[{"role": "user", "content": f"edited-{i}"} for i in range(60, 150)]]
+    if single_edit:
+        local[61:] = stored[61:]
 
     def fake_http(endpoint, method="GET", payload=None, **kwargs):
         if method == "GET":
@@ -3399,7 +3440,7 @@ def test_long_thread_mid_history_divergence_binary_searches_bounded_windows():
         if endpoint == "/threads/mid-conv/reconcile-tail":
             assert payload["matched_count"] == 60
             assert payload["messages"] == local[60:]
-            stored[:] = local
+            stored[payload["matched_count"] :] = payload["messages"]
             return {"success": True}
         raise AssertionError(f"Unexpected call: {method} {endpoint}")
 
@@ -3409,38 +3450,136 @@ def test_long_thread_mid_history_divergence_binary_searches_bounded_windows():
     ):
         assert nmem_shared.sync_thread_capture("mid-conv", "Mid Edit", local, "work") == (True, True)
     assert any(c.args[0] == "/threads/mid-conv/reconcile-tail" for c in mock_http.call_args_list)
+    assert stored == local
 
 
-def test_cli_long_thread_append_uses_bounded_show_and_idempotency_key():
+def test_verified_checkpoint_invalidates_on_local_edit_remote_tail_id_change_and_unapplied_reconcile():
+    stored = [{"id": f"v1_{i}", "role": "user", "content": f"m-{i}"} for i in range(150)]
+    base_local = [{"role": "user", "content": f"m-{i}"} for i in range(150)]
+    apply_reconcile = {"enabled": True}
+
+    def fake_http(endpoint, method="GET", payload=None, **kwargs):
+        if method == "GET":
+            from urllib.parse import parse_qs, urlparse
+
+            qs = parse_qs(urlparse(endpoint).query)
+            offset = int(qs.get("offset", ["0"])[0])
+            limit = int(qs.get("limit", ["500"])[0])
+            assert limit <= nmem_shared.THREAD_SYNC_TAIL_WINDOW
+            return {
+                "id": "cp-conv",
+                "space_id": "work",
+                "total_messages": len(stored),
+                "messages": stored[offset : offset + limit],
+            }
+        if endpoint == "/threads/cp-conv/reconcile-tail":
+            if apply_reconcile["enabled"]:
+                start = payload["matched_count"]
+                stored[start:] = [{"id": f"v2_{start + i}", **msg} for i, msg in enumerate(payload["messages"])]
+            return {"success": True}
+        raise AssertionError(f"Unexpected call: {method} {endpoint}")
+
+    with (
+        patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
+        patch.object(nmem_shared, "http_request", side_effect=fake_http) as mock_http,
+    ):
+        # Establish verified checkpoint for 150 rows.
+        assert nmem_shared.sync_thread_capture("cp-conv", "CP", base_local, "work") == (True, True)
+
+        # 1. Local single interior edit with unchanged tail invalidates local prefix_hash and reconciles row 60.
+        edited_local = [*base_local[:60], {"role": "user", "content": "local-edit-60"}, *base_local[61:]]
+        assert nmem_shared.sync_thread_capture("cp-conv", "CP", edited_local, "work") == (True, True)
+        assert [{"role": m["role"], "content": m["content"]} for m in stored] == edited_local
+
+        # 2. Out-of-band server reconcile-tail changes row 60 and replaces tail message IDs while keeping tail text.
+        stored[60]["content"] = "remote-edit-60"
+        for idx in range(60, 150):
+            stored[idx]["id"] = f"oob_{idx}"
+        mock_http.reset_mock()
+        assert nmem_shared.sync_thread_capture("cp-conv", "CP", edited_local, "work") == (True, True)
+        assert any(c.args[0] == "/threads/cp-conv/reconcile-tail" for c in mock_http.call_args_list)
+        assert [{"role": m["role"], "content": m["content"]} for m in stored] == edited_local
+
+        # 3. Unapplied reconcile-tail on an unchanged-tail edit fails write-boundary readback at offset 60.
+        apply_reconcile["enabled"] = False
+        unapplied_local = [*edited_local[:60], {"role": "user", "content": "unapplied-60"}, *edited_local[61:]]
+        assert nmem_shared.sync_thread_capture("cp-conv", "CP", unapplied_local, "work") == (False, True)
+        assert nmem_shared.get_last_sync_failure_reason() == "readback_failed"
+
+
+def test_cli_long_thread_unknown_history_checkpoint_and_interior_edit():
     stored = [{"role": "user", "content": f"m-{i}"} for i in range(95)]
-    delta = [{"role": "user", "content": f"m-{i}"} for i in range(95, 100)]
-    local = stored + delta
+    delta_1 = [{"role": "user", "content": f"m-{i}"} for i in range(95, 100)]
+    delta_2 = [{"role": "user", "content": f"m-{i}"} for i in range(100, 105)]
+    local_100 = stored + delta_1
+    local_105 = local_100 + delta_2
 
-    cli_responses = [
-        subprocess.CompletedProcess([], 0, json.dumps({"id": "cli-long", "total_messages": 95, "messages": []}), ""),
-        subprocess.CompletedProcess(
-            [], 0, json.dumps({"id": "cli-long", "total_messages": 95, "messages": stored[63:95]}), ""
-        ),
-        subprocess.CompletedProcess([], 0, '{"success": true}', ""),
-        subprocess.CompletedProcess(
-            [], 0, json.dumps({"id": "cli-long", "total_messages": 100, "messages": local[68:100]}), ""
-        ),
-    ]
+    def fake_cli(args, **kwargs):
+        if args[:3] == ["--json", "t", "show"]:
+            limit = int(args[args.index("--limit") + 1]) if "--limit" in args else len(stored)
+            offset = int(args[args.index("--offset") + 1]) if "--offset" in args else 0
+            assert limit <= nmem_shared.THREAD_SYNC_TAIL_WINDOW
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps(
+                    {
+                        "id": "cli-long",
+                        "created_at": "2026-11-28T00:00:00Z",
+                        "total_messages": len(stored),
+                        "messages": stored[offset : offset + limit],
+                    }
+                ),
+                "",
+            )
+        if args[:3] == ["t", "append", "cli-long"]:
+            assert "--idempotency-key" in args
+            appended = json.loads(args[args.index("-m") + 1])
+            stored.extend(appended)
+            return subprocess.CompletedProcess(args, 0, '{"success": true}', "")
+        raise AssertionError(f"Unexpected CLI call: {args}")
+
     with (
         patch.object(nmem_shared, "is_backend_unreachable", return_value=False),
         patch.object(nmem_shared, "http_request", return_value=None),
-        patch.object(nmem_shared, "run_nmem_command", side_effect=cli_responses) as mock_cli,
+        patch.object(nmem_shared, "run_nmem_command", side_effect=fake_cli) as mock_cli,
     ):
-        assert nmem_shared.sync_thread_capture("cli-long", "Long CLI", local) == (True, True)
+        # 1. Unknown history scans all 95 rows in bounded <=32 pages, appends 5 with idempotency key, and checkpoints.
+        assert nmem_shared.sync_thread_capture("cli-long", "Long CLI", local_100) == (True, True)
+        assert stored == local_100
+        calls_1 = [c.args[0] for c in mock_cli.call_args_list]
+        assert calls_1[0] == ["--json", "t", "show", "cli-long", "--limit", "0"]
+        assert calls_1[1] == ["--json", "t", "show", "cli-long", "--limit", "32"]
+        assert calls_1[2] == ["--json", "t", "show", "cli-long", "--limit", "32", "--offset", "32"]
+        assert calls_1[3] == ["--json", "t", "show", "cli-long", "--limit", "31", "--offset", "64"]
+        assert calls_1[4][:3] == ["t", "append", "cli-long"]
+        key_idx = calls_1[4].index("--idempotency-key")
+        assert calls_1[4][key_idx + 1] == nmem_shared.build_append_idempotency_key("cli-long", 95, delta_1)
+        assert calls_1[5] == ["--json", "t", "show", "cli-long", "--limit", "32", "--offset", "68"]
 
-    calls = [c.args[0] for c in mock_cli.call_args_list]
-    assert calls[0] == ["--json", "t", "show", "cli-long", "--limit", "0"]
-    assert calls[1] == ["--json", "t", "show", "cli-long", "--limit", "32", "--offset", "63"]
-    assert calls[2][:3] == ["t", "append", "cli-long"]
-    assert "--idempotency-key" in calls[2]
-    key_idx = calls[2].index("--idempotency-key")
-    assert calls[2][key_idx + 1] == nmem_shared.build_append_idempotency_key("cli-long", 95, delta)
-    assert calls[3] == ["--json", "t", "show", "cli-long", "--limit", "32", "--offset", "68"]
+        # 2. Subsequent append uses verified checkpoint in O(1).
+        mock_cli.reset_mock()
+        assert nmem_shared.sync_thread_capture("cli-long", "Long CLI", local_105) == (True, True)
+        assert stored == local_105
+        calls_2 = [c.args[0] for c in mock_cli.call_args_list]
+        assert calls_2[0] == ["--json", "t", "show", "cli-long", "--limit", "0"]
+        assert calls_2[1] == ["--json", "t", "show", "cli-long", "--limit", "32", "--offset", "68"]
+        assert calls_2[2][:3] == ["t", "append", "cli-long"]
+        assert calls_2[3] == ["--json", "t", "show", "cli-long", "--limit", "32", "--offset", "73"]
+
+        # 3. Single interior edit with unchanged tail must fail closed on CLI (both with and without checkpoint).
+        edited_interior = [*local_105[:40], {"role": "user", "content": "edited-40"}, *local_105[41:]]
+        mock_cli.reset_mock()
+        assert nmem_shared.sync_thread_capture("cli-long", "Long CLI", edited_interior) == (False, True)
+        assert nmem_shared.get_last_sync_failure_reason() == "divergent_history"
+        assert all(c.args[0][:2] != ["t", "append"] for c in mock_cli.call_args_list)
+
+        # Also verify unknown history (no checkpoint) with interior edit and unchanged tail fails closed on CLI.
+        nmem_shared.get_thread_sync_checkpoints_path().unlink(missing_ok=True)
+        mock_cli.reset_mock()
+        assert nmem_shared.sync_thread_capture("cli-long", "Long CLI", edited_interior) == (False, True)
+        assert nmem_shared.get_last_sync_failure_reason() == "divergent_history"
+        assert all(c.args[0][:2] != ["t", "append"] for c in mock_cli.call_args_list)
 
 
 def test_unsynced_retry_exponential_backoff_and_dead_letter_isolation(tmp_path, monkeypatch):
